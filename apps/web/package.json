@@ -1,0 +1,32 @@
+{
+  "name": "@web-scada/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit -p tsconfig.app.json && vite build",
+    "preview": "vite preview",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.app.json --pretty false"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
+    "@web-scada/core": "workspace:*",
+    "element-plus": "^2.9.4",
+    "konva": "^9.3.18",
+    "monaco-editor": "^0.56.0",
+    "pinia": "^2.3.1",
+    "three": "^0.172.0",
+    "vue": "^3.5.13",
+    "vue-konva": "^3.2.0",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "@types/three": "^0.172.0",
+    "@vitejs/plugin-vue": "^5.2.1",
+    "typescript": "~5.7.3",
+    "vite": "^6.0.11",
+    "vue-tsc": "^2.2.0"
+  }
+}

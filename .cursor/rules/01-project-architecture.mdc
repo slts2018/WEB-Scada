@@ -1,0 +1,48 @@
+---
+description: web-scada monorepo 架构与模块边界
+alwaysApply: true
+---
+
+# 01 · 项目架构
+
+## 仓库结构（事实）
+
+```text
+apps/web          Vue3 + Vite + Pinia + Konva/Three  （Designer / Runtime）
+apps/server       Fastify + mysql2 + Influx client   （API / WS / 资源）
+packages/core     共享契约（工程模型、Tag、动画连接、发布包）
+```
+
+- 包管理：pnpm workspace；Node >= 20  
+- **不是** Java/Spring；禁止擅自改成 Spring/微服务  
+
+## 依赖方向
+
+```text
+core ← web
+core ← server
+```
+
+禁止 `core` 依赖 web/server。业务类型优先放 `packages/core`。
+
+## 前后端边界
+
+| 层 | 职责 | 禁止 |
+|----|------|------|
+| web views/components | UI、交互 | 直连 DB、绕过 api client 拼底层 URL 混乱 |
+| web stores | 编辑态/运行态状态 | 复制一份与 core 冲突的工程模型 |
+| web shared/runtime | 绑定/动画解析 | 擅自改执行语义 |
+| server app/routes | HTTP/WS 入口 | 路由里堆复杂业务（逐步拆到 services） |
+| server services/db/store | 持久化、Tag 运行时、资源 | 改写契约字段含义 |
+
+## God 文件（已知，勿一次性重写）
+
+- `apps/web/src/stores/project.ts`
+- `apps/web/src/components/designer/Canvas2DBoard.vue`
+- `apps/server/src/app.ts`
+
+拆分必须：划界 → 抽最安全部分 → typecheck → 再继续。
+
+## 参考
+
+详见 `docs/代码规范与重构审计报告.md`（A/B/C 分级与 Batch 建议）。

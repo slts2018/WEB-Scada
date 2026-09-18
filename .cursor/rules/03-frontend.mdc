@@ -1,0 +1,47 @@
+---
+description: Vue3 前端编码规范（apps/web）
+globs: apps/web/**/*
+alwaysApply: false
+---
+
+# 03 · 前端（Vue3）
+
+## 技术事实
+
+- Vue 3 Composition API + `<script setup>` + TypeScript
+- Pinia、Vue Router、Element Plus、Konva、Three、Monaco
+- API：`shared/api/client.ts`（fetch）；实时：`stores/tag.ts`
+
+禁止擅自换：React、新状态库、新 UI 框架、新构建器。
+
+## 目录习惯
+
+| 路径 | 用途 |
+|------|------|
+| `views/` | Designer / Runtime 页 |
+| `components/designer|runtime|dialogs` | UI |
+| `stores/` | Pinia |
+| `shared/konva|three|runtime|api` | 画布/执行/HTTP |
+
+修改时跟随**该目录现有风格**（命名、错误处理、类型写法）。
+
+## 组件
+
+- UI 与业务尽量分离；组件过大时：抽 composable → 纯函数 → 子组件  
+- **禁止**一次性重写 `Canvas2DBoard` / `AnimationConnectionDialog` / `PropertyPanel`  
+- 保持 props / emits / 选中态 / 撤销栈行为兼容  
+
+## TypeScript
+
+- 优先明确类型；避免 `any`  
+- 禁止为消灭 `any` 制造过度泛型或不可读类型体操  
+
+## 异步
+
+- 优先 `async/await`；必须处理失败  
+- 禁止无意义 await、未处理 Promise、无界高并发  
+
+## 日志
+
+- 用户可见反馈用 Element Plus Message；调试勿向生产刷 `console.log`  
+- 工程日志走现有 `outputLog` store（若场景适用）

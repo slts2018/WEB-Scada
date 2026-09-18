@@ -1,0 +1,42 @@
+---
+description: 数据库与 REST/WS API 契约约束
+globs: apps/server/**/*,apps/web/src/shared/api/**/*,packages/core/**/*
+alwaysApply: false
+---
+
+# 04 · 数据库与 API
+
+## 数据库
+
+- MySQL：工程 / 发布 / tags 元数据（`mysql2` 参数化）  
+- Influx：Tag 历史（可选；不可用时不得破坏实时）  
+- 文件回退：`MYSQL_FALLBACK_FILE`  
+
+**未经用户明确要求禁止：**
+
+- 改表结构 / 字段类型 / 索引语义  
+- 改历史写入测量名或点位含义  
+- 换库或上 ORM  
+
+SQL 必须参数化；关注事务边界（多写才考虑事务，勿机械包裹）。
+
+## HTTP API
+
+冻结（除非用户要求变更并说明兼容）：
+
+- 路径与 Method  
+- 请求/响应字段与类型  
+- 错误 `{ error }` 形态与主要状态码  
+
+前端统一经 `shared/api/client.ts`，避免散落裸 fetch 拼出不一致行为。
+
+## WebSocket
+
+- 端点：`/api/ws/tags`  
+- 报文语义（如 `tag.delta`）属 **C 类冻结**  
+- 改订阅/广播前评估所有客户端（Designer 预览、Runtime）
+
+## 配置
+
+- 密钥走 `.env` / 现有 settings 机制；禁止硬编码密码/Token  
+- 勿擅自改部署配置机制；`.env` 勿提交  

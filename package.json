@@ -1,0 +1,24 @@
+{
+  "name": "web-scada",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Web 组态平台 — Designer / Runtime（含 2D + 3D）",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @web-scada/web --filter @web-scada/server dev",
+    "dev:web": "pnpm --filter @web-scada/web dev",
+    "dev:server": "pnpm --filter @web-scada/server dev",
+    "build": "pnpm --filter @web-scada/web build",
+    "preview": "pnpm --filter @web-scada/web preview",
+    "typecheck": "pnpm -r typecheck",
+    "pack:win": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/pack-windows.ps1",
+    "pack:win:node": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/pack-windows.ps1 -IncludeNode",
+    "pack:site": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/pack-site.ps1",
+    "pack:setup": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/pack-setup.ps1"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild", "vue-demi"]
+  }
+}
