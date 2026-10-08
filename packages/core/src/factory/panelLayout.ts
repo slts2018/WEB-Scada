@@ -61,12 +61,27 @@ export function clampPanelItemRect(
   rect: PanelItemRect,
   panelWidth: number,
   panelHeight: number,
+  minSize?: { width?: number; height?: number },
 ): PanelItemRect {
-  const width = Math.max(24, Math.min(rect.width, panelWidth))
-  const height = Math.max(16, Math.min(rect.height, panelHeight))
+  // 仅防 0/负值，不再强制大最小框（小面板/细线图形需要自由尺寸）
+  const minW = minSize?.width ?? 1
+  const minH = minSize?.height ?? 1
+  const width = Math.max(minW, Math.min(rect.width, panelWidth))
+  const height = Math.max(minH, Math.min(rect.height, panelHeight))
   const x = Math.max(0, Math.min(rect.x, Math.max(0, panelWidth - width)))
   const y = Math.max(0, Math.min(rect.y, Math.max(0, panelHeight - height)))
   return { x, y, width, height }
+}
+
+/** 各类型统一按 1px 下限钳制；文本仍可用更小测量结果 */
+export function clampPanelItemRectForType(
+  type: Object3DPanelItem['type'],
+  rect: PanelItemRect,
+  panelWidth: number,
+  panelHeight: number,
+): PanelItemRect {
+  void type
+  return clampPanelItemRect(rect, panelWidth, panelHeight, { width: 1, height: 1 })
 }
 
 /**
@@ -80,4 +95,32 @@ export function defaultPanelFontSize(panelWidth: number, panelHeight: number): n
   const byH = 12 * (h / DEFAULT_PANEL_CONTENT_HEIGHT)
   const fs = Math.min(byW, byH)
   return Math.round(Math.max(6, Math.min(22, fs)) * 10) / 10
+}
+
+/** 设计稿（400×280）下的默认标题栏高度 */
+export const DEFAULT_PANEL_TITLE_BAR_HEIGHT = 28
+
+/**
+ * 面板默认标题栏高度：相对 400×280 设计稿的 28px，随面板宽高同比缩放。
+ */
+export function defaultPanelTitleBarHeight(panelWidth: number, panelHeight: number): number {
+  const w = panelWidth > 0 ? panelWidth : DEFAULT_PANEL_CONTENT_WIDTH
+  const h = panelHeight > 0 ? panelHeight : DEFAULT_PANEL_CONTENT_HEIGHT
+  const byW = DEFAULT_PANEL_TITLE_BAR_HEIGHT * (w / DEFAULT_PANEL_CONTENT_WIDTH)
+  const byH = DEFAULT_PANEL_TITLE_BAR_HEIGHT * (h / DEFAULT_PANEL_CONTENT_HEIGHT)
+  const th = Math.min(byW, byH)
+  return Math.round(Math.max(14, Math.min(64, th)))
+}
+
+/**
+ * 标题栏实际高度：随面板自动缩放；若设置了更大的标题字号，再抬高以免裁切。
+ */
+export function resolvePanelTitleBarHeight(
+  panelWidth: number,
+  panelHeight: number,
+  titleFontSize?: number | null,
+): number {
+  const auto = defaultPanelTitleBarHeight(panelWidth, panelHeight)
+  if (titleFontSize == null || titleFontSize <= 0) return auto
+  return Math.max(auto, Math.ceil(titleFontSize * 1.45) + 6)
 }

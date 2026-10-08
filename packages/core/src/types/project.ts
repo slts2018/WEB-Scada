@@ -71,6 +71,8 @@ export interface Object3DPanelItem {
 /** 3D 跟镜头操作面板（CSS2D，始终朝向相机） */
 export interface Object3DPanel {
   title?: string
+  /** 标题字号（px）；缺省则继承面板按尺寸算出的默认字号 */
+  titleFontSize?: number
   /** 面板内容区宽度（px），默认 400 */
   width?: number
   /** 面板内容区高度（px，不含标题栏），默认 280 */
@@ -83,6 +85,8 @@ export interface Object3DPanel {
    * - fill：拉伸铺满
    */
   objectFit?: 'none' | 'contain' | 'cover' | 'fill'
+  /** 面板背景图（工程资源 id，kind=image|svg）；缺省为纯色底 */
+  backgroundResourceId?: string
   items: Object3DPanelItem[]
 }
 

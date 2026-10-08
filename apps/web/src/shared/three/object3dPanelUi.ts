@@ -3,11 +3,12 @@
  * 结构：host（CSS2D 定位）→ world-scale（按相机距离缩放）→ panel（内容）
  * 内容区为自由坐标布局（absolute），兼容旧工程无 x/y 时的流式兜底。
  */
-import type { Object3DNode, Object3DPanelItem } from '@web-scada/core'
+import type { Object3DNode, Object3DPanel, Object3DPanelItem } from '@web-scada/core'
 import {
   defaultPanelFontSize,
   resolvePanelContentSize,
   resolvePanelItemRect,
+  resolvePanelTitleBarHeight,
 } from '@web-scada/core'
 
 const STYLE_ID = 'scada-3d-panel-style'
@@ -26,22 +27,24 @@ export function ensureObject3dPanelStyles() {
 }
 .scada-3d-panel {
   box-sizing: border-box;
+  position: relative;
   min-width: 0;
   padding: 0;
-  border-radius: 8px;
-  border: 1px solid rgba(56, 189, 248, 0.45);
+  border-radius: 0;
+  border: none;
   background: rgba(15, 18, 26, 0.92);
   color: #e8edf7;
   font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   font-size: 12px;
   line-height: 1.35;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  box-shadow: none;
   pointer-events: auto;
   user-select: none;
   overflow: hidden;
 }
 .scada-3d-panel__title {
   box-sizing: border-box;
+  min-height: 14px;
   height: 28px;
   padding: 0 10px;
   display: flex;
@@ -49,7 +52,6 @@ export function ensureObject3dPanelStyles() {
   font-size: 1em;
   font-weight: 600;
   color: #7dd3fc;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.25);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -108,7 +110,7 @@ export function ensureObject3dPanelStyles() {
   height: 100%;
   margin: 0;
   padding: 0 8px;
-  border-radius: 6px;
+  border-radius: 0;
   border: 1px solid rgba(56, 189, 248, 0.55);
   background: rgba(14, 116, 144, 0.45);
   color: #e0f2fe;
@@ -127,21 +129,31 @@ export function ensureObject3dPanelStyles() {
 .scada-3d-panel--designer .scada-3d-panel__btn {
   cursor: default;
 }
-/* 手柄开启时：面板内容穿透，避免大面板挡住 TransformControls；标题仍可点选/双击编辑 */
+/* 手柄开启时：面板内容穿透，避免大面板挡住 TransformControls；顶边仍可点选/双击编辑 */
 .scada-3d-panel--designer.scada-3d-panel--pass-gizmo {
   pointer-events: none;
 }
-.scada-3d-panel--designer.scada-3d-panel--pass-gizmo .scada-3d-panel__title {
+.scada-3d-panel__hit {
+  display: none;
+}
+.scada-3d-panel--designer.scada-3d-panel--pass-gizmo .scada-3d-panel__hit {
+  display: block;
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 10px;
+  z-index: 5;
   pointer-events: auto;
   cursor: pointer;
 }
 .scada-3d-panel__img-wrap {
   width: 100%;
   height: 100%;
-  border-radius: 4px;
+  border-radius: 0;
   overflow: hidden;
-  background: rgba(30, 41, 59, 0.65);
-  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: transparent;
+  border: none;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -150,7 +162,7 @@ export function ensureObject3dPanelStyles() {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: none;
+  object-fit: contain;
 }
 .scada-3d-panel__img-placeholder {
   color: #64748b;
@@ -227,6 +239,45 @@ export type Object3dPanelDomHandlers = {
 
 function stopNav(e: Event) {
   e.stopPropagation()
+}
+
+/** 标题字号与标题栏高度；未设字号时字号继承面板默认，栏高随面板尺寸自动缩放 */
+export function applyPanelTitleTypography(
+  titleEl: HTMLElement,
+  panel?: Pick<Object3DPanel, 'titleFontSize' | 'width' | 'height'> | null,
+) {
+  const { width, height } = resolvePanelContentSize(panel?.width, panel?.height)
+  const fs = panel?.titleFontSize
+  if (fs != null && fs > 0) {
+    titleEl.style.fontSize = `${fs}px`
+  } else {
+    titleEl.style.fontSize = ''
+  }
+  titleEl.style.height = `${resolvePanelTitleBarHeight(width, height, fs)}px`
+}
+
+/** 面板背景图；无资源时恢复默认纯色 */
+export function applyPanelBackground(
+  el: HTMLElement,
+  panel?: Pick<Object3DPanel, 'backgroundResourceId'> | null,
+  resolveResourceUrl?: (resourceId: string) => string | undefined,
+) {
+  const id = panel?.backgroundResourceId?.trim()
+  const url = id && resolveResourceUrl ? resolveResourceUrl(id) : undefined
+  if (url) {
+    const safe = url.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+    el.style.backgroundImage = `url("${safe}")`
+    el.style.backgroundSize = 'cover'
+    el.style.backgroundPosition = 'center'
+    el.style.backgroundRepeat = 'no-repeat'
+    el.style.backgroundColor = 'rgba(15, 18, 26, 0.92)'
+  } else {
+    el.style.backgroundImage = ''
+    el.style.backgroundSize = ''
+    el.style.backgroundPosition = ''
+    el.style.backgroundRepeat = ''
+    el.style.backgroundColor = ''
+  }
 }
 
 /** 控件字号/颜色；未设置时继承面板按尺寸算出的默认字号 */
@@ -330,7 +381,8 @@ export function applyPanelItemContentFit(
     resetContentFitTransform(el)
     const img = el.matches('img') ? el : el.querySelector('img')
     if (img instanceof HTMLImageElement) {
-      img.style.objectFit = fit === 'none' ? 'none' : fit
+      // none 时图片按原尺寸会被裁切；默认改为 contain 完整显示
+      img.style.objectFit = fit === 'none' ? 'contain' : fit
     }
     return
   }
@@ -416,6 +468,7 @@ export function buildObject3dPanelElement(
   const { width, height: stageH } = resolvePanelContentSize(panel?.width, panel?.height)
   el.style.width = `${width}px`
   el.style.fontSize = `${defaultPanelFontSize(width, stageH)}px`
+  applyPanelBackground(el, panel, handlers.resolveResourceUrl)
 
   el.addEventListener('pointerdown', (e) => {
     stopNav(e)
@@ -428,15 +481,13 @@ export function buildObject3dPanelElement(
   })
   el.addEventListener('wheel', stopNav, { passive: true })
 
-  const title = panel?.title?.trim() || node.name || '面板'
-  const titleEl = document.createElement('div')
-  titleEl.className = 'scada-3d-panel__title'
-  titleEl.textContent = title
+  // 无标题栏；设计端手柄穿透时保留顶边点选条
   if (handlers.designerMode) {
-    titleEl.title = '双击编辑面板'
-    titleEl.style.cursor = 'pointer'
+    const hit = document.createElement('div')
+    hit.className = 'scada-3d-panel__hit'
+    hit.title = '双击编辑面板'
+    el.appendChild(hit)
   }
-  el.appendChild(titleEl)
 
   const stage = document.createElement('div')
   stage.className = 'scada-3d-panel__stage'

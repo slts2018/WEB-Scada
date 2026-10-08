@@ -66,6 +66,16 @@ export function collectResourceRefs(doc: ProjectDocument): ResourceRefHit[] {
             kind: 'image',
           })
         }
+        if (o.panel?.backgroundResourceId) {
+          hits.push({
+            resourceId: o.panel.backgroundResourceId,
+            pageId: page.id,
+            pageName: page.name,
+            ownerId: o.id,
+            ownerName: `${o.name}/面板背景`,
+            kind: 'image',
+          })
+        }
       })
     }
   }
@@ -123,6 +133,10 @@ export function replaceResourceRefs(
           })
           if (panelChanged) o.panel = { ...o.panel, items }
         }
+        if (o.panel?.backgroundResourceId === fromId) {
+          o.panel = { ...o.panel, backgroundResourceId: toId }
+          changed += 1
+        }
       })
     }
   }
@@ -157,6 +171,12 @@ export function clearResourceRefs(doc: ProjectDocument, resourceId: string): num
             return { ...it, resourceId: '' }
           })
           if (panelChanged) o.panel = { ...o.panel, items }
+        }
+        if (o.panel?.backgroundResourceId === resourceId) {
+          const next = { ...o.panel }
+          delete next.backgroundResourceId
+          o.panel = next
+          changed += 1
         }
       })
     }

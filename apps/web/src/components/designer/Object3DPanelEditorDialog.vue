@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import type { Object3DPanel, Object3DPanelItem } from '@web-scada/core'
 import {
-  clampPanelItemRect,
+  clampPanelItemRectForType,
   createDefaultObject3DPanel,
   DEFAULT_PANEL_CONTENT_HEIGHT,
   DEFAULT_PANEL_CONTENT_WIDTH,
@@ -18,6 +18,7 @@ import { useProjectStore } from '@/stores/project'
 import { useTagStore } from '@/stores/tag'
 import { formatTagOptionLabel } from '@/shared/runtime/tagLabel'
 import {
+  applyPanelBackground,
   applyPanelItemContentFit,
   applyPanelItemTypography,
   ensureObject3dPanelStyles,
@@ -49,11 +50,70 @@ const applyingHistory = ref(false)
 
 const previewHost = ref<HTMLElement | null>(null)
 const stageEl = ref<HTMLElement | null>(null)
-/** 画布相对逻辑尺寸的缩放（铺满时用） */
+const bgFileInput = ref<HTMLInputElement | null>(null)
+const imageFileInput = ref<HTMLInputElement | null>(null)
+const imageReplaceInput = ref<HTMLInputElement | null>(null)
+/** 上传图片控件时的落点（拖放时用）；点击左侧则自动排布 */
+const pendingImageAt = ref<{ x: number; y: number } | null>(null)
+/** 编辑画布显示缩放（仅预览，不改变工程逻辑尺寸） */
+const previewZoom = ref(1)
+/** 拖拽换算用：等于 previewZoom */
 const viewScale = ref({ x: 1, y: 1 })
-const TITLE_BAR_H = 28
+
+const PREVIEW_ZOOM_MIN = 0.25
+const PREVIEW_ZOOM_MAX = 16
+
+const titleBarH = computed(() => 0)
+
+const previewZoomPercent = computed(() => `${Math.round(previewZoom.value * 100)}%`)
 
 let hostResizeObserver: ResizeObserver | null = null
+let previewWheelTarget: HTMLElement | null = null
+
+function clampPreviewZoom(z: number): number {
+  const n = Math.min(PREVIEW_ZOOM_MAX, Math.max(PREVIEW_ZOOM_MIN, z))
+  return Math.round(n * 100) / 100
+}
+
+/** 按画布可用区域适配显示比例（逻辑尺寸不变） */
+function fitPreviewZoom() {
+  const host = previewHost.value
+  if (!host || !draft.value) {
+    previewZoom.value = 1
+    return
+  }
+  const pad = 40
+  const availW = Math.max(1, host.clientWidth - pad)
+  const availH = Math.max(1, host.clientHeight - pad)
+  const tw = Math.max(1, panelW.value)
+  const th = Math.max(1, titleBarH.value + panelH.value)
+  previewZoom.value = clampPreviewZoom(Math.min(availW / tw, availH / th))
+  nextTick(() => renderPreview())
+}
+
+function setPreviewZoom(z: number) {
+  const next = clampPreviewZoom(z)
+  if (next === previewZoom.value) return
+  previewZoom.value = next
+  renderPreview()
+}
+
+function onPreviewWheel(e: WheelEvent) {
+  if (!draft.value) return
+  e.preventDefault()
+  const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12
+  setPreviewZoom(previewZoom.value * factor)
+}
+
+function bindPreviewWheel(el: HTMLElement | null) {
+  if (previewWheelTarget) {
+    previewWheelTarget.removeEventListener('wheel', onPreviewWheel)
+    previewWheelTarget = null
+  }
+  if (!el) return
+  el.addEventListener('wheel', onPreviewWheel, { passive: false })
+  previewWheelTarget = el
+}
 
 const imageResources = computed(() =>
   project.document.resources.filter((r) => r.kind === 'image' || r.kind === 'svg'),
@@ -78,7 +138,7 @@ const selectedIndex = computed(() => {
 
 const selectedRect = computed(() => {
   if (!selectedItem.value || selectedIndex.value < 0) return null
-  return resolvePanelItemRect(selectedItem.value, selectedIndex.value)
+  return resolveDrawRect(selectedItem.value, selectedIndex.value)
 })
 
 const canUndo = computed(() => historyIndex.value > 0)
@@ -103,6 +163,70 @@ const dragState = ref<DragState | null>(null)
 
 function clonePanel(panel: Object3DPanel): Object3DPanel {
   return JSON.parse(JSON.stringify(panel)) as Object3DPanel
+}
+
+let labelMeasureCtx: CanvasRenderingContext2D | null = null
+
+/** 按字号测量文本外框，使选中框贴字（与 2D 文本框视觉接近） */
+function measurePanelLabelSize(text: string, fontSizePx: number): { width: number; height: number } {
+  if (typeof document !== 'undefined' && !labelMeasureCtx) {
+    const c = document.createElement('canvas')
+    labelMeasureCtx = c.getContext('2d')
+  }
+  const fs = Math.max(1, fontSizePx || 12)
+  const sample = text.trim() ? text : '字'
+  if (labelMeasureCtx) {
+    labelMeasureCtx.font = `${fs}px "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif`
+    const w = Math.ceil(labelMeasureCtx.measureText(sample).width)
+    return {
+      width: Math.max(1, w + 2),
+      height: Math.max(1, Math.ceil(fs * 1.35)),
+    }
+  }
+  return {
+    width: Math.max(1, Math.ceil(sample.length * fs * 0.95) + 2),
+    height: Math.max(1, Math.ceil(fs * 1.35)),
+  }
+}
+
+function labelFontSize(item: Pick<Object3DPanelItem, 'fontSize'>): number {
+  return item.fontSize != null && item.fontSize > 0 ? item.fontSize : panelBaseFontSize.value
+}
+
+/** 文本控件尺寸贴齐文字内容 */
+function hugLabelItem(
+  item: Object3DPanelItem,
+  contentW = panelW.value,
+  contentH = panelH.value,
+): Object3DPanelItem {
+  if (item.type !== 'label') return item
+  const size = measurePanelLabelSize(item.text || '', labelFontSize(item))
+  const base = resolvePanelItemRect(item, 0)
+  const next = clampPanelItemRectForType(
+    'label',
+    { x: base.x, y: base.y, width: size.width, height: size.height },
+    contentW,
+    contentH,
+  )
+  return { ...item, ...next }
+}
+
+function hugAllLabels(panel: Object3DPanel): Object3DPanel {
+  const { width, height } = resolvePanelContentSize(panel.width, panel.height)
+  return {
+    ...panel,
+    items: panel.items.map((it) =>
+      it.type === 'label' ? hugLabelItem(it, width, height) : it,
+    ),
+  }
+}
+
+/** 预览绘制用：文本始终按文字测量框，选中框贴字 */
+function resolveDrawRect(item: Object3DPanelItem, index: number) {
+  if (item.type === 'label') {
+    return resolvePanelItemRect(hugLabelItem(item, panelW.value, panelH.value), index)
+  }
+  return resolvePanelItemRect(item, index)
 }
 
 function snapshotKey(panel: Object3DPanel | null): string {
@@ -159,13 +283,21 @@ function setDraft(next: Object3DPanel | null) {
 
 function resetEditorState() {
   const src = obj.value?.panel
-  draft.value = src ? clonePanel(src) : null
+  const cloned = src ? clonePanel(src) : null
+  // 打开编辑器时文本框贴齐文字，避免默认大矩形选中框
+  draft.value = cloned ? hugAllLabels(cloned) : null
   selectedItemId.value = draft.value?.items[0]?.id ?? null
   rightTab.value = 'list'
   history.value = [snapshotKey(draft.value)]
   historyIndex.value = 0
   dragState.value = null
-  nextTick(() => renderPreview())
+  nextTick(() => {
+    if (draft.value) fitPreviewZoom()
+    else {
+      previewZoom.value = 1
+      renderPreview()
+    }
+  })
 }
 
 watch(
@@ -198,12 +330,16 @@ function ensureDraft(): Object3DPanel {
   return draft.value!
 }
 
-function nextCascadePos(panel: Object3DPanel, size: { width: number; height: number }) {
+function nextCascadePos(
+  panel: Object3DPanel,
+  size: { width: number; height: number },
+  type: Object3DPanelItem['type'] = 'label',
+) {
   const { width: w, height: h } = resolvePanelContentSize(panel.width, panel.height)
   const n = panel.items.length
   const x = 10 + (n % 4) * 12
   const y = 10 + n * 18
-  return clampPanelItemRect({ x, y, width: size.width, height: size.height }, w, h)
+  return clampPanelItemRectForType(type, { x, y, width: size.width, height: size.height }, w, h)
 }
 
 function createItem(
@@ -212,14 +348,18 @@ function createItem(
 ): Object3DPanelItem {
   const panel = ensureDraft()
   const count = panel.items.filter((it) => it.type === type).length + 1
-  const size = defaultPanelItemSize(type)
+  let size = defaultPanelItemSize(type)
+  if (type === 'label') {
+    size = measurePanelLabelSize(`文本${count}`, panelBaseFontSize.value)
+  }
   const rect = at
-    ? clampPanelItemRect(
+    ? clampPanelItemRectForType(
+        type,
         { x: at.x - size.width / 2, y: at.y - size.height / 2, ...size },
         panelW.value,
         panelH.value,
       )
-    : nextCascadePos(panel, size)
+    : nextCascadePos(panel, size, type)
 
   if (type === 'button') {
     return {
@@ -250,12 +390,17 @@ function createItem(
       ...rect,
     }
   }
-  return { id: newItemId(), type: 'label', text: `文本${count}`, ...rect }
+  return hugLabelItem({ id: newItemId(), type: 'label', text: `文本${count}`, ...rect })
 }
 
 function addItem(type: Object3DPanelItem['type'], at?: { x: number; y: number }) {
   // 面板不再提供「数值」控件（旧工程已有的仍可显示/编辑）
   if (type === 'value') return
+  if (type === 'image') {
+    pendingImageAt.value = at ?? null
+    imageFileInput.value?.click()
+    return
+  }
   const panel = ensureDraft()
   const item = createItem(type, at)
   setDraft({ ...panel, items: [...panel.items, item] })
@@ -263,7 +408,44 @@ function addItem(type: Object3DPanelItem['type'], at?: { x: number; y: number })
   rightTab.value = 'props'
 }
 
-function updateMeta(partial: Partial<Pick<Object3DPanel, 'title' | 'width' | 'height' | 'objectFit'>>) {
+async function onUploadPanelImage(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  const at = pendingImageAt.value
+  pendingImageAt.value = null
+  if (!file) return
+  try {
+    ensureDraft()
+    const resource = await project.addImageResource(file)
+    const panel = ensureDraft()
+    const item = createItem('image', at ?? undefined)
+    item.resourceId = resource.id
+    item.text = resource.name || item.text
+    setDraft({ ...panel, items: [...panel.items, item] })
+    selectedItemId.value = item.id
+    rightTab.value = 'props'
+  } catch (err) {
+    console.error(err)
+  }
+}
+
+async function onReplaceSelectedImage(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file || !selectedItem.value || selectedItem.value.type !== 'image') return
+  try {
+    const resource = await project.addImageResource(file)
+    updateItem({ resourceId: resource.id, text: resource.name || selectedItem.value.text })
+  } catch (err) {
+    console.error(err)
+  }
+}
+
+function updateMeta(
+  partial: Partial<Pick<Object3DPanel, 'width' | 'height' | 'objectFit' | 'backgroundResourceId'>>,
+) {
   const panel = ensureDraft()
   const next = { ...panel, ...partial }
   if (partial.width != null || partial.height != null) {
@@ -271,18 +453,47 @@ function updateMeta(partial: Partial<Pick<Object3DPanel, 'title' | 'width' | 'he
     next.width = sized.width
     next.height = sized.height
   }
+  if ('backgroundResourceId' in partial && !partial.backgroundResourceId) {
+    delete next.backgroundResourceId
+  }
   setDraft(next)
+}
+
+async function onUploadPanelBackground(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  try {
+    const resource = await project.addImageResource(file)
+    updateMeta({ backgroundResourceId: resource.id })
+  } catch (err) {
+    console.error(err)
+  }
+}
+
+function clearPanelBackground() {
+  updateMeta({ backgroundResourceId: undefined })
 }
 
 function updateItem(partial: Partial<Object3DPanelItem>) {
   if (!draft.value || !selectedItemId.value) return
   const items = draft.value.items.map((it) => {
     if (it.id !== selectedItemId.value) return it
-    const next = { ...it, ...partial }
+    let next = { ...it, ...partial }
     const idx = draft.value!.items.findIndex((x) => x.id === it.id)
-    const rect = resolvePanelItemRect(next, idx)
-    const clamped = clampPanelItemRect(rect, panelW.value, panelH.value)
-    return { ...next, ...clamped }
+    // 改文案/字号时，文本框贴齐文字
+    if (
+      next.type === 'label' &&
+      (partial.text !== undefined || partial.fontSize !== undefined)
+    ) {
+      next = hugLabelItem(next)
+    } else {
+      const rect = resolvePanelItemRect(next, idx)
+      const clamped = clampPanelItemRectForType(next.type, rect, panelW.value, panelH.value)
+      next = { ...next, ...clamped }
+    }
+    return next
   })
   setDraft({ ...draft.value, items })
 }
@@ -293,7 +504,8 @@ function patchItemRect(itemId: string, rect: { x: number; y: number; width?: num
     if (it.id !== itemId) return it
     const idx = draft.value!.items.findIndex((x) => x.id === it.id)
     const base = resolvePanelItemRect(it, idx)
-    const next = clampPanelItemRect(
+    const next = clampPanelItemRectForType(
+      it.type,
       {
         x: rect.x,
         y: rect.y,
@@ -365,8 +577,8 @@ function itemDisplayName(item: Object3DPanelItem, index: number) {
   return item.text?.trim() || `${itemTypeLabel(item.type)}${index + 1}`
 }
 
-function onPaletteDragStart(e: DragEvent, type: Object3DPanelItem['type']) {
-  e.dataTransfer?.setData('text/plain', `${PALETTE_PREFIX}${type}`)
+function onPaletteDragStart(e: DragEvent, payload: string) {
+  e.dataTransfer?.setData('text/plain', `${PALETTE_PREFIX}${payload}`)
   e.dataTransfer!.effectAllowed = 'copy'
 }
 
@@ -389,15 +601,11 @@ function onStageDragOver(e: DragEvent) {
 function onStageDrop(e: DragEvent) {
   const raw = e.dataTransfer?.getData('text/plain') || ''
   if (!raw.startsWith(PALETTE_PREFIX)) return
-  const type = raw.slice(PALETTE_PREFIX.length) as Object3DPanelItem['type']
-  if (!['label', 'button', 'image'].includes(type)) return
+  const payload = raw.slice(PALETTE_PREFIX.length)
   e.preventDefault()
-  const pt = stageLocalPoint(e)
-  if (!pt) {
-    addItem(type)
-    return
-  }
-  addItem(type, pt)
+  const pt = stageLocalPoint(e) || undefined
+  if (!['label', 'button', 'image'].includes(payload)) return
+  addItem(payload as Object3DPanelItem['type'], pt)
 }
 
 function syncItemDom(itemId: string, opts?: { applyFit?: boolean }) {
@@ -407,7 +615,7 @@ function syncItemDom(itemId: string, opts?: { applyFit?: boolean }) {
   if (!item || idx < 0) return
   const node = stageEl.value.querySelector(`[data-item-id="${CSS.escape(itemId)}"]`) as HTMLElement | null
   if (!node) return
-  const rect = resolvePanelItemRect(item, idx)
+  const rect = resolveDrawRect(item, idx)
   const prevW = parseFloat(node.style.width) || 0
   const prevH = parseFloat(node.style.height) || 0
   node.style.left = `${rect.x}px`
@@ -534,7 +742,7 @@ function clearItemFontSize() {
     if (it.id !== selectedItemId.value) return it
     const next = { ...it }
     delete next.fontSize
-    return next
+    return next.type === 'label' ? hugLabelItem(next) : next
   })
   setDraft({ ...draft.value, items })
 }
@@ -566,27 +774,26 @@ function renderPreview() {
   const panel = draft.value
   const logicalW = panelW.value
   const logicalH = panelH.value
-  const boxW = Math.max(1, host.clientWidth)
-  const boxH = Math.max(1, host.clientHeight)
-  const totalH = TITLE_BAR_H + logicalH
-  const scaleX = boxW / logicalW
-  const scaleY = boxH / totalH
-  viewScale.value = { x: scaleX, y: scaleY }
+  const totalH = logicalH
+  const z = clampPreviewZoom(previewZoom.value)
+  previewZoom.value = z
+  viewScale.value = { x: z, y: z }
+
+  const wrap = document.createElement('div')
+  wrap.className = 'preview-zoom-wrap'
+  wrap.style.width = `${logicalW * z}px`
+  wrap.style.height = `${totalH * z}px`
+  wrap.style.setProperty('--preview-zoom', String(z))
 
   const shell = document.createElement('div')
   shell.className = 'scada-3d-panel scada-3d-panel--designer preview-panel'
   shell.style.width = `${logicalW}px`
   shell.style.height = `${totalH}px`
   shell.style.fontSize = `${defaultPanelFontSize(logicalW, logicalH)}px`
-  shell.style.transform = `scale(${scaleX}, ${scaleY})`
+  shell.style.transform = `scale(${z})`
   shell.style.transformOrigin = '0 0'
-  shell.style.marginTop = '0'
-
-  const titleEl = document.createElement('div')
-  titleEl.className = 'scada-3d-panel__title'
-  titleEl.style.height = `${TITLE_BAR_H}px`
-  titleEl.textContent = panel.title?.trim() || obj.value?.name || '面板'
-  shell.appendChild(titleEl)
+  shell.style.margin = '0'
+  applyPanelBackground(shell, panel, (id) => project.getResourceUrl(id))
 
   const stage = document.createElement('div')
   stage.className = 'scada-3d-panel__stage preview-stage'
@@ -604,7 +811,7 @@ function renderPreview() {
 
   const panelFit = resolvePanelObjectFit(panel)
   panel.items.forEach((item, index) => {
-    const rect = resolvePanelItemRect(item, index)
+    const rect = resolveDrawRect(item, index)
     const selected = item.id === selectedItemId.value
     let node: HTMLElement
     if (item.type === 'label') {
@@ -659,11 +866,27 @@ function renderPreview() {
     applyPanelItemTypography(node, item)
     applyPanelItemContentFit(node, item, panelFit)
     bindItemDrag(node, item.id)
-    if (selected) attachResizeHandles(node, item.id)
+    // 文本框贴字，不提供四角拉伸（改字号即可）
+    if (selected && item.type !== 'label') attachResizeHandles(node, item.id)
     stage.appendChild(node)
   })
 
-  host.appendChild(shell)
+  wrap.appendChild(shell)
+  host.appendChild(wrap)
+
+  // 把测量后的文本尺寸写回草稿，避免属性栏宽高仍是旧大框
+  const hugged = hugAllLabels(panel)
+  const sizeChanged = hugged.items.some((it, i) => {
+    const old = panel.items[i]
+    return (
+      !!old &&
+      it.type === 'label' &&
+      (old.width !== it.width || old.height !== it.height)
+    )
+  })
+  if (sizeChanged) {
+    draft.value = hugged
+  }
 }
 
 function ensureHostResizeObserver() {
@@ -676,6 +899,7 @@ function ensureHostResizeObserver() {
 
 watch(previewHost, (el, prev) => {
   if (prev && hostResizeObserver) hostResizeObserver.unobserve(prev)
+  bindPreviewWheel(el)
   if (el) {
     ensureHostResizeObserver()
     hostResizeObserver?.observe(el)
@@ -687,6 +911,7 @@ watch(selectedItemId, () => nextTick(() => renderPreview()))
 
 onBeforeUnmount(() => {
   dragState.value = null
+  bindPreviewWheel(null)
   hostResizeObserver?.disconnect()
   hostResizeObserver = null
 })
@@ -752,7 +977,7 @@ function disablePanel() {
             type="button"
             class="palette-item"
             draggable="true"
-            title="拖到画布，或点击添加"
+            title="点击上传图片，或拖到画布后上传"
             @click="addItem('image')"
             @dragstart="(e) => onPaletteDragStart(e, 'image')"
           >
@@ -771,7 +996,14 @@ function disablePanel() {
             <span class="palette-label">按钮</span>
           </button>
         </div>
-        <p class="palette-hint">拖到中间画布任意位置</p>
+        <p class="palette-hint">拖到中间画布任意位置；图片支持点击上传</p>
+        <input
+          ref="imageFileInput"
+          class="hidden-file"
+          type="file"
+          accept="image/*,.svg"
+          @change="onUploadPanelImage"
+        />
       </aside>
 
       <section class="workspace">
@@ -796,6 +1028,32 @@ function disablePanel() {
             @click="moveSelected(1)"
           >
             &#9650;
+          </button>
+          <span class="tool-sep" />
+          <button
+            type="button"
+            class="tool-btn"
+            :disabled="!draft || previewZoom <= PREVIEW_ZOOM_MIN"
+            title="缩小"
+            @click="setPreviewZoom(previewZoom / 1.2)"
+          >
+            −
+          </button>
+          <span class="zoom-label" :title="'滚轮缩放预览，工程尺寸不变'">{{ previewZoomPercent }}</span>
+          <button
+            type="button"
+            class="tool-btn"
+            :disabled="!draft || previewZoom >= PREVIEW_ZOOM_MAX"
+            title="放大"
+            @click="setPreviewZoom(previewZoom * 1.2)"
+          >
+            +
+          </button>
+          <button type="button" class="tool-btn tool-btn-text" :disabled="!draft" title="适应画布" @click="fitPreviewZoom">
+            适应
+          </button>
+          <button type="button" class="tool-btn tool-btn-text" :disabled="!draft" title="实际像素 100%" @click="setPreviewZoom(1)">
+            1:1
           </button>
         </div>
         <div class="canvas">
@@ -846,15 +1104,6 @@ function disablePanel() {
           <template v-else>
             <div class="prop-block">
               <div class="prop-block-title">面板</div>
-              <label class="field">
-                <span>标题</span>
-                <el-input
-                  size="small"
-                  :model-value="draft.title || ''"
-                  placeholder="默认用对象名"
-                  @update:model-value="(v: string) => updateMeta({ title: v })"
-                />
-              </label>
               <div class="field-row">
                 <label class="field">
                   <span>宽</span>
@@ -894,6 +1143,39 @@ function disablePanel() {
                   <el-option label="拉伸铺满" value="fill" />
                 </el-select>
               </label>
+              <p class="font-hint">图片默认完整适应控件框；可拖四角放大框体</p>
+              <label class="field">
+                <span>背景图片</span>
+                <div class="bg-row">
+                  <el-select
+                    size="small"
+                    filterable
+                    clearable
+                    class="bg-select"
+                    :model-value="draft.backgroundResourceId || ''"
+                    placeholder="选择或上传"
+                    @update:model-value="(v: string) => updateMeta({ backgroundResourceId: v || undefined })"
+                  >
+                    <el-option v-for="r in imageResources" :key="r.id" :label="r.name" :value="r.id" />
+                  </el-select>
+                  <el-button size="small" @click="bgFileInput?.click()">上传</el-button>
+                  <el-button
+                    v-if="draft.backgroundResourceId"
+                    size="small"
+                    text
+                    @click="clearPanelBackground"
+                  >
+                    清除
+                  </el-button>
+                  <input
+                    ref="bgFileInput"
+                    class="hidden-file"
+                    type="file"
+                    accept="image/*,.svg"
+                    @change="onUploadPanelBackground"
+                  />
+                </div>
+              </label>
               <el-button size="small" type="danger" plain @click="disablePanel">关闭面板</el-button>
             </div>
 
@@ -929,16 +1211,16 @@ function disablePanel() {
                   />
                 </label>
               </div>
-              <div class="field-row">
+              <div v-if="selectedItem.type !== 'label'" class="field-row">
                 <label class="field">
                   <span>宽</span>
                   <el-input-number
                     size="small"
                     :model-value="selectedRect.width"
-                    :min="24"
+                    :min="1"
                     :step="1"
                     controls-position="right"
-                    @update:model-value="(v: number | undefined) => updateItem({ width: Number(v) || 24 })"
+                    @update:model-value="(v: number | undefined) => updateItem({ width: Math.max(1, Number(v) || 1) })"
                   />
                 </label>
                 <label class="field">
@@ -946,13 +1228,14 @@ function disablePanel() {
                   <el-input-number
                     size="small"
                     :model-value="selectedRect.height"
-                    :min="16"
+                    :min="1"
                     :step="1"
                     controls-position="right"
-                    @update:model-value="(v: number | undefined) => updateItem({ height: Number(v) || 16 })"
+                    @update:model-value="(v: number | undefined) => updateItem({ height: Math.max(1, Number(v) || 1) })"
                   />
                 </label>
               </div>
+              <p v-else class="font-hint">文本框随文字自动贴齐（{{ selectedRect.width }}×{{ selectedRect.height }}）</p>
               <template v-if="selectedItem.type !== 'image'">
                 <div class="field-row">
                   <label class="field">
@@ -960,11 +1243,11 @@ function disablePanel() {
                     <el-input-number
                       size="small"
                       :model-value="selectedItem.fontSize ?? panelBaseFontSize"
-                      :min="4"
+                      :min="1"
                       :max="72"
                       :step="1"
                       controls-position="right"
-                      @update:model-value="(v: number | undefined) => updateItem({ fontSize: Math.max(4, Number(v) || panelBaseFontSize) })"
+                      @update:model-value="(v: number | undefined) => updateItem({ fontSize: Math.max(1, Number(v) || panelBaseFontSize) })"
                     />
                   </label>
                   <div class="field field-inline">
@@ -999,16 +1282,27 @@ function disablePanel() {
               </template>
               <label v-if="selectedItem.type === 'image'" class="field">
                 <span>图片资源</span>
-                <el-select
-                  size="small"
-                  filterable
-                  clearable
-                  :model-value="selectedItem.resourceId || ''"
-                  placeholder="选择工程图片"
-                  @update:model-value="(v: string) => updateItem({ resourceId: v || '' })"
-                >
-                  <el-option v-for="r in imageResources" :key="r.id" :label="r.name" :value="r.id" />
-                </el-select>
+                <div class="bg-row">
+                  <el-select
+                    size="small"
+                    filterable
+                    clearable
+                    class="bg-select"
+                    :model-value="selectedItem.resourceId || ''"
+                    placeholder="选择或上传"
+                    @update:model-value="(v: string) => updateItem({ resourceId: v || '' })"
+                  >
+                    <el-option v-for="r in imageResources" :key="r.id" :label="r.name" :value="r.id" />
+                  </el-select>
+                  <el-button size="small" @click="imageReplaceInput?.click()">上传</el-button>
+                  <input
+                    ref="imageReplaceInput"
+                    class="hidden-file"
+                    type="file"
+                    accept="image/*,.svg"
+                    @change="onReplaceSelectedImage"
+                  />
+                </div>
               </label>
               <label v-if="selectedItem.type === 'value' || selectedItem.type === 'button'" class="field">
                 <span>Tag</span>
@@ -1235,6 +1529,20 @@ function disablePanel() {
   background: rgba(100, 116, 139, 0.45);
 }
 
+.zoom-label {
+  min-width: 44px;
+  text-align: center;
+  font-size: 12px;
+  color: #94a3b8;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.tool-btn-text {
+  padding: 0 8px;
+  font-size: 12px;
+}
+
 .canvas {
   flex: 1;
   min-height: 0;
@@ -1250,7 +1558,12 @@ function disablePanel() {
   inset: 0;
   width: 100%;
   height: 100%;
-  overflow: hidden;
+  overflow: auto;
+  box-sizing: border-box;
+  padding: 16px;
+  display: flex;
+  align-items: safe center;
+  justify-content: safe center;
 }
 
 .preview-host :deep(.preview-empty) {
@@ -1264,43 +1577,44 @@ function disablePanel() {
 }
 
 .preview-host :deep(.is-selected) {
-  outline: 2px solid #3d8bfd;
-  outline-offset: 1px;
+  /* 与 2D Transformer 类似：约 1px 边框；除以预览缩放保持屏幕视觉大小 */
+  outline: calc(1px / var(--preview-zoom, 1)) solid #3d8bfd;
+  outline-offset: 0;
 }
 
 .preview-host :deep(.panel-resize-handle) {
   position: absolute;
-  width: 9px;
-  height: 9px;
-  background: #3d8bfd;
-  border: 1px solid #fff;
-  border-radius: 1px;
+  width: calc(8px / var(--preview-zoom, 1));
+  height: calc(8px / var(--preview-zoom, 1));
+  background: #fff;
+  border: calc(1px / var(--preview-zoom, 1)) solid #3d8bfd;
+  border-radius: 0;
   z-index: 30;
   box-sizing: border-box;
   pointer-events: auto;
 }
 
 .preview-host :deep(.panel-resize-handle--nw) {
-  left: -5px;
-  top: -5px;
+  left: calc(-4px / var(--preview-zoom, 1));
+  top: calc(-4px / var(--preview-zoom, 1));
   cursor: nwse-resize;
 }
 
 .preview-host :deep(.panel-resize-handle--ne) {
-  right: -5px;
-  top: -5px;
+  right: calc(-4px / var(--preview-zoom, 1));
+  top: calc(-4px / var(--preview-zoom, 1));
   cursor: nesw-resize;
 }
 
 .preview-host :deep(.panel-resize-handle--sw) {
-  left: -5px;
-  bottom: -5px;
+  left: calc(-4px / var(--preview-zoom, 1));
+  bottom: calc(-4px / var(--preview-zoom, 1));
   cursor: nesw-resize;
 }
 
 .preview-host :deep(.panel-resize-handle--se) {
-  right: -5px;
-  bottom: -5px;
+  right: calc(-4px / var(--preview-zoom, 1));
+  bottom: calc(-4px / var(--preview-zoom, 1));
   cursor: nwse-resize;
 }
 
@@ -1312,11 +1626,30 @@ function disablePanel() {
   cursor: default;
   border-radius: 0 !important;
   max-width: none !important;
-  box-shadow: none !important;
-  border: none !important;
   margin: 0 !important;
-  background:
-    linear-gradient(180deg, rgba(14, 116, 144, 0.55) 0%, rgba(8, 47, 73, 0.95) 28%, rgba(15, 23, 42, 0.98) 100%) !important;
+  border: none !important;
+  box-shadow: none !important;
+}
+
+.bg-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.bg-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.hidden-file {
+  display: none;
+}
+
+.preview-host :deep(.preview-zoom-wrap) {
+  position: relative;
+  flex-shrink: 0;
 }
 
 .side {
