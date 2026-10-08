@@ -70,6 +70,8 @@ export const useProjectStore = defineStore('project', () => {
   const animationConnectionTab = ref<'default' | 'property' | 'event'>('default')
   /** 打开 3D「跟镜头面板」独立编辑器 */
   const object3dPanelEditorOpen = ref(false)
+  /** 打开 3D「编辑模型」材质/属性对话框 */
+  const object3dModelEditorOpen = ref(false)
   /** Flight 风格画布绘制工具：折线 / 多边形 / 管道 */
   const drawTool = ref<DrawToolType | null>(null)
   /** 设计端实时预览（用 Tag 驱动动画连接，不写回工程） */
@@ -745,6 +747,21 @@ export const useProjectStore = defineStore('project', () => {
     object3dPanelEditorOpen.value = false
   }
 
+  function openObject3dModelEditor() {
+    if (!selectedObject3dIds.value.length) return
+    if (selectedObject3dIds.value.length > 1) {
+      selectedObject3dIds.value = [selectedObject3dIds.value[0]]
+    }
+    const obj = selectedObject3d.value
+    // 纯面板锚点无外观可编
+    if (obj?.panel && !obj.modelResourceId) return
+    object3dModelEditorOpen.value = true
+  }
+
+  function closeObject3dModelEditor() {
+    object3dModelEditorOpen.value = false
+  }
+
   /** 对象树拖拽改层级：fromIndex/toIndex 为图层 widgets 数组下标 */
   function moveWidgetIndex(fromIndex: number, toIndex: number) {
     const page = activePage2d.value
@@ -1116,21 +1133,25 @@ export const useProjectStore = defineStore('project', () => {
     const oz = (Math.floor(slot / 3) - 1) * 1.2
     obj.transform.position = [cx + ox, y, cz + oz]
 
-    // 模型：按包围盒自动均匀缩放到场景友好尺寸（各模型系数不同，不是一刀切）
+    // 模型：按毫米建模 → 场景米；scale=[1,1,1] 即真实尺寸（sourceSize×0.001）
     if (opts?.modelResourceId) {
       const url = getResourceUrl(opts.modelResourceId)
       if (url) {
         try {
-          const { measureModelFitScale } = await import('@/shared/three/modelFit')
-          const { scale, maxDim } = await measureModelFitScale(url)
-          obj.transform.scale = [scale, scale, scale]
-          // 底部贴近地面：用缩放后的大致半高（maxDim*scale/2）
-          const halfH = (maxDim * scale) / 2
+          const { measureModelSourceSize } = await import('@/shared/three/modelFit')
+          const { sizeMetersFromObject3d } = await import('@web-scada/core')
+          const { sourceSize } = await measureModelSourceSize(url)
+          obj.sourceSize = sourceSize
+          obj.sourceUnit = 'mm'
+          obj.transform.scale = [1, 1, 1]
+          // 底部贴近地面：米制高度的一半
+          const sizeM = sizeMetersFromObject3d(obj)
+          const halfH = sizeM[1] / 2
           if (Number.isFinite(halfH) && halfH > 0) {
             obj.transform.position[1] = halfH
           }
         } catch {
-          /* 测量失败则保持 scale=1 */
+          /* 测量失败则保持 scale=1，无 sourceSize */
         }
       }
     }
@@ -2003,6 +2024,7 @@ log('script ready · ' + (context.trigger || 'try'))
     animationConnectionOpen,
     animationConnectionTab,
     object3dPanelEditorOpen,
+    object3dModelEditorOpen,
     drawTool,
     previewLive,
     gizmoMode3d,
@@ -2052,6 +2074,8 @@ log('script ready · ' + (context.trigger || 'try'))
     closeAnimationConnection,
     openObject3dPanelEditor,
     closeObject3dPanelEditor,
+    openObject3dModelEditor,
+    closeObject3dModelEditor,
     moveWidgetIndex,
     pasteClipboard,
     addGuide,

@@ -19,8 +19,15 @@ export interface Transform3D {
   position: [number, number, number]
   /** 欧拉角，单位：度（写入 Three.js 时再转弧度） */
   rotation: [number, number, number]
+  /**
+   * Three.js 本地缩放倍率（相对 sourceSize）。
+   * 属性栏「缩放」展示/编辑的是米制尺寸，不是该字段本身。
+   */
   scale: [number, number, number]
 }
+
+/** 模型/图元几何在 scale=1 时的尺寸单位 */
+export type Object3DSourceUnit = 'mm' | 'm'
 
 /** 2D 图元 */
 export interface Widget2D {
@@ -90,6 +97,47 @@ export interface Object3DPanel {
   items: Object3DPanelItem[]
 }
 
+/** 3D 材质贴图槽（工程图片资源 + UV） */
+export interface Object3DTextureSlot {
+  /** 工程 resources 中 kind=image|svg 的 id */
+  resourceId: string
+  /** UV 横向偏移，默认 0 */
+  offsetU?: number
+  /** UV 纵向偏移，默认 0 */
+  offsetV?: number
+  /** UV 横向重复/缩放，默认 1 */
+  repeatU?: number
+  /** UV 纵向重复/缩放，默认 1 */
+  repeatV?: number
+}
+
+/**
+ * 3D 对象材质覆盖（编辑器写入）。
+ * override=true 时场景按此刷 MeshStandardMaterial，不再保留 GLTF 原材质外观。
+ */
+export interface Object3DMaterial {
+  /** 用户在「编辑模型」中覆盖过材质 */
+  override: boolean
+  /** 0~1，默认 0.1 */
+  metalness?: number
+  /** 0~1，默认 0.6 */
+  roughness?: number
+  /** 漫反射色，如 #3d8bfd */
+  color?: string
+  /** 自发光色 */
+  emissive?: string
+  /** 0~1 */
+  opacity?: number
+  /** front=隐藏背面；double=双面 */
+  side?: 'front' | 'double'
+  maps?: {
+    diffuse?: Object3DTextureSlot
+    emissive?: Object3DTextureSlot
+    metalness?: Object3DTextureSlot
+    bump?: Object3DTextureSlot
+  }
+}
+
 /** 3D 场景对象 */
 export interface Object3DNode {
   id: string
@@ -102,6 +150,13 @@ export interface Object3DNode {
    * 跟镜头 HTML 面板。可与图元/模型并存；仅面板时仍用小盒子作选中锚点。
    */
   panel?: Object3DPanel
+  /**
+   * 几何在 transform.scale=[1,1,1] 时的包围盒尺寸（sourceUnit 单位）。
+   * 上传模型默认按毫米建模；内置图元为米。
+   */
+  sourceSize?: [number, number, number]
+  /** 缺省：有 modelResourceId → mm，否则 → m */
+  sourceUnit?: Object3DSourceUnit
   transform: Transform3D
   /** 颜色等样式 */
   style?: {
@@ -110,6 +165,14 @@ export interface Object3DNode {
     /** colorStroke 等连接写入的发光色 */
     emissive?: string
   }
+  /**
+   * 材质覆盖（编辑模型对话框）。缺省或 override=false：图元用 style，模型保留原材质。
+   */
+  material?: Object3DMaterial
+  /** 投射阴影，默认 true */
+  castShadow?: boolean
+  /** 接收阴影，默认 true */
+  receiveShadow?: boolean
   visible?: boolean
   /** 设计端锁定：不可用手柄/属性改变换 */
   locked?: boolean

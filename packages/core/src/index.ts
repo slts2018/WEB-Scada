@@ -39,8 +39,22 @@ export {
   parseListItems,
 } from './factory/widget'
 export type { BuiltinWidgetType, DrawToolType, WidgetPaletteItem } from './factory/widget'
-export { createObject3D, createDefaultObject3DPanel } from './factory/object3d'
+export {
+  createObject3D,
+  createDefaultObject3DPanel,
+  createDefaultObject3DMaterial,
+} from './factory/object3d'
 export type { BuiltinPrimitive3D } from './factory/object3d'
+export {
+  PRIMITIVE_SOURCE_SIZE_M,
+  roundMeters3,
+  resolveSourceUnit,
+  sourceUnitToMeters,
+  resolveSourceSize,
+  sizeMetersFromObject3d,
+  threeScaleFromSizeMeters,
+  patchObject3dSizeMeters,
+} from './factory/object3dSize'
 export {
   defaultPanelItemSize,
   resolvePanelItemRect,

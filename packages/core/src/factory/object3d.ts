@@ -1,9 +1,31 @@
-import type { Object3DNode, Object3DPanel, Object3DPanelItem, Transform3D } from '../types/project'
+import type {
+  Object3DMaterial,
+  Object3DNode,
+  Object3DPanel,
+  Object3DPanelItem,
+  Transform3D,
+} from '../types/project'
 import {
   DEFAULT_PANEL_CONTENT_HEIGHT,
   DEFAULT_PANEL_CONTENT_WIDTH,
   defaultPanelItemSize,
 } from './panelLayout'
+import { PRIMITIVE_SOURCE_SIZE_M } from './object3dSize'
+
+/** 从现有 style 生成可编辑的默认材质覆盖 */
+export function createDefaultObject3DMaterial(
+  style?: Object3DNode['style'],
+): Object3DMaterial {
+  return {
+    override: true,
+    metalness: 0.1,
+    roughness: 0.6,
+    color: style?.color || '#3d8bfd',
+    emissive: style?.emissive || '#000000',
+    opacity: style?.opacity ?? 1,
+    side: 'front',
+  }
+}
 
 export type BuiltinPrimitive3D = 'box' | 'sphere' | 'cylinder' | 'arrow'
 
@@ -104,6 +126,12 @@ export function createObject3D(
       ? ([180, 0, 0] as [number, number, number])
       : DEFAULT_TRANSFORM.rotation
 
+  const sourcePrimitive: BuiltinPrimitive3D | undefined = withPanel
+    ? 'box'
+    : primitive && primitive in PRIMITIVE_SOURCE_SIZE_M
+      ? primitive
+      : undefined
+
   return {
     id,
     name: opts.name ?? meta.name,
@@ -111,6 +139,13 @@ export function createObject3D(
     primitive: withPanel ? 'box' : primitive,
     modelResourceId: opts.modelResourceId,
     panel,
+    // 上传模型的 sourceSize 在放置时测量；图元直接写米制几何尺寸
+    sourceSize: opts.modelResourceId
+      ? undefined
+      : sourcePrimitive
+        ? ([...PRIMITIVE_SOURCE_SIZE_M[sourcePrimitive]] as [number, number, number])
+        : ([1, 1, 1] as [number, number, number]),
+    sourceUnit: opts.modelResourceId ? 'mm' : 'm',
     transform: {
       position: [...(opts.transform?.position ?? defaultPos)] as [number, number, number],
       rotation: [...(opts.transform?.rotation ?? defaultRot)] as [number, number, number],

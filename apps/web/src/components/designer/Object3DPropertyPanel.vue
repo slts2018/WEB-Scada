@@ -21,8 +21,10 @@ import {
   MAX_PANEL_CONTENT_SIZE,
   MIN_PANEL_CONTENT_HEIGHT,
   MIN_PANEL_CONTENT_WIDTH,
+  patchObject3dSizeMeters,
   resolvePage3DPresentation,
   resolvePanelContentSize,
+  sizeMetersFromObject3d,
 } from '@web-scada/core'
 import { useProjectStore } from '@/stores/project'
 import { useTagStore } from '@/stores/tag'
@@ -60,11 +62,16 @@ const bindableProps = computed(() => {
     { value: 'rotX', label: '旋转X' },
     { value: 'rotY', label: '旋转Y' },
     { value: 'rotZ', label: '旋转Z' },
-    { value: 'scaleX', label: '缩放X' },
-    { value: 'scaleY', label: '缩放Y' },
-    { value: 'scaleZ', label: '缩放Z' },
+    // 属性绑定仍写 transform.scale（Three 倍率）；米制尺寸请在上方「缩放（米）」编辑
+    { value: 'scaleX', label: '缩放倍率X' },
+    { value: 'scaleY', label: '缩放倍率Y' },
+    { value: 'scaleZ', label: '缩放倍率Z' },
   ]
 })
+
+const sizeMeters = computed(() =>
+  obj.value ? sizeMetersFromObject3d(obj.value) : ([0, 0, 0] as [number, number, number]),
+)
 
 function patch(partial: Partial<NonNullable<typeof obj.value>>) {
   if (!obj.value) return
@@ -115,6 +122,15 @@ function updateTransform(
   const next = [...obj.value.transform[axis]] as [number, number, number]
   next[index] = value
   patch({ transform: { ...obj.value.transform, [axis]: next } })
+}
+
+/** 缩放栏编辑的是轴向真实尺寸（米），三位小数 */
+function updateSizeMeters(index: 0 | 1 | 2, value: number) {
+  if (!obj.value) return
+  const cur = sizeMetersFromObject3d(obj.value)
+  const next: [number, number, number] = [...cur]
+  next[index] = Math.max(0.001, Number.isFinite(value) ? value : 0.001)
+  patch(patchObject3dSizeMeters(obj.value, next))
 }
 
 function updatePanelSize(wh: 'width' | 'height', value: number) {
@@ -241,6 +257,15 @@ function openPanelEditor() {
   project.openObject3dPanelEditor()
 }
 
+function openModelEditor() {
+  if (!obj.value) return
+  if (isPanelOnly.value) {
+    ElMessage.warning('纯面板对象请使用「编辑面板」')
+    return
+  }
+  project.openObject3dModelEditor()
+}
+
 const panelSummary = computed(() => {
   const p = obj.value?.panel
   if (!p) return ''
@@ -287,6 +312,15 @@ const panelSummary = computed(() => {
         @update:model-value="(v: string | null) => v && patch({ style: { ...obj!.style, color: v } })"
       />
     </label>
+    <div v-if="!isPanelOnly" class="panel-title row">
+      <span>模型外观</span>
+      <div class="link-adds">
+        <el-button size="small" type="primary" @click="openModelEditor">编辑模型…</el-button>
+      </div>
+    </div>
+    <p v-if="!isPanelOnly" class="multi-hint">
+      可改颜色、金属度/粗糙度与贴图；修改后写入工程并实时预览。
+    </p>
     <el-checkbox
       :model-value="obj.visible !== false"
       @update:model-value="(v: boolean | string | number) => patch({ visible: Boolean(v) })"
@@ -327,19 +361,20 @@ const panelSummary = computed(() => {
           @update:model-value="(v: number | undefined) => updateTransform('rotation', i as 0 | 1 | 2, Number(v) || 0)"
         />
       </div>
-      <div class="panel-title">缩放</div>
+      <div class="panel-title">缩放（米）</div>
+      <p class="multi-hint">X/Y/Z 为各轴向真实尺寸；模型按毫米文件换算。</p>
       <div class="xyz">
         <el-input-number
           v-for="(axis, i) in (['X', 'Y', 'Z'] as const)"
           :key="'s' + axis"
           size="small"
           :disabled="Boolean(obj.locked)"
-          :model-value="obj.transform.scale[i]"
+          :model-value="sizeMeters[i]"
           :step="0.001"
-          :min="0.0001"
-          :precision="4"
+          :min="0.001"
+          :precision="3"
           controls-position="right"
-          @update:model-value="(v: number | undefined) => updateTransform('scale', i as 0 | 1 | 2, Number(v) || 1)"
+          @update:model-value="(v: number | undefined) => updateSizeMeters(i as 0 | 1 | 2, Number(v) || 0.001)"
         />
       </div>
     </template>

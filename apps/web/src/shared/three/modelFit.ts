@@ -46,6 +46,28 @@ export async function measureModelFitScale(
   return { scale: uniformFitScale(maxDim, target), maxDim }
 }
 
+/** 测量模型在 scale=1 时的包围盒三边（文件单位，上传模型默认按毫米） */
+export async function measureModelSourceSize(
+  url: string,
+): Promise<{ sourceSize: [number, number, number]; maxDim: number }> {
+  const root = await loadModelObject(url)
+  const box = new Box3().setFromObject(resolveFocusObject(root))
+  if (box.isEmpty()) {
+    return { sourceSize: [1, 1, 1], maxDim: 1 }
+  }
+  const size = new Vector3()
+  box.getSize(size)
+  const sourceSize: [number, number, number] = [
+    Math.max(1e-12, size.x),
+    Math.max(1e-12, size.y),
+    Math.max(1e-12, size.z),
+  ]
+  return {
+    sourceSize,
+    maxDim: Math.max(sourceSize[0], sourceSize[1], sourceSize[2]),
+  }
+}
+
 export function unionObjectBoxes(objs: Object3D[]): Box3 {
   const box = new Box3()
   for (const o of objs) {

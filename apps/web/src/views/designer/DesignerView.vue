@@ -28,6 +28,7 @@ import ResourceManagerDialog from '@/components/dialogs/ResourceManagerDialog.vu
 import PublishValidateDialog from '@/components/dialogs/PublishValidateDialog.vue'
 import AnimationConnectionDialog from '@/components/designer/AnimationConnectionDialog.vue'
 import Object3DPanelEditorDialog from '@/components/designer/Object3DPanelEditorDialog.vue'
+import Object3DModelEditorDialog from '@/components/designer/Object3DModelEditorDialog.vue'
 import { useProjectStore } from '@/stores/project'
 import { useOutputLogStore } from '@/stores/outputLog'
 import { useTagStore } from '@/stores/tag'
@@ -921,6 +922,7 @@ onUnmounted(() => {
   />
   <AnimationConnectionDialog />
   <Object3DPanelEditorDialog />
+  <Object3DModelEditorDialog />
 
   <el-dialog
     v-model="scriptVisible"

@@ -37,6 +37,7 @@ import {
   type LOD,
   type Material,
   type Object3D,
+  type Side,
 } from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js'
@@ -53,6 +54,10 @@ import {
   setObject3dPanelValues,
   type Object3dPanelDomHandlers,
 } from '@/shared/three/object3dPanelUi'
+import {
+  applyObject3DMaterial,
+  clearObject3DMaterialMaps,
+} from '@/shared/three/object3dMaterialApply'
 import type { Object3DPanelItem } from '@web-scada/core'
 
 export type TransformGizmoMode = 'translate' | 'rotate' | 'scale'
@@ -184,6 +189,9 @@ type OrigMatSnapshot = {
   opacity: number
   transparent: boolean
   emissive: Color
+  metalness: number
+  roughness: number
+  side: Side
 } | null
 
 function cacheOriginalMaterials(root: Object3D) {
@@ -199,12 +207,16 @@ function cacheOriginalMaterials(root: Object3D) {
         opacity: std.opacity,
         transparent: std.transparent,
         emissive: std.emissive.clone(),
+        metalness: std.metalness,
+        roughness: std.roughness,
+        side: std.side,
       } satisfies NonNullable<OrigMatSnapshot>
     }) as OrigMatSnapshot[]
   })
 }
 
 function disposeObject3DResources(root: Object3D) {
+  clearObject3DMaterialMaps(root)
   root.traverse((o) => {
     const mesh = o as Mesh
     if (!mesh.isMesh) return
@@ -216,6 +228,7 @@ function disposeObject3DResources(root: Object3D) {
 }
 
 function restoreOriginalMaterials(root: Object3D) {
+  clearObject3DMaterialMaps(root)
   root.traverse((child) => {
     const mesh = child as Mesh
     if (!mesh.isMesh) return
@@ -230,8 +243,26 @@ function restoreOriginalMaterials(root: Object3D) {
       std.opacity = snap.opacity
       std.transparent = snap.transparent
       std.emissive.copy(snap.emissive)
+      std.metalness = snap.metalness
+      std.roughness = snap.roughness
+      std.side = snap.side
+      std.map = null
+      std.emissiveMap = null
+      std.metalnessMap = null
+      std.bumpMap = null
       std.needsUpdate = true
     })
+  })
+}
+
+function applyNodeShadowFlags(root: Object3D, node: Object3DNode) {
+  const cast = node.castShadow !== false
+  const receive = node.receiveShadow !== false
+  root.traverse((child) => {
+    const mesh = child as Mesh
+    if (!mesh.isMesh) return
+    mesh.castShadow = cast
+    mesh.receiveShadow = receive
   })
 }
 
@@ -412,6 +443,8 @@ export function createScene3D(
   const panelMap = new Map<string, CSS2DObject>()
   /** setPage / mountObject 写入，供面板图片解析 */
   let resolveResourceUrlFn: ((resourceId: string) => string | undefined) | undefined
+  /** 材质贴图异步加载取消 */
+  const materialApplyCancel = new Map<string, () => void>()
 
   const controls = new OrbitControls(camera, renderer.domElement)
   // 组态操作要跟手：松手即停，不要惯性滑动
@@ -987,9 +1020,12 @@ export function createScene3D(
     clearLabels()
     clearPanels()
     lodList.length = 0
+    for (const cancel of materialApplyCancel.values()) cancel()
+    materialApplyCancel.clear()
     while (root.children.length) {
       const child = root.children[0]
       root.remove(child)
+      clearObject3DMaterialMaps(child)
       child.traverse((obj) => {
         const mesh = obj as Mesh
         if (mesh.isMesh) {
@@ -1169,25 +1205,32 @@ export function createScene3D(
     }
     obj.userData[USER_DATA_ID] = node.id
     applyTransform(obj, node)
-    if (node.panel && !node.modelResourceId) {
-      // 已有工程里面板锚点可能仍是半透明；强制隐藏外观
-      setMeshOpacity(obj, 0)
-    } else if (node.style?.color && !node.modelResourceId) {
-      setMeshColor(obj, node.style.color, node.style.opacity ?? 1)
-    }
-    // 图元也参与阴影；外购模型保持 frustumCulled=false（包围球不准时整模会被裁掉）
+    // 外购模型保持 frustumCulled=false（包围球不准时整模会被裁掉）
     const keepFrustumOff = Boolean(node.modelResourceId)
     obj.traverse((child) => {
       const mesh = child as Mesh
-      if (mesh.isMesh) {
-        mesh.castShadow = true
-        mesh.receiveShadow = true
-        mesh.frustumCulled = !keepFrustumOff
-      }
+      if (mesh.isMesh) mesh.frustumCulled = !keepFrustumOff
     })
+    applyNodeShadowFlags(obj, node)
     parent.add(obj)
     objectMap.set(node.id, obj)
     if (node.modelResourceId) cacheOriginalMaterials(obj)
+
+    if (node.panel && !node.modelResourceId) {
+      // 已有工程里面板锚点可能仍是半透明；强制隐藏外观
+      setMeshOpacity(obj, 0)
+    } else if (node.material?.override) {
+      materialApplyCancel.get(node.id)?.()
+      const cancel = applyObject3DMaterial(
+        obj,
+        node.material,
+        (id) => resolveModelUrl(id) ?? resolveResourceUrlFn?.(id),
+        () => invalidate(),
+      )
+      materialApplyCancel.set(node.id, cancel)
+    } else if (node.style?.color && !node.modelResourceId) {
+      setMeshColor(obj, node.style.color, node.style.opacity ?? 1)
+    }
     attachPanel(node, obj)
     // 按需渲染：挂上对象后必须刷一帧，否则要等拖拽/滚轮才看得见（远程慢加载时像黑屏）
     invalidate()
@@ -1352,6 +1395,8 @@ export function createScene3D(
       obj.parent?.remove(obj)
       disposeObject3DResources(obj)
       for (const sid of clearIds) {
+        materialApplyCancel.get(sid)?.()
+        materialApplyCancel.delete(sid)
         const mapped = objectMap.get(sid)
         if (mapped) {
           const lodIdx = lodList.indexOf(mapped as LOD)
@@ -1429,16 +1474,40 @@ export function createScene3D(
     }
     const isModel = Boolean(visual.modelResourceId)
     const opacity = visual.style?.opacity
-    // 与 mountNode 一致：GLTF 默认不整模刷色（工程里模型自带 style.color=#94a3b8）
-    // 仅动画/绑定主动改色时 applyModelColor=true 才染色
-    if (isModel && !opts?.applyModelColor) {
+    applyNodeShadowFlags(obj, visual)
+
+    if (visual.material?.override) {
+      materialApplyCancel.get(objectId)?.()
+      const cancel = applyObject3DMaterial(
+        obj,
+        visual.material,
+        (id) => resolveResourceUrlFn?.(id),
+        () => invalidate(),
+      )
+      materialApplyCancel.set(objectId, cancel)
+      // 动画/绑定主动改色时叠在材质覆盖之上
+      if (opts?.applyModelColor && visual.style?.color) {
+        setMeshColor(obj, visual.style.color, visual.material.opacity ?? opacity ?? 1)
+      }
+      if (opts?.applyModelColor && visual.style?.emissive) {
+        setMeshEmissive(obj, visual.style.emissive)
+      }
+    } else if (isModel && !opts?.applyModelColor) {
+      // GLTF 默认不整模刷色；仅动画/绑定主动改色时 applyModelColor=true 才染色
+      materialApplyCancel.get(objectId)?.()
+      materialApplyCancel.delete(objectId)
       restoreOriginalMaterials(obj)
       if (opacity != null) setMeshOpacity(obj, opacity)
     } else if (visual.style?.color) {
+      materialApplyCancel.get(objectId)?.()
+      materialApplyCancel.delete(objectId)
       setMeshColor(obj, visual.style.color, opacity ?? 1)
     }
+
     if (!selectionHighlight || !selectedIds.includes(objectId)) {
-      if (visual.style?.emissive) {
+      if (visual.material?.override) {
+        // 已在上方处理 emissive；选中高亮关闭时保持材质自发光
+      } else if (visual.style?.emissive) {
         setMeshEmissive(obj, visual.style.emissive)
       } else if (!isModel) {
         setMeshEmissive(obj, null)

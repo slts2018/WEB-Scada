@@ -76,6 +76,26 @@ export function collectResourceRefs(doc: ProjectDocument): ResourceRefHit[] {
             kind: 'image',
           })
         }
+        const maps = o.material?.maps
+        if (maps) {
+          const slots: Array<[string, string | undefined]> = [
+            ['漫反射', maps.diffuse?.resourceId],
+            ['自发光', maps.emissive?.resourceId],
+            ['金属', maps.metalness?.resourceId],
+            ['凹凸', maps.bump?.resourceId],
+          ]
+          for (const [label, resourceId] of slots) {
+            if (!resourceId) continue
+            hits.push({
+              resourceId,
+              pageId: page.id,
+              pageName: page.name,
+              ownerId: o.id,
+              ownerName: `${o.name}/材质/${label}`,
+              kind: 'image',
+            })
+          }
+        }
       })
     }
   }
@@ -137,6 +157,18 @@ export function replaceResourceRefs(
           o.panel = { ...o.panel, backgroundResourceId: toId }
           changed += 1
         }
+        if (o.material?.maps) {
+          const maps = { ...o.material.maps }
+          let mapChanged = false
+          for (const key of ['diffuse', 'emissive', 'metalness', 'bump'] as const) {
+            const slot = maps[key]
+            if (!slot || slot.resourceId !== fromId) continue
+            maps[key] = { ...slot, resourceId: toId }
+            mapChanged = true
+            changed += 1
+          }
+          if (mapChanged) o.material = { ...o.material, maps }
+        }
       })
     }
   }
@@ -177,6 +209,18 @@ export function clearResourceRefs(doc: ProjectDocument, resourceId: string): num
           delete next.backgroundResourceId
           o.panel = next
           changed += 1
+        }
+        if (o.material?.maps) {
+          const maps = { ...o.material.maps }
+          let mapChanged = false
+          for (const key of ['diffuse', 'emissive', 'metalness', 'bump'] as const) {
+            const slot = maps[key]
+            if (!slot || slot.resourceId !== resourceId) continue
+            delete maps[key]
+            mapChanged = true
+            changed += 1
+          }
+          if (mapChanged) o.material = { ...o.material, maps }
         }
       })
     }
