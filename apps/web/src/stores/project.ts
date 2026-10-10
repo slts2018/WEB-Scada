@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import {
   clonePageWithNewIds,
+  createDefaultObject3DPanel,
   createEmptyProject,
   createGuideLine,
   createLayer2D,
@@ -11,7 +12,11 @@ import {
   createPageTemplate,
   createSymbolDefinition,
   createWidget2D,
+  isObject3dPanelPage,
+  listNavigationPages,
+  normalizeObject3DPanel,
   normalizeProjectDocument,
+  resolvePanelWidgets,
   type BuiltinPrimitive3D,
   type BuiltinWidgetType,
   type DrawToolType,
@@ -68,8 +73,16 @@ export const useProjectStore = defineStore('project', () => {
   /** 打开 Flight 风格「动画连接」对话框 */
   const animationConnectionOpen = ref(false)
   const animationConnectionTab = ref<'default' | 'property' | 'event'>('default')
-  /** 打开 3D「跟镜头面板」独立编辑器 */
+  /** 打开 3D「跟镜头面板」2D 内容弹窗编辑器 */
   const object3dPanelEditorOpen = ref(false)
+  /** 面板编辑中的 3D 对象 id */
+  const panelEditObjectId = ref<string | null>(null)
+  /** 打开弹窗前的页面（通常为 3D 页），关闭后返回 */
+  const panelEditReturnPageId = ref<string | null>(null)
+  /** 打开弹窗时 Page2D 快照（返回时还原） */
+  const panelEditPageSnapshot = ref<string | null>(null)
+  /** 打开弹窗时面板背景资源 id（null=无背景；返回时还原） */
+  const panelEditBgSnapshot = ref<string | null | undefined>(undefined)
   /** 打开 3D「编辑模型」材质/属性对话框 */
   const object3dModelEditorOpen = ref(false)
   /** Flight 风格画布绘制工具：折线 / 多边形 / 管道 */
@@ -380,7 +393,59 @@ export const useProjectStore = defineStore('project', () => {
     return copy
   }
 
+  /** 面板 2D 弹窗是否打开（内容已在 Page2D，不再走 panel.widgets） */
+  function isPanelEditMode() {
+    return Boolean(object3dPanelEditorOpen.value && panelEditObjectId.value)
+  }
+
+  /** 旧 panel.widgets 编辑路径已废弃 */
+  function usesLegacyPanelWidgets() {
+    return false
+  }
+
+  function findObject3dById(objectId: string, preferPageId?: string | null): Object3DNode | null {
+    if (preferPageId) {
+      const page = document.value.pages.find((p) => p.id === preferPageId && p.type === '3d')
+      if (page && page.type === '3d') {
+        const hit = findObject3dDeep(page.objects, objectId)
+        if (hit) return hit
+      }
+    }
+    for (const page of document.value.pages) {
+      if (page.type !== '3d') continue
+      const hit = findObject3dDeep(page.objects, objectId)
+      if (hit) return hit
+    }
+    return null
+  }
+
+  function getPanelEditObject(): Object3DNode | null {
+    const id = panelEditObjectId.value
+    if (!id) return null
+    return findObject3dById(id, panelEditReturnPageId.value)
+  }
+
+  /** 确保面板存在且有 widgets 数组（规范化后无 items） */
+  function ensurePanelWidgetsList(obj: Object3DNode): Widget2D[] {
+    if (!obj.panel) {
+      obj.panel = {
+        width: 400,
+        height: 280,
+        objectFit: 'none',
+        widgets: [],
+      }
+    }
+    if (!obj.panel.widgets) obj.panel.widgets = []
+    delete obj.panel.items
+    return obj.panel.widgets
+  }
+
   function getActiveWidgets(): Widget2D[] {
+    if (usesLegacyPanelWidgets()) {
+      const obj = getPanelEditObject()
+      if (!obj) return []
+      return ensurePanelWidgetsList(obj)
+    }
     const page = activePage2d.value
     if (!page) return []
     return page.layers.flatMap((l) => l.widgets)
@@ -427,6 +492,29 @@ export const useProjectStore = defineStore('project', () => {
   function addWidget(type: BuiltinWidgetType, at?: { x: number; y: number }): Widget2D | null {
     const page = activePage2d.value
     if (!page) return null
+    if (type === 'scene3d' && (page.usage === 'object3d-panel' || isPanelEditMode())) return null
+    if (usesLegacyPanelWidgets()) {
+      const obj = getPanelEditObject()
+      if (!obj) return null
+      pushHistory()
+      const list = ensurePanelWidgetsList(obj)
+      const widget = createWidget2D(type)
+      const pw = obj.panel?.width ?? 400
+      const ph = obj.panel?.height ?? 280
+      if (at) {
+        widget.transform.x = at.x
+        widget.transform.y = at.y
+      } else {
+        widget.transform.x = Math.max(0, pw / 2 - widget.transform.width / 2)
+        widget.transform.y = Math.max(0, ph / 2 - widget.transform.height / 2)
+      }
+      list.push(widget)
+      selectedWidgetIds.value = [widget.id]
+      drawTool.value = null
+      touch()
+      bumpScene3d()
+      return widget
+    }
     pushHistory()
     const layer = ensureDefaultLayer(page)
     if (layer.locked) return null
@@ -447,8 +535,21 @@ export const useProjectStore = defineStore('project', () => {
 
   /** 插入已构造好的图元（绘制工具落盘） */
   function insertWidget(widget: Widget2D): Widget2D | null {
+    if (usesLegacyPanelWidgets()) {
+      if (widget.type === 'scene3d') return null
+      const obj = getPanelEditObject()
+      if (!obj) return null
+      pushHistory()
+      ensurePanelWidgetsList(obj).push(widget)
+      selectedWidgetIds.value = [widget.id]
+      drawTool.value = null
+      touch()
+      bumpScene3d()
+      return widget
+    }
     const page = activePage2d.value
     if (!page) return null
+    if (widget.type === 'scene3d' && page.usage === 'object3d-panel') return null
     pushHistory()
     const layer = ensureDefaultLayer(page)
     if (layer.locked) return null
@@ -460,6 +561,31 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   function updateWidget(id: string, patch: Partial<Widget2D>, opts?: { recordHistory?: boolean }) {
+    if (usesLegacyPanelWidgets()) {
+      const obj = getPanelEditObject()
+      if (!obj) return
+      const list = ensurePanelWidgetsList(obj)
+      const idx = list.findIndex((w) => w.id === id)
+      if (idx < 0) return
+      if (opts?.recordHistory !== false) pushHistory()
+      const prev = list[idx]!
+      list[idx] = {
+        ...prev,
+        ...patch,
+        transform: patch.transform ? { ...prev.transform, ...patch.transform } : prev.transform,
+        style: patch.style ? { ...prev.style, ...patch.style } : prev.style,
+        props: patch.props ? { ...prev.props, ...patch.props } : prev.props,
+        bindings: patch.bindings ?? prev.bindings,
+        animations: patch.animations ?? prev.animations,
+        animationLinks: patch.animationLinks ?? prev.animationLinks,
+        events: patch.events ?? prev.events,
+        scriptIds: patch.scriptIds ?? prev.scriptIds,
+        children: patch.children ?? prev.children,
+      }
+      touch()
+      bumpScene3d()
+      return
+    }
     const page = activePage2d.value
     if (!page) return
     if (opts?.recordHistory !== false) pushHistory()
@@ -497,8 +623,21 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   function removeWidgets(ids: string[]) {
+    if (!ids.length) return
+    if (usesLegacyPanelWidgets()) {
+      const obj = getPanelEditObject()
+      if (!obj) return
+      pushHistory()
+      const idSet = new Set(ids)
+      const list = ensurePanelWidgetsList(obj)
+      obj.panel!.widgets = list.filter((w) => !idSet.has(w.id))
+      selectedWidgetIds.value = selectedWidgetIds.value.filter((id) => !idSet.has(id))
+      touch()
+      bumpScene3d()
+      return
+    }
     const page = activePage2d.value
-    if (!page || !ids.length) return
+    if (!page) return
     pushHistory()
     const idSet = new Set(ids)
     for (const layer of page.layers) {
@@ -514,8 +653,34 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   function duplicateWidgets(ids: string[]): Widget2D[] {
+    if (!ids.length) return []
+    if (usesLegacyPanelWidgets()) {
+      const obj = getPanelEditObject()
+      if (!obj) return []
+      pushHistory()
+      const list = ensurePanelWidgetsList(obj)
+      const created: Widget2D[] = []
+      for (const src of list.filter((w) => ids.includes(w.id))) {
+        const copy: Widget2D = clonePlain(src)
+        copy.id = `w_${src.type}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
+        copy.name = `${src.name} 副本`
+        copy.transform = {
+          ...copy.transform,
+          x: copy.transform.x + 24,
+          y: copy.transform.y + 24,
+        }
+        list.push(copy)
+        created.push(copy)
+      }
+      if (created.length) {
+        selectedWidgetIds.value = created.map((w) => w.id)
+        touch()
+        bumpScene3d()
+      }
+      return created
+    }
     const page = activePage2d.value
-    if (!page || !ids.length) return []
+    if (!page) return []
     pushHistory()
     const created: Widget2D[] = []
     for (const layer of page.layers) {
@@ -550,8 +715,41 @@ export const useProjectStore = defineStore('project', () => {
   type ZOrderMode = 'front' | 'forward' | 'backward' | 'back'
 
   function reorderSelected(mode: ZOrderMode) {
+    if (!selectedWidgetIds.value.length) return
+    if (usesLegacyPanelWidgets()) {
+      const obj = getPanelEditObject()
+      if (!obj) return
+      pushHistory()
+      const list = ensurePanelWidgetsList(obj)
+      const idSet = new Set(selectedWidgetIds.value)
+      const selected = list.filter((w) => idSet.has(w.id))
+      const others = list.filter((w) => !idSet.has(w.id))
+      if (!selected.length) return
+      let next: Widget2D[]
+      if (mode === 'front') next = [...others, ...selected]
+      else if (mode === 'back') next = [...selected, ...others]
+      else if (mode === 'forward') {
+        next = [...list]
+        for (let i = next.length - 2; i >= 0; i--) {
+          if (idSet.has(next[i]!.id) && !idSet.has(next[i + 1]!.id)) {
+            ;[next[i], next[i + 1]] = [next[i + 1]!, next[i]!]
+          }
+        }
+      } else {
+        next = [...list]
+        for (let i = 1; i < next.length; i++) {
+          if (idSet.has(next[i]!.id) && !idSet.has(next[i - 1]!.id)) {
+            ;[next[i], next[i - 1]] = [next[i - 1]!, next[i]!]
+          }
+        }
+      }
+      obj.panel!.widgets = next
+      touch()
+      bumpScene3d()
+      return
+    }
     const page = activePage2d.value
-    if (!page || !selectedWidgetIds.value.length) return
+    if (!page) return
     const layer = findLayerForSelection()
     if (!layer || layer.locked) return
     pushHistory()
@@ -668,8 +866,8 @@ export const useProjectStore = defineStore('project', () => {
   }
 
   function nudgeSelected(dx: number, dy: number) {
-    const page = activePage2d.value
-    if (!page || !selectedWidgetIds.value.length) return
+    if (!selectedWidgetIds.value.length) return
+    if (!activePage2d.value && !usesLegacyPanelWidgets()) return
     const patches: Record<string, Widget2D['transform']> = {}
     for (const w of selectedWidgets.value) {
       if (w.locked) continue
@@ -734,17 +932,222 @@ export const useProjectStore = defineStore('project', () => {
     animationConnectionOpen.value = false
   }
 
-  function openObject3dPanelEditor() {
-    if (!selectedObject3dIds.value.length) return
-    // 面板按主选对象编辑
-    if (selectedObject3dIds.value.length > 1) {
-      selectedObject3dIds.value = [selectedObject3dIds.value[0]]
+  /**
+   * 打开跟镜头面板 2D 内容弹窗（真 Canvas2D，带返回/保存）。
+   * 返回时还原快照；保存后同步面板宽高并回到原 3D 页。
+   */
+  function openObject3dPanelEditor(objectId?: string) {
+    const id = objectId || selectedObject3d.value?.id
+    if (!id) return
+
+    // 确保当前活动页是包含该对象的 3D 页（ensurePanelPage2d 依赖 activePage3d）
+    let host3d = activePage3d.value
+    if (!host3d || !findObject3dDeep(host3d.objects, id)) {
+      host3d = null
+      for (const p of document.value.pages) {
+        if (p.type !== '3d') continue
+        if (findObject3dDeep(p.objects, id)) {
+          host3d = p
+          break
+        }
+      }
+      if (!host3d) return
+      activePageId.value = host3d.id
+      syncActiveLayerForPage(host3d.id)
     }
+
+    selectedObject3dIds.value = [id]
+    const page = ensurePanelPage2d(id)
+    if (!page) return
+
+    const objForSnap = findObject3dDeep(host3d.objects, id)
+    panelEditReturnPageId.value = host3d.id
+    panelEditObjectId.value = id
+    panelEditPageSnapshot.value = JSON.stringify(clonePlain(page))
+    panelEditBgSnapshot.value = objForSnap?.panel?.backgroundResourceId?.trim() || null
     object3dPanelEditorOpen.value = true
+    setActivePage(page.id)
+  }
+
+  function finishPanelPageEditor(opts: { restoreSnapshot: boolean }) {
+    const objectId = panelEditObjectId.value
+    const returnPageId = panelEditReturnPageId.value
+    const snap = panelEditPageSnapshot.value
+    const bgSnap = panelEditBgSnapshot.value
+
+    if (opts.restoreSnapshot && snap) {
+      try {
+        const restored = JSON.parse(snap) as Page2D
+        const idx = document.value.pages.findIndex((p) => p.id === restored.id)
+        if (idx >= 0) {
+          document.value.pages[idx] = restored
+          touch()
+        }
+      } catch {
+        /* 快照损坏则保留当前编辑结果 */
+      }
+      if (objectId && bgSnap !== undefined) {
+        const obj = findObject3dById(objectId, returnPageId)
+        if (obj?.panel) {
+          const next = normalizeObject3DPanel(obj.panel)
+          if (bgSnap) next.backgroundResourceId = bgSnap
+          else delete next.backgroundResourceId
+          obj.panel = next
+          touch()
+        }
+      }
+    } else if (objectId) {
+      const obj = findObject3dById(objectId, returnPageId)
+      const pageId = obj?.panel?.page2dId?.trim()
+      const page = pageId
+        ? document.value.pages.find((p) => p.id === pageId && p.type === '2d')
+        : null
+      if (obj?.panel && page && page.type === '2d') {
+        obj.panel = normalizeObject3DPanel({
+          ...obj.panel,
+          width: page.width,
+          height: page.height,
+        })
+        touch()
+        bumpScene3d()
+      }
+    }
+
+    object3dPanelEditorOpen.value = false
+    panelEditObjectId.value = null
+    panelEditPageSnapshot.value = null
+    panelEditBgSnapshot.value = undefined
+    panelEditReturnPageId.value = null
+
+    if (returnPageId) {
+      setActivePage(returnPageId)
+      if (objectId) selectedObject3dIds.value = [objectId]
+    }
+  }
+
+  function saveObject3dPanelEditor() {
+    if (!object3dPanelEditorOpen.value) return
+    finishPanelPageEditor({ restoreSnapshot: false })
+  }
+
+  function discardObject3dPanelEditor() {
+    if (!object3dPanelEditorOpen.value) return
+    finishPanelPageEditor({ restoreSnapshot: true })
   }
 
   function closeObject3dPanelEditor() {
-    object3dPanelEditorOpen.value = false
+    discardObject3dPanelEditor()
+  }
+
+  /** 查找引用了指定 2D 页的面板对象名 */
+  function findObjectsUsingPanelPage2d(page2dId: string): string[] {
+    const names: string[] = []
+    for (const page of document.value.pages) {
+      if (page.type !== '3d') continue
+      walkObject3dTree(page.objects, (obj) => {
+        if (obj.panel?.page2dId === page2dId) {
+          names.push(obj.name || obj.id)
+        }
+      })
+    }
+    return names
+  }
+
+  /**
+   * 确保对象面板绑定一张 Page2D（无则从旧 widgets 迁移或新建空白页）。
+   */
+  function ensurePanelPage2d(objectId: string): Page2D | null {
+    const page3d = activePage3d.value
+    if (!page3d) return null
+    const obj = findObject3dDeep(page3d.objects, objectId)
+    if (!obj) return null
+
+    if (!obj.panel) {
+      obj.panel = createDefaultObject3DPanel(obj.name || '操作面板')
+    } else {
+      obj.panel = normalizeObject3DPanel(obj.panel)
+    }
+
+    const existingId = obj.panel.page2dId?.trim()
+    if (existingId) {
+      const existing = document.value.pages.find((p) => p.id === existingId && p.type === '2d')
+      if (existing && existing.type === '2d') {
+        // 历史自动创建的面板页补标记
+        if (!existing.usage && existing.name.startsWith('面板/')) {
+          existing.usage = 'object3d-panel'
+        }
+        delete obj.panel.widgets
+        delete obj.panel.items
+        touch()
+        return existing
+      }
+    }
+
+    const widgets = resolvePanelWidgets(obj.panel).filter((w) => w.type !== 'scene3d')
+    const width = obj.panel.width ?? 400
+    const height = obj.panel.height ?? 280
+    const page = createPage2D(`面板/${obj.name || objectId.slice(-6)}`, {
+      usage: 'object3d-panel',
+      width: Math.max(1, Math.round(width)),
+      height: Math.max(1, Math.round(height)),
+    })
+    page.background = '#1a1d24'
+    if (!page.layers.length) page.layers.push(createLayer2D('默认图层'))
+    page.layers[0]!.widgets = widgets
+    document.value.pages.push(page)
+
+    obj.panel = normalizeObject3DPanel({
+      ...obj.panel,
+      width,
+      height,
+      page2dId: page.id,
+      widgets: undefined,
+    })
+    delete obj.panel.widgets
+    delete obj.panel.items
+    touch()
+    bumpScene3d()
+    return page
+  }
+
+  function bindPanelPage2d(objectId: string, page2dId: string | null): boolean {
+    const page3d = activePage3d.value
+    if (!page3d) return false
+    const obj = findObject3dDeep(page3d.objects, objectId)
+    if (!obj?.panel) return false
+    if (page2dId) {
+      const page = document.value.pages.find((p) => p.id === page2dId && p.type === '2d')
+      if (!page) return false
+      obj.panel = normalizeObject3DPanel({
+        ...obj.panel,
+        page2dId,
+        width: obj.panel.width ?? (page as Page2D).width,
+        height: obj.panel.height ?? (page as Page2D).height,
+      })
+      delete obj.panel.widgets
+      delete obj.panel.items
+    } else {
+      delete obj.panel.page2dId
+    }
+    touch()
+    bumpScene3d()
+    return true
+  }
+
+  /** @deprecated 请用 openObject3dPanelEditor；保留兼容双击/旧入口 */
+  function openPanelPageInDesigner(objectId?: string): Page2D | null {
+    const id = objectId || panelEditObjectId.value || selectedObject3d.value?.id
+    if (!id) return null
+    openObject3dPanelEditor(id)
+    return getPanelPage2d(id)
+  }
+
+  function getPanelPage2d(objectId: string): Page2D | null {
+    const obj = findObject3dById(objectId, panelEditReturnPageId.value)
+    const pid = obj?.panel?.page2dId?.trim()
+    if (!pid) return null
+    const page = document.value.pages.find((p) => p.id === pid && p.type === '2d')
+    return page && page.type === '2d' ? page : null
   }
 
   function openObject3dModelEditor() {
@@ -915,21 +1318,35 @@ export const useProjectStore = defineStore('project', () => {
     touch()
   }
 
-  function removePage(pageId: string) {
-    if (document.value.pages.length <= 1) return
+  function removePage(pageId: string): { ok: boolean; reason?: string } {
+    const navPages = listNavigationPages(document.value)
+    const target = document.value.pages.find((p) => p.id === pageId)
+    // 普通页至少保留一个；面板内容页可删（仍受引用检查）
+    if (target && !isObject3dPanelPage(target) && navPages.length <= 1) {
+      return { ok: false, reason: '至少保留一个页面' }
+    }
+    const refs = findObjectsUsingPanelPage2d(pageId)
+    if (refs.length) {
+      return {
+        ok: false,
+        reason: `该页被跟镜头面板引用：${refs.slice(0, 3).join('、')}${refs.length > 3 ? '…' : ''}，请先解绑或关闭面板`,
+      }
+    }
     const idx = document.value.pages.findIndex((p) => p.id === pageId)
-    if (idx < 0) return
+    if (idx < 0) return { ok: false, reason: '页面不存在' }
     document.value.pages.splice(idx, 1)
     if (document.value.homePageId === pageId) {
-      document.value.homePageId = document.value.pages[0]?.id
+      document.value.homePageId = listNavigationPages(document.value)[0]?.id
     }
     if (activePageId.value === pageId) {
-      activePageId.value = document.value.pages[Math.max(0, idx - 1)]?.id
-      syncActiveLayerForPage(activePageId.value!)
+      const nav = listNavigationPages(document.value)
+      activePageId.value = nav[Math.min(idx, Math.max(0, nav.length - 1))]?.id ?? nav[0]?.id
+      if (activePageId.value) syncActiveLayerForPage(activePageId.value)
       selectedWidgetIds.value = []
       clearHistory()
     }
     touch()
+    return { ok: true }
   }
 
   function movePage(pageId: string, direction: -1 | 1) {
@@ -1133,7 +1550,7 @@ export const useProjectStore = defineStore('project', () => {
     const oz = (Math.floor(slot / 3) - 1) * 1.2
     obj.transform.position = [cx + ox, y, cz + oz]
 
-    // 模型：按毫米建模 → 场景米；scale=[1,1,1] 即真实尺寸（sourceSize×0.001）
+    // 模型：文件按米建模；scale=[1,1,1] 即真实尺寸（与 sourceSize 同数值）
     if (opts?.modelResourceId) {
       const url = getResourceUrl(opts.modelResourceId)
       if (url) {
@@ -1142,7 +1559,7 @@ export const useProjectStore = defineStore('project', () => {
           const { sizeMetersFromObject3d } = await import('@web-scada/core')
           const { sourceSize } = await measureModelSourceSize(url)
           obj.sourceSize = sourceSize
-          obj.sourceUnit = 'mm'
+          obj.sourceUnit = 'm'
           obj.transform.scale = [1, 1, 1]
           // 底部贴近地面：米制高度的一半
           const sizeM = sizeMetersFromObject3d(obj)
@@ -1163,12 +1580,28 @@ export const useProjectStore = defineStore('project', () => {
     return obj
   }
 
+  function resolvePage3dForObject(objectId: string): Page3D | null {
+    const active = activePage3d.value
+    if (active && findObject3dDeep(active.objects, objectId)) return active
+    const retId = panelEditReturnPageId.value
+    if (retId) {
+      const ret = document.value.pages.find((p) => p.id === retId && p.type === '3d')
+      if (ret && ret.type === '3d' && findObject3dDeep(ret.objects, objectId)) return ret
+    }
+    for (const p of document.value.pages) {
+      if (p.type !== '3d') continue
+      if (findObject3dDeep(p.objects, objectId)) return p
+    }
+    return null
+  }
+
   function updateObject3d(
     id: string,
     patch: Partial<Object3DNode>,
     opts?: { recordHistory?: boolean },
   ) {
-    const page = activePage3d.value
+    // 面板 2D 弹窗打开时 active 是 2D 页，需回落到原 3D 页
+    const page = resolvePage3dForObject(id)
     if (!page) return
     const loc = locateObject3d(page.objects, id)
     if (!loc) return
@@ -1179,7 +1612,8 @@ export const useProjectStore = defineStore('project', () => {
       ...patch,
       transform: patch.transform ? { ...prev.transform, ...patch.transform } : prev.transform,
       style: patch.style ? { ...prev.style, ...patch.style } : prev.style,
-      panel: patch.panel !== undefined ? patch.panel : prev.panel,
+      // 必须用 in：显式 panel: undefined 表示关闭面板；!== undefined 会永远保留旧 panel
+      panel: 'panel' in patch ? patch.panel : prev.panel,
       bindings: patch.bindings ?? prev.bindings,
       animations: patch.animations ?? prev.animations,
       animationLinks: patch.animationLinks ?? prev.animationLinks,
@@ -1187,6 +1621,7 @@ export const useProjectStore = defineStore('project', () => {
       children: patch.children ?? prev.children,
     }
     touch()
+    if ('panel' in patch) bumpScene3d()
   }
 
   function removeObject3d(id: string) {
@@ -1642,19 +2077,33 @@ export const useProjectStore = defineStore('project', () => {
     scene3dCameraCmd.value = { type, at: Date.now() }
   }
 
-  /** 将资源 path 解析为浏览器可加载 URL */
+  /** 将资源 path 解析为浏览器可加载 URL（路径段编码，兼容中文文件名） */
   function resolveResourceUrl(path: string): string {
     if (!path) return path
-    if (
-      path.startsWith('data:') ||
-      path.startsWith('blob:') ||
-      path.startsWith('http://') ||
-      path.startsWith('https://')
-    ) {
-      return path
+    if (path.startsWith('data:') || path.startsWith('blob:')) return path
+    const encodePath = (p: string) =>
+      p
+        .split('/')
+        .map((seg) => {
+          if (!seg) return seg
+          try {
+            return encodeURIComponent(decodeURIComponent(seg))
+          } catch {
+            return encodeURIComponent(seg)
+          }
+        })
+        .join('/')
+    if (path.startsWith('http://') || path.startsWith('https://')) {
+      try {
+        const u = new URL(path)
+        u.pathname = encodePath(u.pathname)
+        return u.toString()
+      } catch {
+        return path
+      }
     }
-    if (path.startsWith('/')) return path
-    return `/api/files/${path.replace(/^\/+/, '')}`
+    if (path.startsWith('/')) return encodePath(path)
+    return encodePath(`/api/files/${path.replace(/^\/+/, '')}`)
   }
 
   function getResourceUrl(resourceId: string): string | undefined {
@@ -2074,6 +2523,17 @@ log('script ready · ' + (context.trigger || 'try'))
     closeAnimationConnection,
     openObject3dPanelEditor,
     closeObject3dPanelEditor,
+    saveObject3dPanelEditor,
+    discardObject3dPanelEditor,
+    panelEditObjectId,
+    panelEditReturnPageId,
+    isPanelEditMode,
+    getPanelEditObject,
+    ensurePanelPage2d,
+    bindPanelPage2d,
+    openPanelPageInDesigner,
+    getPanelPage2d,
+    findObjectsUsingPanelPage2d,
     openObject3dModelEditor,
     closeObject3dModelEditor,
     moveWidgetIndex,

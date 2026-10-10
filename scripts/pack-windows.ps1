@@ -27,9 +27,20 @@ if ($LASTEXITCODE -ne 0) { throw 'web build failed' }
 Copy-Item -Path (Join-Path $Root 'apps\web\dist\*') -Destination (Join-Path $OutDir 'public') -Recurse -Force
 
 Write-Host '==> bundle server'
+# pnpm: resolve esbuild from .pnpm store when not hoisted
 $Esbuild = Join-Path $Root 'node_modules\esbuild\bin\esbuild'
 if (-not (Test-Path $Esbuild)) {
   $Esbuild = Join-Path $Root 'apps\web\node_modules\esbuild\bin\esbuild'
+}
+if (-not (Test-Path $Esbuild)) {
+  $pkg = Get-ChildItem (Join-Path $Root 'node_modules\.pnpm') -Directory -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -like 'esbuild@*' } |
+    Sort-Object Name -Descending |
+    Select-Object -First 1
+  if ($pkg) {
+    $cand = Join-Path $pkg.FullName 'node_modules\esbuild\bin\esbuild'
+    if (Test-Path $cand) { $Esbuild = $cand }
+  }
 }
 if (-not (Test-Path $Esbuild)) {
   throw 'esbuild not found; run pnpm install first'

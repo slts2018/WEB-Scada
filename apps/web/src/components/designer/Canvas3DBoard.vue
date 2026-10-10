@@ -644,7 +644,7 @@ onMounted(async () => {
           }
         },
         onEmptyPointerDown: (e) => onEmptyPointerDown(e),
-        // 点选已在 pointerdown/onSelect 完成；松手不再 select，避免冲掉 Ctrl/Shift 多选
+        // 设计端不执行业务事件；事件仅在运行端生效
         onObjectClick: () => {
           /* 单击选中已在 onSelect 完成 */
         },
@@ -658,7 +658,7 @@ onMounted(async () => {
           if (!id) return
           project.selectObject3d(id)
           syncSelectionGizmo()
-          project.openObject3dPanelEditor()
+          project.openObject3dPanelEditor(id)
         },
         onSpawnHint: (hint) => {
           project.setSpawnHint3d(hint)
@@ -679,6 +679,10 @@ onMounted(async () => {
           }
           skipSelectedVisualUntil = performance.now() + 250
           project.commitObject3dTransforms(filtered)
+        },
+        resolvePage2d: (page2dId) => {
+          const page = project.document.pages.find((p) => p.id === page2dId && p.type === '2d')
+          return page && page.type === '2d' ? page : null
         },
       },
       { enableGizmo: true, enableLabels: false },
@@ -717,7 +721,7 @@ watch(
 )
 
 watch(
-  () => object3dPanelSignature(props.page.objects),
+  () => object3dPanelSignature(props.page.objects, project.document.pages),
   () => {
     if (!bundle) return
     walkObject3dTree(props.page.objects, (obj) => {

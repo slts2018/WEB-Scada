@@ -1,15 +1,31 @@
 /**
  * 3D 跟镜头 HTML 面板 DOM（挂到 CSS2DObject.element）
  * 结构：host（CSS2D 定位）→ world-scale（按相机距离缩放）→ panel（内容）
- * 内容区为自由坐标布局（absolute），兼容旧工程无 x/y 时的流式兜底。
+ * 内容区为 Konva Stage（完整 2D 绑定/事件）；scene3d 控件忽略。
  */
-import type { Object3DNode, Object3DPanel, Object3DPanelItem } from '@web-scada/core'
+import type {
+  EventBinding,
+  EventTrigger,
+  Object3DNode,
+  Object3DPanel,
+  Object3DPanelItem,
+  Page2D,
+  TagValue,
+  Widget2D,
+} from '@web-scada/core'
 import {
   defaultPanelFontSize,
+  panelWidgetValueTagId,
   resolvePanelContentSize,
-  resolvePanelItemRect,
   resolvePanelTitleBarHeight,
+  resolvePanelWidgets,
 } from '@web-scada/core'
+import {
+  mountPanelKonvaRuntime,
+  type PanelKonvaRuntime,
+} from '@/shared/three/panelKonvaRuntime'
+
+const panelKonvaByHost = new WeakMap<HTMLElement, PanelKonvaRuntime>()
 
 const STYLE_ID = 'scada-3d-panel-style'
 
@@ -21,9 +37,7 @@ export function ensureObject3dPanelStyles() {
   pointer-events: none;
 }
 .scada-3d-panel__world-scale {
-  /* 与 CSS2D center(0.5,1) 一致：从底边中心缩放，贴合锚点 */
-  transform-origin: 50% 100%;
-  will-change: transform;
+  /* 距离缩放用 zoom（见 createScene3D.updatePanelWorldScales），勿再套 transform:scale */
 }
 .scada-3d-panel {
   box-sizing: border-box;
@@ -38,9 +52,18 @@ export function ensureObject3dPanelStyles() {
   font-size: 12px;
   line-height: 1.35;
   box-shadow: none;
-  pointer-events: auto;
+  /* 面板底板穿透，避免挡住模型单击；可点控件再开 auto */
+  pointer-events: none;
   user-select: none;
   overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+.scada-3d-panel__title,
+.scada-3d-panel__stage,
+.scada-3d-panel__btn,
+.scada-3d-panel__switch {
+  pointer-events: auto;
 }
 .scada-3d-panel__title {
   box-sizing: border-box;
@@ -170,6 +193,72 @@ export function ensureObject3dPanelStyles() {
   padding: 4px;
   text-align: center;
 }
+.scada-3d-panel__rect {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+}
+.scada-3d-panel__switch {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: #e2e8f0;
+  font: inherit;
+}
+.scada-3d-panel__switch-track {
+  position: relative;
+  flex: 0 0 auto;
+  width: 44px;
+  height: 24px;
+  border-radius: 999px;
+  background: #475569;
+  border: 1px solid #94a3b8;
+  transition: background 0.15s ease;
+}
+.scada-3d-panel__item[data-on='1'] .scada-3d-panel__switch-track {
+  background: #22c55e;
+}
+.scada-3d-panel__switch-knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: #f8fafc;
+  transition: left 0.15s ease;
+}
+.scada-3d-panel__item[data-on='1'] .scada-3d-panel__switch-knob {
+  left: 22px;
+}
+.scada-3d-panel__switch-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+.scada-3d-panel__lamp {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  border: 2px solid #14532d;
+  background: #334155;
+  box-shadow: none;
+}
+.scada-3d-panel__item[data-on='1'] .scada-3d-panel__lamp {
+  background: #22c55e;
+  box-shadow: 0 0 14px #22c55e;
+}
 /* 文本/数值/按钮：填充方式（图片走 object-fit） */
 .scada-3d-panel__item[data-content-fit='none'],
 .scada-3d-panel__item[data-content-fit='contain'],
@@ -229,12 +318,73 @@ export type Object3dPanelDomHandlers = {
   onSelect?: (objectId: string) => void
   /** 设计端：双击面板打开编辑器 */
   onEdit?: (objectId: string) => void
-  /** 运行端：点按钮 */
-  onButton?: (objectId: string, item: Object3DPanelItem) => void
-  /** 设计端禁用按钮真实写值 */
+  /** 运行端：点按钮（兼容旧回调） */
+  onButton?: (objectId: string, widget: Widget2D) => void
+  /** 运行端：完整 2D 事件 */
+  onWidgetEvent?: (
+    objectId: string,
+    widgetId: string,
+    trigger: EventTrigger,
+    events: EventBinding[],
+  ) => void
+  onAnimationInput?: (objectId: string, widgetId: string) => void
+  onDragWrite?: (
+    objectId: string,
+    widgetId: string,
+    axis: 'h' | 'v',
+    tagId: string,
+    value: number,
+  ) => void
+  /** 设计端禁用写值交互 */
   designerMode?: boolean
   /** 解析面板内图片资源 URL */
   resolveResourceUrl?: (resourceId: string) => string | undefined
+  /** 解析 panel.page2dId */
+  resolvePage2d?: (page2dId: string) => Page2D | null | undefined
+}
+
+function findPanelHost(root: HTMLElement): HTMLElement | null {
+  if (root.classList.contains('scada-3d-panel-host')) return root
+  return root.closest('.scada-3d-panel-host') as HTMLElement | null
+}
+
+/**
+ * 面板内是否有真正接事件的控件（按钮/开关/输入连接/拖拽写值）。
+ * 必须问已经挂好的 Konva 运行时：面板内容可能来自 page2dId 绑定的 2D 页，
+ * 只看 panel.widgets 会漏判（漏判会把可点面板整块穿透，按钮就点不动了）。
+ */
+export function panelRuntimeIsInteractive(root: HTMLElement): boolean {
+  const host = findPanelHost(root)
+  const rt = host ? panelKonvaByHost.get(host) : undefined
+  if (!rt) return false
+  type KonvaNodeWithListeners = { listening: () => boolean; eventListeners?: Record<string, unknown> }
+  return rt.bundle.widgetLayer.getChildren().some((node) => {
+    const n = node as unknown as KonvaNodeWithListeners
+    if (typeof n.listening !== 'function' || !n.listening()) return false
+    const listeners = n.eventListeners
+    if (!listeners) return false
+    return Object.values(listeners).some((list) => Array.isArray(list) && list.length > 0)
+  })
+}
+
+export function getPanelKonvaRuntime(root: HTMLElement): PanelKonvaRuntime | undefined {
+  const host = findPanelHost(root)
+  return host ? panelKonvaByHost.get(host) : undefined
+}
+
+export function disposePanelKonvaRuntime(root: HTMLElement) {
+  const host = findPanelHost(root)
+  if (!host) return
+  const rt = panelKonvaByHost.get(host)
+  rt?.dispose()
+  panelKonvaByHost.delete(host)
+}
+
+export function refreshPanelKonvaVisuals(
+  root: HTMLElement,
+  getTag: (id: string) => TagValue | undefined,
+) {
+  getPanelKonvaRuntime(root)?.refresh(getTag)
 }
 
 function stopNav(e: Event) {
@@ -441,15 +591,6 @@ export function applyPanelImageObjectFit(
   applyPanelItemContentFit(el, item, panelFit)
 }
 
-function applyItemRect(el: HTMLElement, item: Object3DPanelItem, index: number) {
-  const rect = resolvePanelItemRect(item, index)
-  el.style.left = `${rect.x}px`
-  el.style.top = `${rect.y}px`
-  el.style.width = `${rect.width}px`
-  el.style.height = `${rect.height}px`
-  el.style.zIndex = String(index + 1)
-}
-
 export function buildObject3dPanelElement(
   node: Object3DNode,
   handlers: Object3dPanelDomHandlers = {},
@@ -481,127 +622,107 @@ export function buildObject3dPanelElement(
   })
   el.addEventListener('wheel', stopNav, { passive: true })
 
-  // 无标题栏；设计端手柄穿透时保留顶边点选条
   if (handlers.designerMode) {
     const hit = document.createElement('div')
     hit.className = 'scada-3d-panel__hit'
-    hit.title = '双击编辑面板'
+    hit.title = '双击编辑面板内容'
     el.appendChild(hit)
   }
 
   const stage = document.createElement('div')
-  stage.className = 'scada-3d-panel__stage'
+  stage.className = 'scada-3d-panel__stage scada-3d-panel__konva'
   stage.style.width = `${width}px`
   stage.style.height = `${stageH}px`
   el.appendChild(stage)
 
-  const panelFit = resolvePanelObjectFit(panel)
-  ;(panel?.items ?? []).forEach((item, index) => {
-    if (item.type === 'label') {
-      const wrap = document.createElement('div')
-      wrap.className = 'scada-3d-panel__item scada-3d-panel__text'
-      wrap.dataset.itemId = item.id
-      wrap.textContent = item.text || ''
-      applyItemRect(wrap, item, index)
-      applyPanelItemTypography(wrap, item)
-      applyPanelItemContentFit(wrap, item, panelFit)
-      stage.appendChild(wrap)
-      return
-    }
-    if (item.type === 'value') {
-      const row = document.createElement('div')
-      row.className = 'scada-3d-panel__item scada-3d-panel__row'
-      row.dataset.itemId = item.id
-      const lab = document.createElement('span')
-      lab.className = 'scada-3d-panel__label'
-      lab.textContent = item.text || item.tagId || '数值'
-      const val = document.createElement('span')
-      val.className = 'scada-3d-panel__value'
-      val.dataset.role = 'value'
-      val.textContent = '--'
-      row.append(lab, val)
-      applyItemRect(row, item, index)
-      applyPanelItemTypography(row, item)
-      applyPanelItemContentFit(row, item, panelFit)
-      stage.appendChild(row)
-      return
-    }
-    if (item.type === 'button') {
-      const itemHost = document.createElement('div')
-      itemHost.className = 'scada-3d-panel__item'
-      itemHost.dataset.itemId = item.id
-      const btn = document.createElement('button')
-      btn.type = 'button'
-      btn.className = 'scada-3d-panel__btn'
-      btn.textContent = item.text || '按钮'
-      btn.disabled = handlers.designerMode === true || !item.tagId
-      btn.addEventListener('pointerdown', stopNav)
-      btn.addEventListener('click', (e) => {
-        e.preventDefault()
-        stopNav(e)
-        if (handlers.designerMode) {
-          handlers.onSelect?.(node.id)
-          return
-        }
-        handlers.onButton?.(node.id, item)
-      })
-      itemHost.appendChild(btn)
-      applyItemRect(itemHost, item, index)
-      applyPanelItemTypography(itemHost, item)
-      applyPanelItemContentFit(itemHost, item, panelFit)
-      stage.appendChild(itemHost)
-      return
-    }
-    if (item.type === 'image') {
-      const wrap = document.createElement('div')
-      wrap.className = 'scada-3d-panel__item scada-3d-panel__img-wrap'
-      wrap.dataset.itemId = item.id
-      const url = item.resourceId ? handlers.resolveResourceUrl?.(item.resourceId) : undefined
-      if (url) {
-        const img = document.createElement('img')
-        img.className = 'scada-3d-panel__img'
-        img.alt = item.text || '图片'
-        img.draggable = false
-        img.src = url
-        wrap.appendChild(img)
-      } else {
-        const ph = document.createElement('div')
-        ph.className = 'scada-3d-panel__img-placeholder'
-        ph.textContent = item.text || '未选图片'
-        wrap.appendChild(ph)
+  const runtime = mountPanelKonvaRuntime(stage, node.id, panel, {
+    readOnly: handlers.designerMode === true,
+    resolveResourceUrl: handlers.resolveResourceUrl,
+    resolvePage2d: handlers.resolvePage2d,
+    onWidgetEvent: (widgetId, trigger, events) => {
+      if (handlers.onWidgetEvent) {
+        handlers.onWidgetEvent(node.id, widgetId, trigger, events)
+        return
       }
-      applyItemRect(wrap, item, index)
-      applyPanelItemContentFit(wrap, item, panelFit)
-      stage.appendChild(wrap)
-    }
+      // 无完整事件处理器时回退旧按钮回调
+      if (trigger === 'click') {
+        const widget = runtime.widgets.find((w) => w.id === widgetId)
+        if (widget) handlers.onButton?.(node.id, widget)
+      }
+    },
+    onAnimationInput: (widgetId) => {
+      handlers.onAnimationInput?.(node.id, widgetId)
+    },
+    onDragWrite: (widgetId, axis, tagId, value) => {
+      handlers.onDragWrite?.(node.id, widgetId, axis, tagId, value)
+    },
   })
+  panelKonvaByHost.set(host, runtime)
 
   scaleWrap.appendChild(el)
   host.appendChild(scaleWrap)
   return host
 }
 
-export function setObject3dPanelValues(root: HTMLElement, values: Record<string, string>) {
-  for (const [itemId, text] of Object.entries(values)) {
-    const cell = root.querySelector(
-      `[data-item-id="${CSS.escape(itemId)}"] [data-role="value"]`,
-    )
-    if (cell) cell.textContent = text
+export type PanelWidgetRuntimeState = {
+  valueText?: string
+  on?: boolean
+}
+
+export function setObject3dPanelValues(
+  root: HTMLElement,
+  values: Record<string, string | PanelWidgetRuntimeState>,
+) {
+  // Konva 路径由 refreshPanelKonvaVisuals 负责；此处仅兼容旧 DOM
+  if (getPanelKonvaRuntime(root)) return
+  for (const [itemId, raw] of Object.entries(values)) {
+    const el = root.querySelector(`[data-item-id="${CSS.escape(itemId)}"]`) as HTMLElement | null
+    if (!el) continue
+    const st: PanelWidgetRuntimeState =
+      typeof raw === 'string' ? { valueText: raw } : raw
+    if (st.valueText != null) {
+      const cell = el.querySelector('[data-role="value"]')
+      if (cell) cell.textContent = st.valueText
+    }
+    if (st.on != null) {
+      el.dataset.on = st.on ? '1' : '0'
+      const lamp = el.querySelector('.scada-3d-panel__lamp') as HTMLElement | null
+      if (lamp) {
+        if (st.on) {
+          lamp.style.background = ''
+          lamp.style.boxShadow = ''
+        } else {
+          lamp.style.background = '#334155'
+          lamp.style.boxShadow = 'none'
+        }
+      }
+    }
   }
 }
 
 export function panelValuesFromTags(
   node: Object3DNode,
   getTagValue: (tagId: string) => unknown,
-): Record<string, string> {
-  const out: Record<string, string> = {}
-  for (const item of node.panel?.items ?? []) {
-    if (item.type !== 'value') continue
-    if (!item.tagId) {
-      out[item.id] = '--'
+): Record<string, PanelWidgetRuntimeState> {
+  const out: Record<string, PanelWidgetRuntimeState> = {}
+  for (const widget of resolvePanelWidgets(node.panel)) {
+    if (widget.type === 'value') {
+      const tagId = panelWidgetValueTagId(widget)
+      out[widget.id] = {
+        valueText: tagId ? formatPanelTagDisplay(getTagValue(tagId)) : '--',
+      }
       continue
     }
-    out[item.id] = formatPanelTagDisplay(getTagValue(item.tagId))
+    if (widget.type === 'switch' || widget.type === 'lamp') {
+      const tagId = panelWidgetValueTagId(widget)
+      if (!tagId) {
+        out[widget.id] = {
+          on: widget.props.on === true || widget.props.on === 'true' || widget.props.on === 1,
+        }
+        continue
+      }
+      out[widget.id] = { on: Boolean(getTagValue(tagId)) }
+    }
   }
   return out
 }

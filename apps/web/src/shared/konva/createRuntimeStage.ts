@@ -116,74 +116,8 @@ export function createRuntimeStage(
     node.off('mouseenter mouseleave click dblclick mousedown mouseup dragstart dragmove dragend')
     node.off('pointerdown pointermove pointerup pointercancel wheel contextmenu')
     if (widget.type === 'scene3d') {
-      // 透明热区：把指针事件交给下方 HTML 三维层（叠在 Konva 之下）
-      const forward = (e: Konva.KonvaEventObject<MouseEvent | PointerEvent | WheelEvent>) => {
-        e.cancelBubble = true
-        const pe = e.evt
-        pe.preventDefault()
-        pe.stopPropagation()
-        const el = stage.container()
-        const prev = el.style.pointerEvents
-        el.style.pointerEvents = 'none'
-        const below = document.elementFromPoint(pe.clientX, pe.clientY)
-        el.style.pointerEvents = prev
-        if (!below || below === el || el.contains(below)) return
-        const init: MouseEventInit & PointerEventInit & WheelEventInit = {
-          bubbles: true,
-          cancelable: true,
-          view: window,
-          clientX: pe.clientX,
-          clientY: pe.clientY,
-          screenX: pe.screenX,
-          screenY: pe.screenY,
-          button: 'button' in pe ? pe.button : 0,
-          buttons: 'buttons' in pe ? pe.buttons : 0,
-          ctrlKey: pe.ctrlKey,
-          shiftKey: pe.shiftKey,
-          altKey: pe.altKey,
-          metaKey: pe.metaKey,
-        }
-        if (pe instanceof WheelEvent) {
-          below.dispatchEvent(
-            new WheelEvent(pe.type, {
-              ...init,
-              deltaX: pe.deltaX,
-              deltaY: pe.deltaY,
-              deltaZ: pe.deltaZ,
-              deltaMode: pe.deltaMode,
-            }),
-          )
-          return
-        }
-        if (typeof PointerEvent !== 'undefined' && pe instanceof PointerEvent) {
-          below.dispatchEvent(
-            new PointerEvent(pe.type, {
-              ...init,
-              pointerId: pe.pointerId,
-              pointerType: pe.pointerType,
-              isPrimary: pe.isPrimary,
-              pressure: pe.pressure,
-            }),
-          )
-          return
-        }
-        below.dispatchEvent(new MouseEvent(pe.type, init))
-      }
-      for (const type of [
-        'pointerdown',
-        'pointermove',
-        'pointerup',
-        'pointercancel',
-        'mousedown',
-        'mouseup',
-        'mousemove',
-        'click',
-        'dblclick',
-        'wheel',
-        'contextmenu',
-      ] as const) {
-        node.on(type, forward)
-      }
+      // 可交互三维由上层 HTML 叠层直接接收指针；此处不再转发合成事件
+      node.listening(false)
       return
     }
 
@@ -325,7 +259,11 @@ export function createRuntimeStage(
     }
   }
 
-  /** 运行端：仅透明热区；挖洞在 bgLayer，真实 3D 在下方 HTML 叠层 */
+  /**
+   * 运行端 scene3d：挖洞在 bgLayer。
+   * 可交互时 HTML 三维叠层在 Konva 之上，此处不 listening，避免抢点击。
+   * 仅展示时仍可 listening=false（无需热区）。
+   */
   const createScene3dRuntimeNode = (widget: Widget2D) => {
     const { width, height } = widget.transform
     const group = new Konva.Group({
@@ -337,7 +275,7 @@ export function createRuntimeStage(
       scaleX: widget.transform.scaleX ?? 1,
       scaleY: widget.transform.scaleY ?? 1,
       visible: widget.visible !== false,
-      listening: true,
+      listening: false,
       draggable: false,
     })
     group.setAttr('widgetId', widget.id)
@@ -347,7 +285,7 @@ export function createRuntimeStage(
         width,
         height,
         fill: 'rgba(0,0,0,0)',
-        listening: true,
+        listening: false,
         name: 'scene3d-hit',
       }),
     )

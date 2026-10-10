@@ -2,14 +2,13 @@ import type {
   Object3DMaterial,
   Object3DNode,
   Object3DPanel,
-  Object3DPanelItem,
   Transform3D,
 } from '../types/project'
 import {
   DEFAULT_PANEL_CONTENT_HEIGHT,
   DEFAULT_PANEL_CONTENT_WIDTH,
-  defaultPanelItemSize,
 } from './panelLayout'
+import { createDefaultPanelWidgets, normalizeObject3DPanel } from './panelWidgets'
 import { PRIMITIVE_SOURCE_SIZE_M } from './object3dSize'
 
 /** 从现有 style 生成可编辑的默认材质覆盖 */
@@ -43,43 +42,15 @@ const PRIMITIVE_META: Record<BuiltinPrimitive3D, { name: string; color: string }
   arrow: { name: '箭头', color: '#38bdf8' },
 }
 
-function newPanelItemId() {
-  return `pi_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
-}
-
-/** 默认面板内容：文本 + 写值按钮（自由坐标） */
+/** 默认面板内容：2D 组态子集（文本 + 写值按钮） */
 export function createDefaultObject3DPanel(title = '操作面板'): Object3DPanel {
-  const labelSize = defaultPanelItemSize('label')
-  const buttonSize = defaultPanelItemSize('button')
-  return {
+  return normalizeObject3DPanel({
     title,
     width: DEFAULT_PANEL_CONTENT_WIDTH,
     height: DEFAULT_PANEL_CONTENT_HEIGHT,
     objectFit: 'none',
-    items: [
-      {
-        id: newPanelItemId(),
-        type: 'label',
-        text: '文本',
-        x: 10,
-        y: 12,
-        width: labelSize.width,
-        height: labelSize.height,
-      } satisfies Object3DPanelItem,
-      {
-        id: newPanelItemId(),
-        type: 'button',
-        text: '写值',
-        tagId: '',
-        writeValue: 1,
-        confirm: true,
-        x: 10,
-        y: 48,
-        width: buttonSize.width,
-        height: buttonSize.height,
-      } satisfies Object3DPanelItem,
-    ],
-  }
+    widgets: createDefaultPanelWidgets(title),
+  })
 }
 
 export function createObject3D(
@@ -145,7 +116,7 @@ export function createObject3D(
       : sourcePrimitive
         ? ([...PRIMITIVE_SOURCE_SIZE_M[sourcePrimitive]] as [number, number, number])
         : ([1, 1, 1] as [number, number, number]),
-    sourceUnit: opts.modelResourceId ? 'mm' : 'm',
+    sourceUnit: 'm',
     transform: {
       position: [...(opts.transform?.position ?? defaultPos)] as [number, number, number],
       rotation: [...(opts.transform?.rotation ?? defaultRot)] as [number, number, number],

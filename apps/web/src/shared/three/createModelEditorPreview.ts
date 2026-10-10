@@ -10,12 +10,14 @@ import {
   CylinderGeometry,
   DirectionalLight,
   Group,
+  HemisphereLight,
   MathUtils,
   Mesh,
   MeshStandardMaterial,
   PerspectiveCamera,
   Scene,
   SphereGeometry,
+  SRGBColorSpace,
   Vector3,
   WebGLRenderer,
   type Object3D,
@@ -133,6 +135,7 @@ export function createModelEditorPreview(container: HTMLElement): ModelEditorPre
 
   const renderer = new WebGLRenderer({ antialias: true, alpha: false })
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
+  renderer.outputColorSpace = SRGBColorSpace
   renderer.domElement.style.width = '100%'
   renderer.domElement.style.height = '100%'
   renderer.domElement.style.display = 'block'
@@ -143,11 +146,13 @@ export function createModelEditorPreview(container: HTMLElement): ModelEditorPre
   controls.dampingFactor = 0.08
   controls.target.set(0, 0, 0)
 
-  scene.add(new AmbientLight(0xffffff, 0.55))
-  const key = new DirectionalLight(0xffffff, 1.05)
+  // 偏亮：无环境贴图时高金属度模型容易发黑，预览里加足环境光
+  scene.add(new AmbientLight(0xffffff, 0.85))
+  scene.add(new HemisphereLight(0xffffff, 0x445566, 0.55))
+  const key = new DirectionalLight(0xffffff, 1.25)
   key.position.set(4, 8, 5)
   scene.add(key)
-  const fill = new DirectionalLight(0x88aaff, 0.35)
+  const fill = new DirectionalLight(0x88aaff, 0.55)
   fill.position.set(-4, 2, -3)
   scene.add(fill)
 
@@ -191,9 +196,8 @@ export function createModelEditorPreview(container: HTMLElement): ModelEditorPre
   const applyAppearance = (node: Object3DNode) => {
     if (!meshRoot || disposed) return
     applyPivotPose(pivot, node)
-    materialCancel?.()
-    materialCancel = null
     if (node.material?.override) {
+      // applyObject3DMaterial 同签名不会取消进行中的贴图加载
       materialCancel = applyObject3DMaterial(
         meshRoot,
         node.material,
@@ -201,6 +205,8 @@ export function createModelEditorPreview(container: HTMLElement): ModelEditorPre
         () => undefined,
       )
     } else {
+      materialCancel?.()
+      materialCancel = null
       clearObject3DMaterialMaps(meshRoot)
       const color = node.style?.color || '#3d8bfd'
       const opacity = node.style?.opacity ?? 1

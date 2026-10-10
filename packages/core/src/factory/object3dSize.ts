@@ -19,7 +19,7 @@ export function roundMeters3(n: number): number {
 
 export function resolveSourceUnit(node: Pick<Object3DNode, 'sourceUnit' | 'modelResourceId'>): Object3DSourceUnit {
   if (node.sourceUnit === 'mm' || node.sourceUnit === 'm') return node.sourceUnit
-  return node.modelResourceId ? 'mm' : 'm'
+  return 'm'
 }
 
 /** 文件/几何单位 → 米 */

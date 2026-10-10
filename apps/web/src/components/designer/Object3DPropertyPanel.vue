@@ -1,23 +1,13 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import type {
-  BindableProp,
-  EventAction,
-  EventBinding,
-  EventTrigger,
-  Object3DPanel,
-  Page3DPresentation,
-  PropBinding,
-  StateAnimationRule,
-} from '@web-scada/core'
+import type { Object3DPanel, Page2D, Page3DPresentation } from '@web-scada/core'
 import {
   animationLinkTypeLabel,
   createDefaultObject3DPanel,
   DEFAULT_PAGE3D_PRESENTATION,
   DEFAULT_PANEL_CONTENT_HEIGHT,
   DEFAULT_PANEL_CONTENT_WIDTH,
-  EVENT_TRIGGER_OPTIONS,
   MAX_PANEL_CONTENT_SIZE,
   MIN_PANEL_CONTENT_HEIGHT,
   MIN_PANEL_CONTENT_WIDTH,
@@ -27,47 +17,22 @@ import {
   sizeMetersFromObject3d,
 } from '@web-scada/core'
 import { useProjectStore } from '@/stores/project'
-import { useTagStore } from '@/stores/tag'
-import { createBinding, createStateAnimation } from '@/shared/runtime/bindingEngine'
-import { formatTagOptionLabel } from '@/shared/runtime/tagLabel'
 
 const project = useProjectStore()
-const tags = useTagStore()
 const obj = computed(() => project.selectedObject3d)
 const multiCount = computed(() => project.selectedObject3dIds.length)
 const page3d = computed(() => project.activePage3d)
 const scenePres = computed(() => resolvePage3DPresentation(page3d.value?.presentation))
+/** 场景 / 对象属性分类：默认全部折叠，点标题再展开 */
+const sceneCollapse = ref<string[]>([])
+const objectCollapse = ref<string[]>([])
 
 /** 纯面板：无模型，属性栏不显示旋转，缩放改控面板宽高 */
 const isPanelOnly = computed(
   () => Boolean(obj.value?.panel) && !obj.value?.modelResourceId,
 )
 
-const pages2d = computed(() => project.document.pages.filter((p) => p.type === '2d'))
-
 const animLinks = computed(() => obj.value?.animationLinks ?? [])
-
-const bindableProps = computed(() => {
-  const base: Array<{ value: BindableProp; label: string }> = [
-    { value: 'color', label: '颜色' },
-    { value: 'visible', label: '可见' },
-    { value: 'opacity', label: '透明度' },
-    { value: 'x', label: '位置X' },
-    { value: 'y', label: '位置Y' },
-    { value: 'z', label: '位置Z' },
-  ]
-  if (isPanelOnly.value) return base
-  return [
-    ...base,
-    { value: 'rotX', label: '旋转X' },
-    { value: 'rotY', label: '旋转Y' },
-    { value: 'rotZ', label: '旋转Z' },
-    // 属性绑定仍写 transform.scale（Three 倍率）；米制尺寸请在上方「缩放（米）」编辑
-    { value: 'scaleX', label: '缩放倍率X' },
-    { value: 'scaleY', label: '缩放倍率Y' },
-    { value: 'scaleZ', label: '缩放倍率Z' },
-  ]
-})
 
 const sizeMeters = computed(() =>
   obj.value ? sizeMetersFromObject3d(obj.value) : ([0, 0, 0] as [number, number, number]),
@@ -140,101 +105,10 @@ function updatePanelSize(wh: 'width' | 'height', value: number) {
     wh === 'height' ? value : obj.value.panel.height,
   )
   patchPanel({ ...obj.value.panel, ...sized })
-}
-
-function addBinding() {
-  if (!obj.value) return
-  const tagId = tags.metas[0]?.tagId
-  if (!tagId) return
-  patch({ bindings: [...obj.value.bindings, createBinding('color', tagId)] })
-}
-
-function updateBinding(index: number, next: Partial<PropBinding>) {
-  if (!obj.value) return
-  const bindings = obj.value.bindings.map((b, i) => (i === index ? { ...b, ...next } : b))
-  patch({ bindings })
-}
-
-function removeBinding(index: number) {
-  if (!obj.value) return
-  patch({ bindings: obj.value.bindings.filter((_, i) => i !== index) })
-}
-
-function addStateAnim() {
-  if (!obj.value) return
-  const tagId = tags.metas.find((m) => m.dataType === 'bool')?.tagId || tags.metas[0]?.tagId
-  if (!tagId) return
-  const anim: StateAnimationRule = createStateAnimation({
-    tagId,
-    target: 'fill',
-    ranges: [
-      { equals: true, apply: { fill: '#22c55e' } },
-      { equals: false, apply: { fill: '#334155' } },
-    ],
-  })
-  patch({ animations: [...obj.value.animations, anim] })
-}
-
-function removeAnim(index: number) {
-  if (!obj.value) return
-  patch({ animations: obj.value.animations.filter((_, i) => i !== index) })
-}
-
-function pushEvent(actions: EventAction[], trigger: EventTrigger = 'click') {
-  if (!obj.value) return
-  const event: EventBinding = {
-    id: `evt_${Date.now()}`,
-    trigger,
-    actions,
+  const pageId = obj.value.panel.page2dId?.trim()
+  if (pageId) {
+    project.updatePageSettings(pageId, { width: sized.width, height: sized.height })
   }
-  patch({ events: [...obj.value.events, event] })
-}
-
-function addWriteEvent() {
-  const tag = tags.metas.find((m) => m.writable)
-  if (!tag) return
-  pushEvent([{ type: 'writeTag', tagId: tag.tagId, value: true, confirm: true }])
-}
-
-function addNavigateEvent() {
-  const pageId = project.document.pages[0]?.id
-  if (!pageId) return
-  pushEvent([{ type: 'navigate', pageId }])
-}
-
-function addOpenDialogEvent() {
-  const pageId = pages2d.value[0]?.id
-  if (!pageId) return
-  pushEvent([{ type: 'openDialog', dialogId: pageId }])
-}
-
-function addRunScriptEvent() {
-  const scriptId = project.document.scripts[0]?.id
-  if (!scriptId) return
-  pushEvent([{ type: 'runScript', scriptId }])
-}
-
-function updateEventTrigger(index: number, trigger: EventTrigger) {
-  if (!obj.value) return
-  const events = obj.value.events.map((e, i) => (i === index ? { ...e, trigger } : e))
-  patch({ events })
-}
-
-function updateEventAction(eventIndex: number, actionIndex: number, next: Partial<EventAction>) {
-  if (!obj.value) return
-  const events = obj.value.events.map((evt, i) => {
-    if (i !== eventIndex) return evt
-    const actions = evt.actions.map((a, j) =>
-      j === actionIndex ? ({ ...a, ...next } as EventAction) : a,
-    )
-    return { ...evt, actions }
-  })
-  patch({ events })
-}
-
-function removeEvent(index: number) {
-  if (!obj.value) return
-  patch({ events: obj.value.events.filter((_, i) => i !== index) })
 }
 
 function patchPanel(next: Object3DPanel | undefined) {
@@ -245,22 +119,25 @@ function enablePanel() {
   if (!obj.value) return
   if (obj.value.panel) return
   patchPanel(createDefaultObject3DPanel(obj.value.name || '操作面板'))
+  const page = project.ensurePanelPage2d(obj.value.id)
+  if (page) ElMessage.success(`已启用：${page.name}`)
 }
 
 function disablePanel() {
   patchPanel(undefined)
 }
 
-function openPanelEditor() {
+function openPanelIn2dEditor() {
   if (!obj.value) return
   if (!obj.value.panel) enablePanel()
-  project.openObject3dPanelEditor()
+  project.openObject3dPanelEditor(obj.value.id)
+  if (!project.object3dPanelEditorOpen) ElMessage.warning('无法打开面板编辑器')
 }
 
 function openModelEditor() {
   if (!obj.value) return
   if (isPanelOnly.value) {
-    ElMessage.warning('纯面板对象请使用「编辑面板」')
+    ElMessage.warning('纯面板对象请使用「编辑 2D 内容」')
     return
   }
   project.openObject3dModelEditor()
@@ -269,8 +146,12 @@ function openModelEditor() {
 const panelSummary = computed(() => {
   const p = obj.value?.panel
   if (!p) return ''
-  const title = p.title?.trim() || obj.value?.name || '面板'
-  return `${title} · ${p.items.length} 个控件`
+  const id = p.page2dId?.trim()
+  const page = id
+    ? project.document.pages.find((x): x is Page2D => x.type === '2d' && x.id === id)
+    : undefined
+  if (page) return `${page.width}×${page.height}`
+  return `${p.width}×${p.height}`
 })
 </script>
 
@@ -294,298 +175,178 @@ const panelSummary = computed(() => {
     </div>
     <div v-if="obj" class="panel-title">主选：{{ obj.name }}</div>
   </div>
-  <div v-if="obj" class="prop3d">
+  <div v-if="obj" class="prop3d object-edit">
     <div class="panel-title">对象属性</div>
-    <label>
-      <span>名称</span>
-      <el-input
-        size="small"
-        :model-value="obj.name"
-        @update:model-value="(v: string) => patch({ name: v })"
-      />
-    </label>
-    <label>
-      <span>颜色</span>
-      <el-color-picker
-        size="small"
-        :model-value="obj.style?.color || '#3d8bfd'"
-        @update:model-value="(v: string | null) => v && patch({ style: { ...obj!.style, color: v } })"
-      />
-    </label>
-    <div v-if="!isPanelOnly" class="panel-title row">
-      <span>模型外观</span>
-      <div class="link-adds">
-        <el-button size="small" type="primary" @click="openModelEditor">编辑模型…</el-button>
-      </div>
-    </div>
-    <p v-if="!isPanelOnly" class="multi-hint">
-      可改颜色、金属度/粗糙度与贴图；修改后写入工程并实时预览。
-    </p>
-    <el-checkbox
-      :model-value="obj.visible !== false"
-      @update:model-value="(v: boolean | string | number) => patch({ visible: Boolean(v) })"
-    >
-      可见
-    </el-checkbox>
-    <el-checkbox
-      :model-value="Boolean(obj.locked)"
-      @update:model-value="(v: boolean | string | number) => patch({ locked: Boolean(v) })"
-    >
-      锁定变换
-    </el-checkbox>
+    <p class="multi-hint">按分类编辑当前选中对象</p>
 
-    <div class="panel-title">位置</div>
-    <div class="xyz">
-      <el-input-number
-        v-for="(axis, i) in (['X', 'Y', 'Z'] as const)"
-        :key="'p' + axis"
-        size="small"
-        :disabled="Boolean(obj.locked)"
-        :model-value="obj.transform.position[i]"
-        :step="0.1"
-        controls-position="right"
-        @update:model-value="(v: number | undefined) => updateTransform('position', i as 0 | 1 | 2, Number(v) || 0)"
-      />
-    </div>
-    <template v-if="!isPanelOnly">
-      <div class="panel-title">旋转（°）</div>
-      <div class="xyz">
-        <el-input-number
-          v-for="(axis, i) in (['X', 'Y', 'Z'] as const)"
-          :key="'r' + axis"
-          size="small"
-          :disabled="Boolean(obj.locked)"
-          :model-value="obj.transform.rotation[i]"
-          :step="1"
-          controls-position="right"
-          @update:model-value="(v: number | undefined) => updateTransform('rotation', i as 0 | 1 | 2, Number(v) || 0)"
-        />
-      </div>
-      <div class="panel-title">缩放（米）</div>
-      <p class="multi-hint">X/Y/Z 为各轴向真实尺寸；模型按毫米文件换算。</p>
-      <div class="xyz">
-        <el-input-number
-          v-for="(axis, i) in (['X', 'Y', 'Z'] as const)"
-          :key="'s' + axis"
-          size="small"
-          :disabled="Boolean(obj.locked)"
-          :model-value="sizeMeters[i]"
-          :step="0.001"
-          :min="0.001"
-          :precision="3"
-          controls-position="right"
-          @update:model-value="(v: number | undefined) => updateSizeMeters(i as 0 | 1 | 2, Number(v) || 0.001)"
-        />
-      </div>
-    </template>
-    <template v-else>
-      <div class="panel-title">缩放（面板大小）</div>
-      <div class="xyz panel-size">
-        <label>
-          <span>宽</span>
-          <el-input-number
+    <el-collapse v-model="objectCollapse" class="scene-collapse">
+      <el-collapse-item title="1 · 基础" name="basic">
+        <label class="row">
+          <span>名称</span>
+          <el-input
             size="small"
-            :disabled="Boolean(obj.locked)"
-            :model-value="obj.panel?.width ?? DEFAULT_PANEL_CONTENT_WIDTH"
-            :min="MIN_PANEL_CONTENT_WIDTH"
-            :max="MAX_PANEL_CONTENT_SIZE"
-            :step="8"
-            controls-position="right"
-            @update:model-value="(v: number | undefined) => updatePanelSize('width', Number(v) || DEFAULT_PANEL_CONTENT_WIDTH)"
+            :model-value="obj.name"
+            @update:model-value="(v: string) => patch({ name: v })"
           />
         </label>
-        <label>
-          <span>高</span>
-          <el-input-number
+        <label class="row">
+          <span>颜色</span>
+          <el-color-picker
             size="small"
-            :disabled="Boolean(obj.locked)"
-            :model-value="obj.panel?.height ?? DEFAULT_PANEL_CONTENT_HEIGHT"
-            :min="MIN_PANEL_CONTENT_HEIGHT"
-            :max="MAX_PANEL_CONTENT_SIZE"
-            :step="8"
-            controls-position="right"
-            @update:model-value="(v: number | undefined) => updatePanelSize('height', Number(v) || DEFAULT_PANEL_CONTENT_HEIGHT)"
+            :model-value="obj.style?.color || '#3d8bfd'"
+            @update:model-value="(v: string | null) => v && patch({ style: { ...obj!.style, color: v } })"
           />
         </label>
-      </div>
-    </template>
-
-    <div class="panel-title row">
-      <span>跟镜头面板</span>
-      <div class="link-adds">
-        <el-button v-if="!obj.panel" size="small" type="primary" plain @click="enablePanel">
-          启用
-        </el-button>
-        <template v-else>
-          <el-button size="small" type="primary" @click="openPanelEditor">编辑面板…</el-button>
-          <el-button size="small" plain @click="disablePanel">关闭</el-button>
+        <el-checkbox
+          :model-value="obj.visible !== false"
+          @update:model-value="(v: boolean | string | number) => patch({ visible: Boolean(v) })"
+        >
+          可见
+        </el-checkbox>
+        <el-checkbox
+          :model-value="Boolean(obj.locked)"
+          @update:model-value="(v: boolean | string | number) => patch({ locked: Boolean(v) })"
+        >
+          锁定变换
+        </el-checkbox>
+        <template v-if="!isPanelOnly">
+          <div class="sub-label">模型外观</div>
+          <el-button size="small" type="primary" style="width: 100%" @click="openModelEditor">
+            编辑模型…
+          </el-button>
+          <p class="multi-hint">颜色、金属度/粗糙度与贴图；修改后写入工程并实时预览。</p>
         </template>
-      </div>
-    </div>
-    <template v-if="obj.panel">
-      <p class="multi-hint">{{ panelSummary }} · 始终朝向相机；双击场景面板也可打开编辑器。</p>
-    </template>
+      </el-collapse-item>
 
-    <div class="panel-title">动画连接</div>
-    <div class="anim-summary">
-      <el-button
-        type="primary"
-        size="small"
-        style="width: 100%"
-        @click="project.openAnimationConnection()"
-      >
-        动画连接…
-      </el-button>
-      <div v-if="animLinks.length" class="summary-list">
-        <div v-for="l in animLinks" :key="l.id" class="summary-item">
-          <span>{{ animationLinkTypeLabel(l.type, '3d') }}</span>
-          <el-tag size="small" :type="l.enabled ? 'success' : 'info'">
-            {{ l.enabled ? '已激活' : '未激活' }}
-          </el-tag>
+      <el-collapse-item title="2 · 变换" name="transform">
+        <div class="sub-label">位置</div>
+        <div class="xyz">
+          <el-input-number
+            v-for="(axis, i) in (['X', 'Y', 'Z'] as const)"
+            :key="'p' + axis"
+            size="small"
+            :disabled="Boolean(obj.locked)"
+            :model-value="obj.transform.position[i]"
+            :step="0.1"
+            controls-position="right"
+            @update:model-value="(v: number | undefined) => updateTransform('position', i as 0 | 1 | 2, Number(v) || 0)"
+          />
         </div>
-      </div>
-      <p v-else class="multi-hint">在弹窗中配置位移、颜色、拖拽写等连接</p>
-    </div>
-
-    <div class="panel-title row">
-      <span>数据驱动</span>
-      <el-button size="small" @click="addBinding">绑定</el-button>
-    </div>
-    <div v-for="(b, i) in obj.bindings" :key="b.id" class="card">
-      <el-select
-        size="small"
-        :model-value="b.prop"
-        @update:model-value="(v: BindableProp) => updateBinding(i, { prop: v })"
-      >
-        <el-option v-for="p in bindableProps" :key="p.value" :label="p.label" :value="p.value" />
-      </el-select>
-      <el-select
-        size="small"
-        filterable
-        :model-value="b.tagId"
-        @update:model-value="(v: string) => updateBinding(i, { tagId: v })"
-      >
-        <el-option
-          v-for="item in tags.list"
-          :key="item.meta.tagId"
-          :label="formatTagOptionLabel(item.meta, item.value?.quality)"
-          :value="item.meta.tagId"
-        />
-      </el-select>
-      <el-button size="small" text type="danger" @click="removeBinding(i)">删</el-button>
-    </div>
-
-    <div class="panel-title row">
-      <span>动画</span>
-      <el-button size="small" @click="addStateAnim">状态色</el-button>
-    </div>
-    <div v-for="(a, i) in obj.animations" :key="a.id" class="card">
-      <el-tag size="small">{{ a.kind }}</el-tag>
-      <span class="muted">{{ a.tagId }}</span>
-      <el-button size="small" text type="danger" @click="removeAnim(i)">删</el-button>
-    </div>
-
-    <div class="panel-title row">
-      <span>事件</span>
-      <div class="link-adds">
-        <el-button size="small" @click="addWriteEvent">写值</el-button>
-        <el-button size="small" @click="addNavigateEvent">跳转</el-button>
-        <el-button size="small" :disabled="!pages2d.length" @click="addOpenDialogEvent">
-          对话框
-        </el-button>
-        <el-button
-          size="small"
-          :disabled="!project.document.scripts.length"
-          @click="addRunScriptEvent"
-        >
-          脚本
-        </el-button>
-      </div>
-    </div>
-    <div v-for="(e, i) in obj.events" :key="e.id" class="card col">
-      <div class="row tight">
-        <el-select
-          size="small"
-          :model-value="e.trigger"
-          style="width: 120px"
-          @update:model-value="(v: EventTrigger) => updateEventTrigger(i, v)"
-        >
-          <el-option
-            v-for="opt in EVENT_TRIGGER_OPTIONS.filter(
-              (o) => o.value === 'click' || o.value === 'dblclick',
-            )"
-            :key="opt.value"
-            :label="opt.label"
-            :value="opt.value"
-          />
-        </el-select>
-        <el-button size="small" text type="danger" @click="removeEvent(i)">删</el-button>
-      </div>
-      <div v-for="(action, j) in e.actions" :key="j" class="action-row">
-        <el-tag size="small">{{ action.type }}</el-tag>
-        <template v-if="action.type === 'writeTag'">
-          <el-select
-            size="small"
-            filterable
-            :model-value="action.tagId"
-            @update:model-value="(v: string) => updateEventAction(i, j, { tagId: v })"
-          >
-            <el-option
-              v-for="item in tags.list.filter((t) => t.meta.writable)"
-              :key="item.meta.tagId"
-              :label="formatTagOptionLabel(item.meta, item.value?.quality)"
-              :value="item.meta.tagId"
+        <template v-if="!isPanelOnly">
+          <div class="sub-label">旋转（°）</div>
+          <div class="xyz">
+            <el-input-number
+              v-for="(axis, i) in (['X', 'Y', 'Z'] as const)"
+              :key="'r' + axis"
+              size="small"
+              :disabled="Boolean(obj.locked)"
+              :model-value="obj.transform.rotation[i]"
+              :step="1"
+              controls-position="right"
+              @update:model-value="(v: number | undefined) => updateTransform('rotation', i as 0 | 1 | 2, Number(v) || 0)"
             />
-          </el-select>
-          <el-checkbox
-            :model-value="Boolean(action.confirm)"
-            @update:model-value="(v: boolean | string | number) => updateEventAction(i, j, { confirm: Boolean(v) })"
-          >
-            确认
-          </el-checkbox>
-        </template>
-        <template v-else-if="action.type === 'navigate'">
-          <el-select
-            size="small"
-            filterable
-            :model-value="action.pageId"
-            @update:model-value="(v: string) => updateEventAction(i, j, { pageId: v })"
-          >
-            <el-option
-              v-for="p in project.document.pages"
-              :key="p.id"
-              :label="p.name"
-              :value="p.id"
+          </div>
+          <div class="sub-label">缩放（米）</div>
+          <p class="multi-hint">X/Y/Z 为各轴向真实尺寸（米）；模型文件按米建模。</p>
+          <div class="xyz">
+            <el-input-number
+              v-for="(axis, i) in (['X', 'Y', 'Z'] as const)"
+              :key="'s' + axis"
+              size="small"
+              :disabled="Boolean(obj.locked)"
+              :model-value="sizeMeters[i]"
+              :step="0.001"
+              :min="0.001"
+              :precision="3"
+              controls-position="right"
+              @update:model-value="(v: number | undefined) => updateSizeMeters(i as 0 | 1 | 2, Number(v) || 0.001)"
             />
-          </el-select>
+          </div>
         </template>
-        <template v-else-if="action.type === 'openDialog'">
-          <el-select
+        <template v-else>
+          <div class="sub-label">面板大小</div>
+          <div class="xyz panel-size">
+            <label>
+              <span>宽</span>
+              <el-input-number
+                size="small"
+                :disabled="Boolean(obj.locked)"
+                :model-value="obj.panel?.width ?? DEFAULT_PANEL_CONTENT_WIDTH"
+                :min="MIN_PANEL_CONTENT_WIDTH"
+                :max="MAX_PANEL_CONTENT_SIZE"
+                :step="8"
+                controls-position="right"
+                @update:model-value="(v: number | undefined) => updatePanelSize('width', Number(v) || DEFAULT_PANEL_CONTENT_WIDTH)"
+              />
+            </label>
+            <label>
+              <span>高</span>
+              <el-input-number
+                size="small"
+                :disabled="Boolean(obj.locked)"
+                :model-value="obj.panel?.height ?? DEFAULT_PANEL_CONTENT_HEIGHT"
+                :min="MIN_PANEL_CONTENT_HEIGHT"
+                :max="MAX_PANEL_CONTENT_SIZE"
+                :step="8"
+                controls-position="right"
+                @update:model-value="(v: number | undefined) => updatePanelSize('height', Number(v) || DEFAULT_PANEL_CONTENT_HEIGHT)"
+              />
+            </label>
+          </div>
+        </template>
+      </el-collapse-item>
+
+      <el-collapse-item title="3 · 跟镜头面板" name="panel">
+        <div v-if="!obj.panel" class="ops">
+          <el-button size="small" type="primary" plain style="width: 100%" @click="enablePanel">
+            启用面板
+          </el-button>
+          <p class="multi-hint">给模型挂一块跟镜头面板；纯面板请从「基础图元」拖入。</p>
+        </div>
+        <template v-else>
+          <p class="multi-hint">{{ panelSummary }} · 始终朝向相机</p>
+          <div class="ops">
+            <el-button size="small" type="primary" style="flex: 1" @click="openPanelIn2dEditor">
+              编辑面板内容
+            </el-button>
+            <el-button
+              v-if="!isPanelOnly"
+              size="small"
+              type="danger"
+              plain
+              @click="disablePanel"
+            >
+              关闭面板
+            </el-button>
+          </div>
+          <p class="multi-hint">双击场景中的面板也可打开编辑弹窗。</p>
+        </template>
+      </el-collapse-item>
+
+      <el-collapse-item title="4 · 动画连接" name="animLink">
+        <div class="anim-summary">
+          <el-button
+            type="primary"
             size="small"
-            filterable
-            :model-value="action.dialogId"
-            @update:model-value="(v: string) => updateEventAction(i, j, { dialogId: v })"
+            style="width: 100%"
+            @click="project.openAnimationConnection()"
           >
-            <el-option v-for="p in pages2d" :key="p.id" :label="p.name" :value="p.id" />
-          </el-select>
-        </template>
-        <template v-else-if="action.type === 'runScript'">
-          <el-select
-            size="small"
-            filterable
-            :model-value="action.scriptId"
-            @update:model-value="(v: string) => updateEventAction(i, j, { scriptId: v })"
-          >
-            <el-option
-              v-for="s in project.document.scripts"
-              :key="s.id"
-              :label="s.name"
-              :value="s.id"
-            />
-          </el-select>
-        </template>
-      </div>
-    </div>
+            动画连接…
+          </el-button>
+          <div v-if="animLinks.length" class="summary-list">
+            <div v-for="l in animLinks" :key="l.id" class="summary-item">
+              <span>{{ animationLinkTypeLabel(l.type, '3d') }}</span>
+              <el-tag size="small" :type="l.enabled ? 'success' : 'info'">
+                {{ l.enabled ? '已激活' : '未激活' }}
+              </el-tag>
+            </div>
+          </div>
+          <p class="multi-hint">
+            位移、颜色、拖拽写、属性绑定、事件等均在此配置（与对话框为同一份数据）
+          </p>
+        </div>
+      </el-collapse-item>
+    </el-collapse>
 
     <div class="ops">
       <el-button size="small" @click="project.duplicateObject3d(obj.id)">复制</el-button>
@@ -599,151 +360,314 @@ const panelSummary = computed(() => {
   </div>
   <div v-else class="prop3d scene-edit">
     <div class="panel-title">编辑场景</div>
-    <p class="scene-hint">未选中模型时编辑本页场景观感与默认相机（随工程保存）</p>
+    <p class="scene-hint">未选中模型时，按分类编辑本页场景（随工程保存）</p>
 
-    <div class="panel-title">环境</div>
-    <label class="row">
-      <span>背景色</span>
-      <el-color-picker
-        size="small"
-        :model-value="scenePres.background"
-        @update:model-value="(v: string | null) => patchPresentation({ background: v || DEFAULT_PAGE3D_PRESENTATION.background })"
-      />
-    </label>
-    <label class="row">
-      <span>环境亮度</span>
-      <el-slider
-        class="scene-slider"
-        :min="0"
-        :max="2"
-        :step="0.05"
-        :model-value="scenePres.environmentIntensity"
-        @update:model-value="(v: number | number[]) => patchPresentation({ environmentIntensity: Number(v) })"
-      />
-      <el-input-number
-        size="small"
-        :min="0"
-        :max="2"
-        :step="0.05"
-        controls-position="right"
-        :model-value="scenePres.environmentIntensity"
-        @update:model-value="(v: number | undefined) => patchPresentation({ environmentIntensity: Number(v) || 0 })"
-      />
-    </label>
-    <label class="row">
-      <span>环境光</span>
-      <el-slider
-        class="scene-slider"
-        :min="0"
-        :max="2"
-        :step="0.05"
-        :model-value="scenePres.ambientIntensity"
-        @update:model-value="(v: number | number[]) => patchPresentation({ ambientIntensity: Number(v) })"
-      />
-      <el-input-number
-        size="small"
-        :min="0"
-        :max="2"
-        :step="0.05"
-        controls-position="right"
-        :model-value="scenePres.ambientIntensity"
-        @update:model-value="(v: number | undefined) => patchPresentation({ ambientIntensity: Number(v) || 0 })"
-      />
-    </label>
+    <el-collapse v-model="sceneCollapse" class="scene-collapse">
+      <el-collapse-item title="1 · 环境" name="env">
+        <p class="scene-hint section-hint">背景色与整体明暗</p>
+        <label class="row">
+          <span>背景色</span>
+          <el-color-picker
+            size="small"
+            :model-value="scenePres.background"
+            @update:model-value="(v: string | null) => patchPresentation({ background: v || DEFAULT_PAGE3D_PRESENTATION.background })"
+          />
+        </label>
+        <label class="row">
+          <span>背景模式</span>
+          <el-select
+            size="small"
+            :model-value="scenePres.backgroundMode"
+            @update:model-value="(v: string) => patchPresentation({ backgroundMode: v === 'hemi' ? 'hemi' : 'color' })"
+          >
+            <el-option label="纯色" value="color" />
+            <el-option label="天空感" value="hemi" />
+          </el-select>
+        </label>
+        <label class="row">
+          <span>环境亮度</span>
+          <el-slider
+            class="scene-slider"
+            :min="0"
+            :max="2"
+            :step="0.05"
+            :model-value="scenePres.environmentIntensity"
+            @update:model-value="(v: number | number[]) => patchPresentation({ environmentIntensity: Number(v) })"
+          />
+          <el-input-number
+            size="small"
+            :min="0"
+            :max="2"
+            :step="0.05"
+            controls-position="right"
+            :model-value="scenePres.environmentIntensity"
+            @update:model-value="(v: number | undefined) => patchPresentation({ environmentIntensity: Number(v) || 0 })"
+          />
+        </label>
+        <label class="row">
+          <span>环境光</span>
+          <el-slider
+            class="scene-slider"
+            :min="0"
+            :max="2"
+            :step="0.05"
+            :model-value="scenePres.ambientIntensity"
+            @update:model-value="(v: number | number[]) => patchPresentation({ ambientIntensity: Number(v) })"
+          />
+          <el-input-number
+            size="small"
+            :min="0"
+            :max="2"
+            :step="0.05"
+            controls-position="right"
+            :model-value="scenePres.ambientIntensity"
+            @update:model-value="(v: number | undefined) => patchPresentation({ ambientIntensity: Number(v) || 0 })"
+          />
+        </label>
+      </el-collapse-item>
 
-    <div class="panel-title">阳光与阴影</div>
-    <label class="row">
-      <span>开启太阳光</span>
-      <el-checkbox
-        :model-value="scenePres.sunEnabled"
-        @update:model-value="(v: boolean | string | number) => patchPresentation({ sunEnabled: Boolean(v) })"
-      />
-    </label>
-    <label class="row">
-      <span>阳光亮度</span>
-      <el-slider
-        class="scene-slider"
-        :min="0"
-        :max="3"
-        :step="0.05"
-        :disabled="!scenePres.sunEnabled"
-        :model-value="scenePres.sunIntensity"
-        @update:model-value="(v: number | number[]) => patchPresentation({ sunIntensity: Number(v) })"
-      />
-      <el-input-number
-        size="small"
-        :min="0"
-        :max="3"
-        :step="0.05"
-        controls-position="right"
-        :disabled="!scenePres.sunEnabled"
-        :model-value="scenePres.sunIntensity"
-        @update:model-value="(v: number | undefined) => patchPresentation({ sunIntensity: Number(v) || 0 })"
-      />
-    </label>
-    <label class="row">
-      <span>产生阴影</span>
-      <el-checkbox
-        :model-value="scenePres.shadowsEnabled"
-        :disabled="!scenePres.sunEnabled"
-        @update:model-value="(v: boolean | string | number) => patchPresentation({ shadowsEnabled: Boolean(v) })"
-      />
-    </label>
-    <label class="row">
-      <span>阴影质量</span>
-      <el-select
-        size="small"
-        :disabled="!scenePres.sunEnabled || !scenePres.shadowsEnabled"
-        :model-value="scenePres.shadowMapSize"
-        @update:model-value="(v: number) => patchPresentation({ shadowMapSize: v })"
-      >
-        <el-option label="低 (512)" :value="512" />
-        <el-option label="中 (1024)" :value="1024" />
-        <el-option label="高 (2048)" :value="2048" />
-        <el-option label="极高 (4096)" :value="4096" />
-      </el-select>
-    </label>
-    <label class="row">
-      <span>阴影偏移</span>
-      <el-input-number
-        size="small"
-        :step="0.0001"
-        :disabled="!scenePres.sunEnabled || !scenePres.shadowsEnabled"
-        controls-position="right"
-        :model-value="scenePres.shadowBias"
-        @update:model-value="(v: number | undefined) => patchPresentation({ shadowBias: Number(v) || 0 })"
-      />
-    </label>
+      <el-collapse-item title="2 · 网格地面" name="grid">
+        <p class="scene-hint section-hint">辅助网格与地面阴影接收面</p>
+        <label class="row">
+          <span>显示网格</span>
+          <el-checkbox
+            :model-value="scenePres.gridVisible"
+            @update:model-value="(v: boolean | string | number) => patchPresentation({ gridVisible: Boolean(v) })"
+          />
+        </label>
+        <label class="row">
+          <span>主线颜色</span>
+          <el-color-picker
+            size="small"
+            :disabled="!scenePres.gridVisible"
+            :model-value="scenePres.gridColor"
+            @update:model-value="(v: string | null) => patchPresentation({ gridColor: v || DEFAULT_PAGE3D_PRESENTATION.gridColor })"
+          />
+        </label>
+        <label class="row">
+          <span>次线颜色</span>
+          <el-color-picker
+            size="small"
+            :disabled="!scenePres.gridVisible"
+            :model-value="scenePres.gridDivisionColor"
+            @update:model-value="(v: string | null) => patchPresentation({ gridDivisionColor: v || DEFAULT_PAGE3D_PRESENTATION.gridDivisionColor })"
+          />
+        </label>
+        <label class="row">
+          <span>地面不透明度</span>
+          <el-slider
+            class="scene-slider"
+            :min="0"
+            :max="1"
+            :step="0.01"
+            :model-value="scenePres.groundOpacity"
+            @update:model-value="(v: number | number[]) => patchPresentation({ groundOpacity: Number(v) })"
+          />
+          <el-input-number
+            size="small"
+            :min="0"
+            :max="1"
+            :step="0.01"
+            controls-position="right"
+            :model-value="scenePres.groundOpacity"
+            @update:model-value="(v: number | undefined) => patchPresentation({ groundOpacity: Number(v) || 0 })"
+          />
+        </label>
+      </el-collapse-item>
 
-    <div class="panel-title">相机</div>
-    <div class="cam-readout">
-      <template v-if="page3d?.camera">
-        <div>
-          位置
-          <code>
-            {{ formatCam(page3d.camera.position[0]) }},
-            {{ formatCam(page3d.camera.position[1]) }},
-            {{ formatCam(page3d.camera.position[2]) }}
-          </code>
+      <el-collapse-item title="3 · 阳光与阴影" name="sun">
+        <p class="scene-hint section-hint">平行光方向、亮度与阴影质量</p>
+        <label class="row">
+          <span>开启太阳光</span>
+          <el-checkbox
+            :model-value="scenePres.sunEnabled"
+            @update:model-value="(v: boolean | string | number) => patchPresentation({ sunEnabled: Boolean(v) })"
+          />
+        </label>
+        <label class="row">
+          <span>阳光亮度</span>
+          <el-slider
+            class="scene-slider"
+            :min="0"
+            :max="3"
+            :step="0.05"
+            :disabled="!scenePres.sunEnabled"
+            :model-value="scenePres.sunIntensity"
+            @update:model-value="(v: number | number[]) => patchPresentation({ sunIntensity: Number(v) })"
+          />
+          <el-input-number
+            size="small"
+            :min="0"
+            :max="3"
+            :step="0.05"
+            controls-position="right"
+            :disabled="!scenePres.sunEnabled"
+            :model-value="scenePres.sunIntensity"
+            @update:model-value="(v: number | undefined) => patchPresentation({ sunIntensity: Number(v) || 0 })"
+          />
+        </label>
+        <label class="row">
+          <span>水平角 (°)</span>
+          <el-slider
+            class="scene-slider"
+            :min="0"
+            :max="360"
+            :step="1"
+            :disabled="!scenePres.sunEnabled"
+            :model-value="scenePres.sunAzimuthDeg"
+            @update:model-value="(v: number | number[]) => patchPresentation({ sunAzimuthDeg: Number(v) })"
+          />
+          <el-input-number
+            size="small"
+            :min="0"
+            :max="360"
+            :step="1"
+            controls-position="right"
+            :disabled="!scenePres.sunEnabled"
+            :model-value="scenePres.sunAzimuthDeg"
+            @update:model-value="(v: number | undefined) => patchPresentation({ sunAzimuthDeg: Number(v) || 0 })"
+          />
+        </label>
+        <label class="row">
+          <span>高度角 (°)</span>
+          <el-slider
+            class="scene-slider"
+            :min="1"
+            :max="89"
+            :step="1"
+            :disabled="!scenePres.sunEnabled"
+            :model-value="scenePres.sunElevationDeg"
+            @update:model-value="(v: number | number[]) => patchPresentation({ sunElevationDeg: Number(v) })"
+          />
+          <el-input-number
+            size="small"
+            :min="1"
+            :max="89"
+            :step="1"
+            controls-position="right"
+            :disabled="!scenePres.sunEnabled"
+            :model-value="scenePres.sunElevationDeg"
+            @update:model-value="(v: number | undefined) => patchPresentation({ sunElevationDeg: Number(v) || 55 })"
+          />
+        </label>
+        <label class="row">
+          <span>产生阴影</span>
+          <el-checkbox
+            :model-value="scenePres.shadowsEnabled"
+            :disabled="!scenePres.sunEnabled"
+            @update:model-value="(v: boolean | string | number) => patchPresentation({ shadowsEnabled: Boolean(v) })"
+          />
+        </label>
+        <label class="row">
+          <span>阴影质量</span>
+          <el-select
+            size="small"
+            :disabled="!scenePres.sunEnabled || !scenePres.shadowsEnabled"
+            :model-value="scenePres.shadowMapSize"
+            @update:model-value="(v: number) => patchPresentation({ shadowMapSize: v })"
+          >
+            <el-option label="低 (512)" :value="512" />
+            <el-option label="中 (1024)" :value="1024" />
+            <el-option label="高 (2048)" :value="2048" />
+            <el-option label="极高 (4096)" :value="4096" />
+          </el-select>
+        </label>
+        <label class="row">
+          <span>阴影偏移</span>
+          <el-input-number
+            size="small"
+            :step="0.0001"
+            :disabled="!scenePres.sunEnabled || !scenePres.shadowsEnabled"
+            controls-position="right"
+            :model-value="scenePres.shadowBias"
+            @update:model-value="(v: number | undefined) => patchPresentation({ shadowBias: Number(v) || 0 })"
+          />
+        </label>
+      </el-collapse-item>
+
+      <el-collapse-item title="4 · 相机" name="camera">
+        <p class="scene-hint section-hint">默认视角与运行时操作限位</p>
+        <div class="cam-readout">
+          <template v-if="page3d?.camera">
+            <div>
+              位置
+              <code>
+                {{ formatCam(page3d.camera.position[0]) }},
+                {{ formatCam(page3d.camera.position[1]) }},
+                {{ formatCam(page3d.camera.position[2]) }}
+              </code>
+            </div>
+            <div>
+              目标
+              <code>
+                {{ formatCam(page3d.camera.target[0]) }},
+                {{ formatCam(page3d.camera.target[1]) }},
+                {{ formatCam(page3d.camera.target[2]) }}
+              </code>
+            </div>
+          </template>
+          <p v-else class="scene-hint">尚未保存默认视角</p>
         </div>
-        <div>
-          目标
-          <code>
-            {{ formatCam(page3d.camera.target[0]) }},
-            {{ formatCam(page3d.camera.target[1]) }},
-            {{ formatCam(page3d.camera.target[2]) }}
-          </code>
+        <div class="ops">
+          <el-button size="small" type="primary" @click="captureDefaultCamera">设为默认视角</el-button>
+          <el-button size="small" @click="applyDefaultCamera">恢复默认视角</el-button>
         </div>
-      </template>
-      <p v-else class="scene-hint">尚未保存默认视角</p>
-    </div>
-    <div class="ops">
-      <el-button size="small" type="primary" @click="captureDefaultCamera">设为默认视角</el-button>
-      <el-button size="small" @click="applyDefaultCamera">恢复默认视角</el-button>
-    </div>
+        <div class="sub-label">距离限位</div>
+        <label class="row">
+          <span>最小距离</span>
+          <el-input-number
+            size="small"
+            :min="0.05"
+            :max="scenePres.cameraMaxDistance - 0.1"
+            :step="0.1"
+            controls-position="right"
+            :model-value="scenePres.cameraMinDistance"
+            @update:model-value="(v: number | undefined) => patchPresentation({ cameraMinDistance: Number(v) || 0.5 })"
+          />
+        </label>
+        <label class="row">
+          <span>最大距离</span>
+          <el-input-number
+            size="small"
+            :min="scenePres.cameraMinDistance + 0.1"
+            :max="10000"
+            :step="10"
+            controls-position="right"
+            :model-value="scenePres.cameraMaxDistance"
+            @update:model-value="(v: number | undefined) => patchPresentation({ cameraMaxDistance: Number(v) || 500 })"
+          />
+        </label>
+        <div class="sub-label">俯仰限位</div>
+        <label class="row">
+          <span>下限 (°)</span>
+          <el-input-number
+            size="small"
+            :min="0"
+            :max="178"
+            :step="1"
+            controls-position="right"
+            :model-value="scenePres.cameraMinPolarDeg"
+            @update:model-value="(v: number | undefined) => patchPresentation({ cameraMinPolarDeg: Number(v) ?? 5 })"
+          />
+        </label>
+        <label class="row">
+          <span>上限 (°)</span>
+          <el-input-number
+            size="small"
+            :min="1"
+            :max="180"
+            :step="1"
+            controls-position="right"
+            :model-value="scenePres.cameraMaxPolarDeg"
+            @update:model-value="(v: number | undefined) => patchPresentation({ cameraMaxPolarDeg: Number(v) ?? 89 })"
+          />
+        </label>
+        <p class="scene-hint">0°=顶视，90°≈平视；上限建议 ≤89，避免钻到地面下。</p>
+      </el-collapse-item>
+    </el-collapse>
 
     <div class="ops">
-      <el-button size="small" plain @click="resetPresentationDefaults">恢复观感默认值</el-button>
+      <el-button size="small" plain @click="resetPresentationDefaults">恢复全部观感默认值</el-button>
     </div>
   </div>
 </template>
@@ -807,58 +731,6 @@ label {
   width: 100%;
 }
 
-.card {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  padding: 6px;
-  border: 1px solid var(--scada-border);
-  border-radius: 6px;
-}
-
-.card.col {
-  flex-direction: column;
-  align-items: stretch;
-}
-
-.row.tight {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-
-.link-adds {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  justify-content: flex-end;
-}
-
-.range-row,
-.action-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-}
-
-.range-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 6px;
-}
-
-.range-grid label {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  font-size: 11px;
-}
-
-.range-grid :deep(.el-input-number) {
-  width: 100%;
-}
-
 .ops {
   display: flex;
   gap: 8px;
@@ -886,11 +758,6 @@ label {
   border-radius: 4px;
   background: #12151c;
   border: 1px solid var(--scada-border);
-}
-
-.muted {
-  font-size: 11px;
-  color: var(--scada-muted);
 }
 
 .empty {
@@ -940,5 +807,64 @@ label {
 
 .scene-edit .row :deep(.el-select) {
   width: 140px;
+}
+
+.scene-collapse {
+  border: none;
+  --el-collapse-header-height: 36px;
+}
+
+.scene-collapse :deep(.el-collapse-item__header) {
+  background: transparent;
+  color: var(--scada-text);
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom-color: var(--scada-border);
+  letter-spacing: 0.02em;
+}
+
+.scene-collapse :deep(.el-collapse-item__wrap) {
+  background: transparent;
+  border-bottom-color: var(--scada-border);
+}
+
+.scene-collapse :deep(.el-collapse-item__content) {
+  padding: 8px 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.section-hint {
+  margin: 0 0 2px;
+}
+
+.sub-label {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--scada-muted);
+  letter-spacing: 0.04em;
+}
+
+.object-edit .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.object-edit .row > span:first-child {
+  flex: 0 0 56px;
+  width: 56px;
+  font-size: 12px;
+  color: var(--scada-muted);
+}
+
+.object-edit .row :deep(.el-input) {
+  flex: 1;
+  min-width: 0;
+}
+
+.hidden-file {
+  display: none;
 }
 </style>

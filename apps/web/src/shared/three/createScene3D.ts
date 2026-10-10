@@ -43,24 +43,47 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js'
 import { SelectionBox } from 'three/examples/jsm/interactive/SelectionBox.js'
 import { CSS2DObject, CSS2DRenderer } from 'three/examples/jsm/renderers/CSS2DRenderer.js'
-import type { Object3DNode, Page3D, Transform3D } from '@web-scada/core'
+import type { Object3DNode, Page3D, Page3DPresentation, Transform3D } from '@web-scada/core'
+import { resolvePage3DPresentation } from '@web-scada/core'
 import { isAdditivePointer, installPointerModifierTracker } from '@/shared/designer/designerHotkeys'
 import { fitCameraToBox, unionObjectBoxes } from '@/shared/three/modelFit'
+import { classifyRuntimeTap } from '@/shared/three/runtimeTapGate'
 import { loadModelObject } from '@/shared/three/modelLoader'
 import { applyScenePresentation } from '@/shared/three/scenePresentation'
 import {
   buildObject3dPanelElement,
+  disposePanelKonvaRuntime,
+  panelRuntimeIsInteractive,
   ensureObject3dPanelStyles,
+  refreshPanelKonvaVisuals,
   setObject3dPanelValues,
   type Object3dPanelDomHandlers,
+  type PanelWidgetRuntimeState,
 } from '@/shared/three/object3dPanelUi'
 import {
   applyObject3DMaterial,
   clearObject3DMaterialMaps,
 } from '@/shared/three/object3dMaterialApply'
-import type { Object3DPanelItem } from '@web-scada/core'
+import type { EventBinding, EventTrigger, Page2D, TagValue, Widget2D } from '@web-scada/core'
 
 export type TransformGizmoMode = 'translate' | 'rotate' | 'scale'
+
+/** 运行端交互诊断信息（?diag3d=1 面板 / 排障用） */
+export interface RuntimeInteractInfo {
+  phase: 'down' | 'up'
+  hitId: string | null
+  /** 命中的对象是否有单击/双击事件或输入连接 */
+  clickable: boolean
+  /** 命中的对象是否有拖拽写值连接 */
+  dragLinks: boolean
+  pointerType?: string
+  travelPx?: number
+  orbitDeg?: number
+  targetShiftRatio?: number
+  verdict?: 'tap' | 'rotate' | 'none'
+  fired?: boolean
+  reason?: string
+}
 
 export interface Scene3DHandlers {
   onSelect?: (
@@ -70,6 +93,10 @@ export interface Scene3DHandlers {
   onEmptyPointerDown?: (e: PointerEvent) => void
   onObjectClick?: (objectId: string) => void
   onObjectDblClick?: (objectId: string) => void
+  /** 运行端：对象是否有单击/写值等交互（用于轻点候选，不改变 Orbit 键位） */
+  isObjectClickable?: (objectId: string) => boolean
+  /** 运行端交互诊断（轻点 / 旋转判定过程） */
+  onRuntimeInteract?: (info: RuntimeInteractInfo) => void
   onTransformCommit?: (objectId: string, transform: Transform3D) => void
   onTransformsCommit?: (patches: Record<string, Transform3D>) => void
   resolveDragLinks?: (objectId: string) => {
@@ -83,10 +110,27 @@ export interface Scene3DHandlers {
     tagId: string,
     value: number,
   ) => void
-  /** 运行端：面板按钮 */
-  onPanelButton?: (objectId: string, item: Object3DPanelItem) => void
+  /** 运行端：面板按钮（兼容） */
+  onPanelButton?: (objectId: string, widget: Widget2D) => void
+  /** 运行端：面板 Konva 图元事件（与 2D runtime 对齐） */
+  onPanelWidgetEvent?: (
+    objectId: string,
+    widgetId: string,
+    trigger: EventTrigger,
+    events: EventBinding[],
+  ) => void
+  onPanelAnimationInput?: (objectId: string, widgetId: string) => void
+  onPanelDragWrite?: (
+    objectId: string,
+    widgetId: string,
+    axis: 'h' | 'v',
+    tagId: string,
+    value: number,
+  ) => void
   /** 设计端：双击面板打开编辑器 */
   onPanelEdit?: (objectId: string) => void
+  /** 解析面板绑定的 2D 页 */
+  resolvePage2d?: (page2dId: string) => Page2D | null | undefined
   /** 设计端：同步当前轨道焦点（新增物体落点） */
   onSpawnHint?: (hint: { x: number; y: number; z: number }) => void
 }
@@ -156,8 +200,13 @@ export interface Scene3DBundle {
   getLabelsVisible: () => boolean
   /** 重建单个对象的跟镜头面板 DOM（属性变更后） */
   syncPanel: (node: Object3DNode) => void
-  /** 刷新面板内数值显示 */
-  setPanelValues: (objectId: string, values: Record<string, string>) => void
+  /** 刷新面板内数值显示（旧 DOM）；Konva 请用 refreshPanel */
+  setPanelValues: (
+    objectId: string,
+    values: Record<string, string | PanelWidgetRuntimeState>,
+  ) => void
+  /** 用 Tag 刷新面板 Konva 绑定视觉 */
+  refreshPanel: (objectId: string, getTag: (id: string) => TagValue | undefined) => void
   /**
    * 请求下一帧绘制。绕过工厂改 scene 时必须手动调。
    * 多次调用合并到下一帧（最终一致，非每变必渲）。
@@ -397,7 +446,6 @@ export function createScene3D(
   const enableGizmo = options.enableGizmo === true
   if (enableGizmo) installPointerModifierTracker()
   const continuousRender = options.continuousRender === true
-  const showGrid = options.showGrid ?? enableGizmo
   const selectionHighlight = options.selectionHighlight ?? enableGizmo
   let labelsVisible = Boolean(options.enableLabels) && enableGizmo
 
@@ -451,13 +499,11 @@ export function createScene3D(
   controls.enableDamping = false
   controls.target.set(0, 0.5, 0)
   /**
-   * 视角键位（Designer / Runtime 统一）：
-   * - 左键：旋转
+   * 视角键位（设计端 / 运行端相同，不改键位）：
+   * - 左键：旋转（运行端在松手且位移小时再判单击，不抢 Orbit）
    * - 中键：平移
    * - 滚轮：远近
    * - 右键：不绑定
-   *
-   * Orbit 默认右键是平移；仅改 mouseButtons 不够稳，故包装 _onPointerDown + 捕获硬拦。
    */
   type OrbitInternal = OrbitControls & {
     _onPointerDown: (ev: PointerEvent) => void
@@ -478,7 +524,6 @@ export function createScene3D(
   controls.mouseButtons = {
     LEFT: MOUSE.ROTATE,
     MIDDLE: MOUSE.PAN,
-    // -1：与 OrbitControls 内部「无动作」一致（比 null 更稳）
     RIGHT: -1 as unknown as null,
   }
 
@@ -487,13 +532,16 @@ export function createScene3D(
     e.preventDefault()
     e.stopImmediatePropagation()
   }
-  // 捕获阶段拦 canvas + 容器（含可能盖住的层），pointer/mouse 都拦
   for (const el of [renderer.domElement, container] as HTMLElement[]) {
     el.addEventListener('pointerdown', onBlockRightButton, true)
     el.addEventListener('mousedown', onBlockRightButton, true)
   }
-  // 便于确认线上是否已是新包：控制台应出现本行
   console.info('[scada-3d] orbit: 左键旋转 | 中键平移 | 滚轮远近 | 右键无')
+
+  // 必须在 Orbit change 监听之前声明：presentation/限位若触发 update 会同步派发 change
+  let dirty = false
+  let lodDirty = false
+  let orbitPointer = false
 
   const onOrbitStart = () => {
     orbitPointer = true
@@ -528,9 +576,31 @@ export function createScene3D(
   const dir = new DirectionalLight(0xffffff, 1.05)
   dir.position.set(8, 14, 6)
   scene.add(dir)
-  if (showGrid) {
-    scene.add(new GridHelper(20, 20, 0x3d8bfd, 0x2a3140))
+
+  /** 地面网格：颜色变更时重建；显隐由 presentation / options.showGrid 共同决定 */
+  let gridHelper: GridHelper | null = null
+  let gridSig = ''
+  const syncGrid = (pres?: Page3DPresentation | null) => {
+    const p = resolvePage3DPresentation(pres)
+    const visible = options.showGrid ?? p.gridVisible
+    const nextSig = `${p.gridColor}|${p.gridDivisionColor}`
+    if (!gridHelper || gridSig !== nextSig) {
+      if (gridHelper) {
+        scene.remove(gridHelper)
+        gridHelper.geometry.dispose()
+        const gmat = gridHelper.material
+        if (Array.isArray(gmat)) gmat.forEach((m) => m.dispose())
+        else gmat.dispose()
+        gridHelper = null
+      }
+      gridHelper = new GridHelper(20, 20, p.gridColor, p.gridDivisionColor)
+      gridHelper.name = 'scada-grid'
+      scene.add(gridHelper)
+      gridSig = nextSig
+    }
+    gridHelper.visible = visible
   }
+  syncGrid(null)
 
   // 阴影接收面（网格下方）
   const shadowFloor = new Mesh(new PlaneGeometry(40, 40), new ShadowMaterial({ opacity: 0.32 }))
@@ -539,7 +609,10 @@ export function createScene3D(
   shadowFloor.receiveShadow = true
   scene.add(shadowFloor)
 
-  const presentation = applyScenePresentation(renderer, scene, dir, ambient, shadowFloor)
+  const presentation = applyScenePresentation(renderer, scene, dir, ambient, {
+    shadowFloor,
+    controls,
+  })
 
   const root = new Group()
   root.name = 'scada-objects'
@@ -561,9 +634,6 @@ export function createScene3D(
   let gizmoMode: TransformGizmoMode = 'translate'
   let raf = 0
   let disposed = false
-  let dirty = false
-  let lodDirty = false
-  let orbitPointer = false
   let suppressTimer: ReturnType<typeof setTimeout> | null = null
   let gizmoDragging = false
   let gizmoWanted = false
@@ -867,6 +937,9 @@ export function createScene3D(
 
   const clearPanels = () => {
     for (const pan of panelMap.values()) {
+      if (pan.element instanceof HTMLElement) {
+        disposePanelKonvaRuntime(pan.element)
+      }
       pan.parent?.remove(pan)
       pan.element.remove()
     }
@@ -876,6 +949,9 @@ export function createScene3D(
   const removePanel = (objectId: string) => {
     const pan = panelMap.get(objectId)
     if (!pan) return
+    if (pan.element instanceof HTMLElement) {
+      disposePanelKonvaRuntime(pan.element)
+    }
     pan.parent?.remove(pan)
     pan.element.remove()
     panelMap.delete(objectId)
@@ -884,6 +960,7 @@ export function createScene3D(
   const panelDomHandlers = (): Object3dPanelDomHandlers => ({
     designerMode: enableGizmo,
     resolveResourceUrl: (resourceId) => resolveResourceUrlFn?.(resourceId),
+    resolvePage2d: (page2dId) => handlers.resolvePage2d?.(page2dId),
     onSelect: (objectId) => {
       handlers.onSelect?.(objectId)
     },
@@ -892,6 +969,15 @@ export function createScene3D(
     },
     onButton: (objectId, item) => {
       handlers.onPanelButton?.(objectId, item)
+    },
+    onWidgetEvent: (objectId, widgetId, trigger, events) => {
+      handlers.onPanelWidgetEvent?.(objectId, widgetId, trigger, events)
+    },
+    onAnimationInput: (objectId, widgetId) => {
+      handlers.onPanelAnimationInput?.(objectId, widgetId)
+    },
+    onDragWrite: (objectId, widgetId, axis, tagId, value) => {
+      handlers.onPanelDragWrite?.(objectId, widgetId, axis, tagId, value)
     },
   })
 
@@ -918,7 +1004,10 @@ export function createScene3D(
   const _panelCamPos = new Vector3()
   const _panelWorldPos = new Vector3()
 
-  /** CSS2D 按距离缩放，近大远小，与模型透视一致（参考视距时为设计稿像素大小） */
+  /**
+   * CSS2D 按距离缩放，近大远小（参考视距时为设计稿像素大小）。
+   * 必须用 zoom，不能用 transform:scale：后者先按设计稿栅格化再拉伸，近处字体会糊。
+   */
   const updatePanelWorldScales = () => {
     if (panelMap.size === 0) return
     camera.getWorldPosition(_panelCamPos)
@@ -930,8 +1019,32 @@ export function createScene3D(
       pan.getWorldPosition(_panelWorldPos)
       const dist = Math.max(0.35, _panelWorldPos.distanceTo(_panelCamPos))
       const s = PANEL_WORLD_REF_DIST / dist
-      wrap.style.transform = Math.abs(s - 1) < 0.001 ? '' : `scale(${s})`
+      if (Math.abs(s - 1) < 0.001) {
+        wrap.style.zoom = ''
+        wrap.style.transform = ''
+      } else {
+        // zoom 会按新尺寸重排/重绘文字，底边中心仍由 CSS2D center(0.5,1) 对齐锚点
+        wrap.style.zoom = String(s)
+        wrap.style.transform = ''
+      }
     }
+  }
+
+  /**
+   * 运行端：没有可点控件的「纯展示面板」整块穿透。
+   * 面板内容区是 Konva 画布（pointer-events:auto），不透传时会挡住模型单击与左键旋转，
+   * 表现为「面板盖住的那块区域点了没反应、也转不了视角」。
+   */
+  const applyRuntimePanelPassthrough = (host: HTMLElement) => {
+    if (enableGizmo) return
+    if (panelRuntimeIsInteractive(host)) return
+    const targets: HTMLElement[] = []
+    if (host instanceof HTMLElement) targets.push(host)
+    for (const sel of ['.scada-3d-panel', '.scada-3d-panel__title', '.scada-3d-panel__stage']) {
+      const found = host.querySelector(sel)
+      if (found instanceof HTMLElement) targets.push(found)
+    }
+    for (const el of targets) el.style.pointerEvents = 'none'
   }
 
   const attachPanel = (node: Object3DNode, obj: Object3D) => {
@@ -939,6 +1052,7 @@ export function createScene3D(
     if (!node.panel || node.visible === false) return
     try {
       const el = buildObject3dPanelElement(node, panelDomHandlers())
+      applyRuntimePanelPassthrough(el)
       const pan = new CSS2DObject(el)
       // 底边中心对齐锚点上方（CSS2D center：0.5/1 = 水平中、垂直底）
       pan.center.set(0.5, 1)
@@ -960,10 +1074,22 @@ export function createScene3D(
     invalidate()
   }
 
-  const setPanelValues = (objectId: string, values: Record<string, string>) => {
+  const setPanelValues = (
+    objectId: string,
+    values: Record<string, string | PanelWidgetRuntimeState>,
+  ) => {
     const pan = panelMap.get(objectId)
-    if (!pan) return
+    if (!pan || !(pan.element instanceof HTMLElement)) return
     setObject3dPanelValues(pan.element, values)
+  }
+
+  const refreshPanel = (
+    objectId: string,
+    getTag: (id: string) => TagValue | undefined,
+  ) => {
+    const pan = panelMap.get(objectId)
+    if (!pan || !(pan.element instanceof HTMLElement)) return
+    refreshPanelKonvaVisuals(pan.element, getTag)
   }
 
   const rebuildLabels = () => {
@@ -1220,7 +1346,7 @@ export function createScene3D(
       // 已有工程里面板锚点可能仍是半透明；强制隐藏外观
       setMeshOpacity(obj, 0)
     } else if (node.material?.override) {
-      materialApplyCancel.get(node.id)?.()
+      // 同签名重复应用不会取消进行中的贴图加载（内部处理）
       const cancel = applyObject3DMaterial(
         obj,
         node.material,
@@ -1266,6 +1392,7 @@ export function createScene3D(
     selectedIds = []
     gizmoWanted = false
     presentation.apply(page.presentation)
+    syncGrid(page.presentation)
     applyPageCamera(page)
     for (const node of page.objects) {
       try {
@@ -1477,7 +1604,6 @@ export function createScene3D(
     applyNodeShadowFlags(obj, visual)
 
     if (visual.material?.override) {
-      materialApplyCancel.get(objectId)?.()
       const cancel = applyObject3DMaterial(
         obj,
         visual.material,
@@ -1618,6 +1744,36 @@ export function createScene3D(
     startPos: Vector3
   } | null = null
   let suppressNextClick = false
+  /**
+   * 运行端轻点（键位不变）：
+   * - 按下不拦 Orbit → 拖 = 照常左旋
+   * - 松手时按「指针位移 + 相机是否真的转过去了」判定（runtimeTapGate）
+   * - 轻点 → 还原相机微动 + 触发业务（确认框等本次指针序列结束再弹）
+   * - 旋转 → 保留相机，不触发业务
+   * - 有拖拽写连接时：越过拖拽阈值才抢走手势写值
+   */
+  type RuntimeTapState = {
+    pointerId: number
+    pointerType: string
+    objectId: string
+    x: number
+    y: number
+    camPos: Vector3
+    camTarget: Vector3
+    /** 已被拖拽写值等业务接管，不再作为轻点 */
+    forcedGesture: boolean
+  }
+  let runtimeTap: RuntimeTapState | null = null
+  /** 拖拽写值抢手势阈值：略大于轻点阈值，避免把轻微抖动当拖拽 */
+  const RUNTIME_DRAG_STEAL_PX = 12
+  let pendingRuntimeDrag: {
+    pointerId: number
+    objectId: string
+    startClientX: number
+    startClientY: number
+    links: NonNullable<ReturnType<NonNullable<Scene3DHandlers['resolveDragLinks']>>>
+  } | null = null
+  let runtimeTapFired = false
 
   const mapDragOffsetToTag = (
     offset: number,
@@ -1626,6 +1782,137 @@ export function createScene3D(
     const spanOut = link.outMax - link.outMin || 1
     const t = Math.min(1, Math.max(0, (offset - link.outMin) / spanOut))
     return link.inMin + t * (link.inMax - link.inMin)
+  }
+
+  const toVec3 = (v: Vector3) => ({ x: v.x, y: v.y, z: v.z })
+
+  const noteRuntimeInteract = (info: RuntimeInteractInfo) => {
+    try {
+      handlers.onRuntimeInteract?.(info)
+    } catch (err) {
+      console.error('[scada-3d] onRuntimeInteract failed', err)
+    }
+  }
+
+  const fireRuntimeTap = (objectId: string) => {
+    if (runtimeTapFired) return
+    runtimeTapFired = true
+    // 等本次指针序列（pointerup → mouseup → click）彻底跑完再弹确认框，
+    // 否则确认框可能被同一次手势的后续事件 / 焦点变化吞掉。
+    requestAnimationFrame(() => {
+      window.setTimeout(() => {
+        try {
+          handlers.onObjectClick?.(objectId)
+        } catch (err) {
+          console.error('[scada-3d] onObjectClick failed', objectId, err)
+        }
+      }, 0)
+    })
+  }
+
+  /** 结束 Orbit 对指定 pointer 的跟踪，避免单击后相机还粘着转 */
+  const endOrbitPointer = (pointerId: number) => {
+    const c = controls as OrbitControls & {
+      state: number
+      _pointers: number[]
+      _onPointerUp: (ev: Event) => void
+    }
+    if (typeof c._onPointerUp === 'function' && Array.isArray(c._pointers) && c._pointers.includes(pointerId)) {
+      try {
+        c._onPointerUp(
+          new PointerEvent('pointerup', {
+            pointerId,
+            bubbles: true,
+            cancelable: true,
+            view: window,
+          }),
+        )
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  const finishRuntimeTapFromEvent = (e: PointerEvent) => {
+    if (enableGizmo) return false
+    const tap = runtimeTap
+    if (!tap || tap.pointerId !== e.pointerId) return false
+    runtimeTap = null
+    pendingRuntimeDrag = null
+    if (suppressNextClick || runtimeDrag) {
+      suppressNextClick = false
+      return true
+    }
+
+    const verdict = classifyRuntimeTap(
+      { x: tap.x, y: tap.y, camPos: toVec3(tap.camPos), camTarget: toVec3(tap.camTarget) },
+      {
+        x: e.clientX,
+        y: e.clientY,
+        camPos: toVec3(camera.position),
+        camTarget: toVec3(controls.target),
+      },
+      { pointerType: tap.pointerType, forcedGesture: tap.forcedGesture },
+    )
+
+    if (verdict.kind === 'gesture') {
+      // 旋转：保留用户刚转到的视角，不触发业务
+      suppressNextClick = true
+      noteRuntimeInteract({
+        phase: 'up',
+        hitId: tap.objectId,
+        clickable: true,
+        dragLinks: false,
+        pointerType: tap.pointerType,
+        verdict: 'rotate',
+        fired: false,
+        travelPx: verdict.travelPx,
+        orbitDeg: verdict.orbitDeg,
+        targetShiftRatio: verdict.targetShiftRatio,
+        reason: verdict.reason,
+      })
+      return true
+    }
+
+    // 轻点：把 Orbit 的微动还回去，再触发业务
+    camera.position.copy(tap.camPos)
+    controls.target.copy(tap.camTarget)
+    controls.update()
+    endOrbitPointer(e.pointerId)
+    invalidate()
+    suppressNextClick = true
+    noteRuntimeInteract({
+      phase: 'up',
+      hitId: tap.objectId,
+      clickable: true,
+      dragLinks: false,
+      pointerType: tap.pointerType,
+      verdict: 'tap',
+      fired: true,
+      travelPx: verdict.travelPx,
+      orbitDeg: verdict.orbitDeg,
+      targetShiftRatio: verdict.targetShiftRatio,
+      reason: verdict.reason,
+    })
+    fireRuntimeTap(tap.objectId)
+    return true
+  }
+
+  const resolveDragAxis = (
+    e: PointerEvent,
+    links: NonNullable<ReturnType<NonNullable<Scene3DHandlers['resolveDragLinks']>>>,
+  ): { axis: 'h' | 'v' | 'd'; link: NonNullable<(typeof links)['h']> } | null => {
+    const count = Number(Boolean(links.h)) + Number(Boolean(links.v)) + Number(Boolean(links.d))
+    let axis: 'h' | 'v' | 'd'
+    if (count === 1) axis = links.h ? 'h' : links.v ? 'v' : 'd'
+    else if (e.altKey && links.d) axis = 'd'
+    else if (e.shiftKey && links.v) axis = 'v'
+    else if (links.h) axis = 'h'
+    else if (links.v) axis = 'v'
+    else axis = 'd'
+    const link = axis === 'h' ? links.h : axis === 'v' ? links.v : links.d
+    if (!link) return null
+    return { axis, link }
   }
 
   /**
@@ -1827,52 +2114,107 @@ export function createScene3D(
     applyDesignerPick(e, picked.id)
   }
 
-  const onPointerDown = (e: PointerEvent) => {
-    if (e.button !== 0) return
-    if (enableGizmo) return
-    if (!handlers.resolveDragLinks || !handlers.onDragWrite) return
-    const picked = pickObjectAtClient(e.clientX, e.clientY)
-    if (!picked) return
-    const id = picked.id
-    const links = handlers.resolveDragLinks(id)
-    if (!links || (!links.h && !links.v && !links.d)) return
-    const obj = objectMap.get(id)
-    if (!obj) return
-    const count = Number(Boolean(links.h)) + Number(Boolean(links.v)) + Number(Boolean(links.d))
-    let axis: 'h' | 'v' | 'd'
-    if (count === 1) {
-      axis = links.h ? 'h' : links.v ? 'v' : 'd'
-    } else if (e.altKey && links.d) {
-      axis = 'd'
-    } else if (e.shiftKey && links.v) {
-      axis = 'v'
-    } else if (links.h) {
-      axis = 'h'
-    } else if (links.v) {
-      axis = 'v'
-    } else {
-      axis = 'd'
-    }
-    const link = axis === 'h' ? links.h : axis === 'v' ? links.v : links.d
-    if (!link) return
-    runtimeDrag = {
-      objectId: id,
-      axis,
-      link,
-      startClientX: e.clientX,
-      startClientY: e.clientY,
-      startPos: obj.position.clone(),
-    }
-    controls.enabled = false
+  /**
+   * 运行端：只记轻点候选，不拦 Orbit（左键旋转键位不变）。
+   * 最终「轻点 or 旋转」在 pointerup 用 runtimeTapGate 判定。
+   */
+  const onRuntimePointerDown = (e: PointerEvent) => {
+    if (enableGizmo || e.button !== 0) return
+    if (!handlers.onObjectClick && !handlers.onDragWrite) return
     suppressNextClick = false
-    try {
-      renderer.domElement.setPointerCapture(e.pointerId)
-    } catch {
-      /* ignore */
+    runtimeTap = null
+    pendingRuntimeDrag = null
+    runtimeTapFired = false
+
+    const picked = pickObjectAtClient(e.clientX, e.clientY)
+    if (!picked) {
+      noteRuntimeInteract({
+        phase: 'down',
+        hitId: null,
+        clickable: false,
+        dragLinks: false,
+        pointerType: e.pointerType,
+        reason: '未命中物体（空白处只旋转）',
+      })
+      return
+    }
+
+    const clickable =
+      typeof handlers.isObjectClickable === 'function'
+        ? handlers.isObjectClickable(picked.id)
+        : Boolean(handlers.onObjectClick)
+
+    let dragLinks: NonNullable<ReturnType<NonNullable<Scene3DHandlers['resolveDragLinks']>>> | null =
+      null
+    if (handlers.resolveDragLinks && handlers.onDragWrite) {
+      dragLinks = handlers.resolveDragLinks(picked.id)
+      if (dragLinks && !dragLinks.h && !dragLinks.v && !dragLinks.d) dragLinks = null
+    }
+
+    noteRuntimeInteract({
+      phase: 'down',
+      hitId: picked.id,
+      clickable,
+      dragLinks: Boolean(dragLinks),
+      pointerType: e.pointerType,
+    })
+
+    if (!clickable && !dragLinks) return
+
+    runtimeTap = {
+      pointerId: e.pointerId,
+      pointerType: e.pointerType,
+      objectId: picked.id,
+      x: e.clientX,
+      y: e.clientY,
+      camPos: camera.position.clone(),
+      camTarget: controls.target.clone(),
+      forcedGesture: false,
+    }
+
+    if (dragLinks) {
+      pendingRuntimeDrag = {
+        pointerId: e.pointerId,
+        objectId: picked.id,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        links: dragLinks,
+      }
     }
   }
 
   const onPointerMove = (e: PointerEvent) => {
+    if (runtimeTap && runtimeTap.pointerId === e.pointerId && pendingRuntimeDrag) {
+      const dx = e.clientX - runtimeTap.x
+      const dy = e.clientY - runtimeTap.y
+      if (dx * dx + dy * dy > RUNTIME_DRAG_STEAL_PX * RUNTIME_DRAG_STEAL_PX) {
+        const resolved = resolveDragAxis(e, pendingRuntimeDrag.links)
+        const obj = objectMap.get(pendingRuntimeDrag.objectId)
+        if (resolved && obj) {
+          // 拖拽写：打断 Orbit，进入写值拖
+          runtimeTap.forcedGesture = true
+          endOrbitPointer(e.pointerId)
+          runtimeDrag = {
+            objectId: pendingRuntimeDrag.objectId,
+            axis: resolved.axis,
+            link: resolved.link,
+            startClientX: pendingRuntimeDrag.startClientX,
+            startClientY: pendingRuntimeDrag.startClientY,
+            startPos: obj.position.clone(),
+          }
+          controls.enabled = false
+          suppressNextClick = true
+          runtimeTap = null
+          try {
+            renderer.domElement.setPointerCapture(e.pointerId)
+          } catch {
+            /* ignore */
+          }
+        }
+        // 走 Orbit 旋转时保留 runtimeTap：松手要按相机位移判定是轻点还是旋转
+        pendingRuntimeDrag = null
+      }
+    }
     if (!runtimeDrag) return
     const obj = objectMap.get(runtimeDrag.objectId)
     if (!obj) return
@@ -1881,7 +2223,7 @@ export function createScene3D(
     const scale = (dist * 2) / Math.max(1, rect.height)
     const dx = (e.clientX - runtimeDrag.startClientX) * scale
     const dy = -(e.clientY - runtimeDrag.startClientY) * scale
-    if (Math.abs(dx) + Math.abs(dy) > 0.02) suppressNextClick = true
+    suppressNextClick = true
     const lo = Math.min(runtimeDrag.link.outMin, runtimeDrag.link.outMax)
     const hi = Math.max(runtimeDrag.link.outMin, runtimeDrag.link.outMax)
     if (runtimeDrag.axis === 'h') {
@@ -1889,53 +2231,76 @@ export function createScene3D(
     } else if (runtimeDrag.axis === 'v') {
       obj.position.y = Math.min(hi, Math.max(lo, runtimeDrag.startPos.y + dy))
     } else {
-      // 拖拽 Z：水平拖动映射到进深
       obj.position.z = Math.min(hi, Math.max(lo, runtimeDrag.startPos.z + dx))
     }
-    lodDirty = true
-    invalidate()
     lodDirty = true
     invalidate()
   }
 
   const onPointerUp = (e: PointerEvent) => {
-    if (!runtimeDrag) return
-    try {
-      renderer.domElement.releasePointerCapture(e.pointerId)
-    } catch {
-      /* ignore */
-    }
-    const obj = objectMap.get(runtimeDrag.objectId)
-    if (obj) {
-      const offset =
-        runtimeDrag.axis === 'h'
-          ? obj.position.x
-          : runtimeDrag.axis === 'v'
-            ? obj.position.y
-            : obj.position.z
-      const value = mapDragOffsetToTag(offset, runtimeDrag.link)
-      handlers.onDragWrite?.(
-        runtimeDrag.objectId,
-        runtimeDrag.axis,
-        runtimeDrag.link.tagId,
-        value,
-      )
-    }
-    runtimeDrag = null
-    controls.enabled = true
-    invalidate()
-    invalidate()
-  }
+    if (enableGizmo) return
 
-  const onClick = (e: MouseEvent) => {
-    if (gizmoDragging || enableGizmo) return
-    if (suppressNextClick) {
+    if (runtimeDrag) {
+      try {
+        renderer.domElement.releasePointerCapture(e.pointerId)
+      } catch {
+        /* ignore */
+      }
+      const obj = objectMap.get(runtimeDrag.objectId)
+      if (obj) {
+        const offset =
+          runtimeDrag.axis === 'h'
+            ? obj.position.x
+            : runtimeDrag.axis === 'v'
+              ? obj.position.y
+              : obj.position.z
+        const value = mapDragOffsetToTag(offset, runtimeDrag.link)
+        handlers.onDragWrite?.(
+          runtimeDrag.objectId,
+          runtimeDrag.axis,
+          runtimeDrag.link.tagId,
+          value,
+        )
+      }
+      runtimeDrag = null
+      controls.enabled = true
+      invalidate()
+      runtimeTap = null
+      pendingRuntimeDrag = null
       suppressNextClick = false
       return
     }
-    const id = pickObjectAtClient(e.clientX, e.clientY)?.id ?? null
-    // 运行端只触发业务点击，不进入选中态（避免黄框）
-    if (id) handlers.onObjectClick?.(id)
+
+    finishRuntimeTapFromEvent(e)
+  }
+
+  /** canvas 丢 pointerup 时的兜底（capture 在 window 上） */
+  const onWindowRuntimePointerUp = (e: PointerEvent) => {
+    if (enableGizmo || e.button !== 0) return
+    if (runtimeDrag) return
+    if (!runtimeTap || runtimeTap.pointerId !== e.pointerId) return
+    finishRuntimeTapFromEvent(e)
+  }
+
+  /**
+   * 指针被系统取消（触摸转滚屏、窗口失焦、系统手势等）：
+   * 只丢弃候选，绝不触发业务 —— 旧实现把 pointercancel 接到 pointerup 上会误写值。
+   */
+  const onRuntimePointerCancel = (e: PointerEvent) => {
+    if (enableGizmo) return
+    if (!runtimeTap || runtimeTap.pointerId !== e.pointerId) return
+    runtimeTap = null
+    pendingRuntimeDrag = null
+    noteRuntimeInteract({
+      phase: 'up',
+      hitId: null,
+      clickable: false,
+      dragLinks: false,
+      pointerType: e.pointerType,
+      verdict: 'none',
+      fired: false,
+      reason: '指针被取消（pointercancel）→ 丢弃本次轻点',
+    })
   }
 
   const onDblClick = (e: MouseEvent) => {
@@ -2004,6 +2369,8 @@ export function createScene3D(
       runtimeDrag = null
       if (!gizmoDragging) controls.enabled = true
     }
+    pendingRuntimeDrag = null
+    // runtimeTap 留给 canvas/window pointerup 消费
     if (orbitSuppressGesture) restoreOrbitAfterGesture()
     if (orbitStuck) invalidate()
   }
@@ -2011,6 +2378,15 @@ export function createScene3D(
   const onWindowPointerWatch = (e: PointerEvent) => {
     if (disposed) return
     if (e.buttons !== 0) return
+    if (e.type === 'pointerup') {
+      // 正常松手：单击交由 onWindowRuntimePointerUp / canvas pointerup 收尾
+      if (runtimeTap || pendingRuntimeDrag) return
+    } else if (runtimeTap || pendingRuntimeDrag) {
+      // 已经抬起却没收到 pointerup（被系统菜单/浏览器手势吞掉）：
+      // 候选已失效，先清掉再收尾，否则 Orbit 会一直跟着鼠标转
+      runtimeTap = null
+      pendingRuntimeDrag = null
+    }
     if (isOrbitStuck() || runtimeDrag) forceEndStuckPointers()
   }
 
@@ -2037,12 +2413,14 @@ export function createScene3D(
     renderer.domElement.addEventListener('click', onDesignerClick)
     renderer.domElement.addEventListener('dblclick', onDblClick)
   } else {
-    renderer.domElement.addEventListener('pointerdown', onPointerDown)
+    renderer.domElement.addEventListener('pointerdown', onRuntimePointerDown, true)
     renderer.domElement.addEventListener('pointermove', onPointerMove)
     renderer.domElement.addEventListener('pointerup', onPointerUp)
-    renderer.domElement.addEventListener('pointercancel', onPointerUp)
-    renderer.domElement.addEventListener('click', onClick)
+    renderer.domElement.addEventListener('pointercancel', onRuntimePointerCancel)
     renderer.domElement.addEventListener('dblclick', onDblClick)
+    // 比 canvas bubble 更早：即使 canvas 丢了 pointerup 也能完成单击
+    window.addEventListener('pointerup', onWindowRuntimePointerUp, true)
+    window.addEventListener('pointercancel', onRuntimePointerCancel, true)
   }
 
   const onResize = () => {
@@ -2139,12 +2517,14 @@ export function createScene3D(
     applyPageCamera,
     applyPresentation: (pres?: Page3D['presentation']) => {
       presentation.apply(pres)
+      syncGrid(pres)
       invalidate()
     },
     setLabelsVisible,
     getLabelsVisible: () => labelsVisible,
     syncPanel,
     setPanelValues,
+    refreshPanel,
     invalidate,
     getGizmoStatus: () => ({
       enabled: enableGizmo,
@@ -2191,9 +2571,6 @@ export function createScene3D(
         el.removeEventListener('pointerdown', onBlockRightButton, true)
         el.removeEventListener('mousedown', onBlockRightButton, true)
       }
-      controls.removeEventListener('start', onOrbitStart)
-      controls.removeEventListener('end', onOrbitEnd)
-      controls.removeEventListener('change', onOrbitChange)
       if (enableGizmo) {
         renderer.domElement.removeEventListener(
           'pointerdown',
@@ -2204,13 +2581,17 @@ export function createScene3D(
         renderer.domElement.removeEventListener('click', onDesignerClick)
         renderer.domElement.removeEventListener('dblclick', onDblClick)
       } else {
-        renderer.domElement.removeEventListener('pointerdown', onPointerDown)
+        renderer.domElement.removeEventListener('pointerdown', onRuntimePointerDown, true)
         renderer.domElement.removeEventListener('pointermove', onPointerMove)
         renderer.domElement.removeEventListener('pointerup', onPointerUp)
-        renderer.domElement.removeEventListener('pointercancel', onPointerUp)
-        renderer.domElement.removeEventListener('click', onClick)
+        renderer.domElement.removeEventListener('pointercancel', onRuntimePointerCancel)
         renderer.domElement.removeEventListener('dblclick', onDblClick)
+        window.removeEventListener('pointerup', onWindowRuntimePointerUp, true)
+        window.removeEventListener('pointercancel', onRuntimePointerCancel, true)
       }
+      controls.removeEventListener('start', onOrbitStart)
+      controls.removeEventListener('end', onOrbitEnd)
+      controls.removeEventListener('change', onOrbitChange)
       transformControls?.detach()
       transformControls?.dispose()
       if (gizmoHelper) {
@@ -2218,6 +2599,14 @@ export function createScene3D(
         gizmoHelper = null
       }
       clearObjects()
+      if (gridHelper) {
+        scene.remove(gridHelper)
+        gridHelper.geometry.dispose()
+        const gmat = gridHelper.material
+        if (Array.isArray(gmat)) gmat.forEach((m) => m.dispose())
+        else gmat.dispose()
+        gridHelper = null
+      }
       presentation.dispose()
       controls.dispose()
       renderer.dispose()

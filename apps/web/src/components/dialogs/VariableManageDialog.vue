@@ -164,7 +164,7 @@ async function saveEditor() {
     const payload: TagMeta = {
       tagId: form.tagId.trim(),
       name: form.name.trim(),
-      group: form.group.trim() || undefined,
+      group: (form.group ?? '').trim() || undefined,
       dataType: form.dataType,
       unit: form.unit.trim() || undefined,
       writable: form.writable,
@@ -582,10 +582,16 @@ async function importFile(ev: Event) {
       </label>
       <label>
         <span>分组</span>
-        <el-input v-model="form.group" placeholder="如 工艺 / 设备" list="tag-group-suggest" />
-        <datalist id="tag-group-suggest">
-          <option v-for="g in groupOptions" :key="g" :value="g" />
-        </datalist>
+        <el-select
+          v-model="form.group"
+          filterable
+          allow-create
+          default-first-option
+          clearable
+          placeholder="选择已有分组，或输入新建"
+        >
+          <el-option v-for="g in groupOptions" :key="g" :label="g" :value="g" />
+        </el-select>
       </label>
       <label>
         <span>类型</span>

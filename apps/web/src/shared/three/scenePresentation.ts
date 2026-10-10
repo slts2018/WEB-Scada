@@ -5,6 +5,7 @@
 import {
   Color,
   DirectionalLight,
+  MathUtils,
   PMREMGenerator,
   PCFSoftShadowMap,
   Scene,
@@ -14,12 +15,18 @@ import {
   type Mesh,
 } from 'three'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
+import type { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import type { Page3DPresentation } from '@web-scada/core'
-import { resolvePage3DPresentation } from '@web-scada/core'
+import { resolvePage3DPresentation, sunPositionFromAngles } from '@web-scada/core'
 
 export type ScenePresentationApi = {
   apply: (pres?: Page3DPresentation | null) => void
   dispose: () => void
+}
+
+export type ScenePresentationExtras = {
+  shadowFloor?: Mesh | null
+  controls?: OrbitControls | null
 }
 
 export function applyScenePresentation(
@@ -27,8 +34,10 @@ export function applyScenePresentation(
   scene: Scene,
   dirLight: DirectionalLight,
   ambientLight: AmbientLight,
-  shadowFloor?: Mesh | null,
+  extras?: ScenePresentationExtras | null,
 ): ScenePresentationApi {
+  const opts: ScenePresentationExtras = extras ?? {}
+
   renderer.shadowMap.type = PCFSoftShadowMap
 
   const pmrem = new PMREMGenerator(renderer)
@@ -37,12 +46,26 @@ export function applyScenePresentation(
 
   const apply = (pres?: Page3DPresentation | null) => {
     const p = resolvePage3DPresentation(pres)
-    scene.background = new Color(p.background)
+
+    if (p.backgroundMode === 'hemi') {
+      // 天空感：略提亮的背景色（仍用用户选的 background 作底）
+      const base = new Color(p.background)
+      const sky = base.clone().lerp(new Color(0x87b8e8), 0.55)
+      scene.background = sky
+    } else {
+      scene.background = new Color(p.background)
+    }
+
     scene.environmentIntensity = p.environmentIntensity
     ambientLight.intensity = p.ambientIntensity
 
     dirLight.visible = p.sunEnabled
     dirLight.intensity = p.sunEnabled ? p.sunIntensity : 0
+    const [sx, sy, sz] = sunPositionFromAngles(p.sunAzimuthDeg, p.sunElevationDeg, 20)
+    dirLight.position.set(sx, sy, sz)
+    dirLight.target.position.set(0, 0, 0)
+    dirLight.target.updateMatrixWorld()
+    if (!dirLight.target.parent) scene.add(dirLight.target)
 
     const shadowsOn = p.shadowsEnabled && p.sunEnabled
     renderer.shadowMap.enabled = shadowsOn
@@ -65,10 +88,22 @@ export function applyScenePresentation(
     dirLight.shadow.camera.bottom = -25
     dirLight.shadow.camera.updateProjectionMatrix()
 
-    if (shadowFloor) {
-      shadowFloor.visible = shadowsOn
-      const mat = shadowFloor.material as { opacity?: number }
-      if (mat && typeof mat.opacity === 'number') mat.opacity = shadowsOn ? 0.32 : 0
+    if (opts.shadowFloor) {
+      opts.shadowFloor.visible = shadowsOn && p.groundOpacity > 0.01
+      const mat = opts.shadowFloor.material as { opacity?: number; needsUpdate?: boolean }
+      if (mat && typeof mat.opacity === 'number') {
+        mat.opacity = shadowsOn ? p.groundOpacity : 0
+        mat.needsUpdate = true
+      }
+    }
+
+    if (opts.controls) {
+      // 只写限位，勿在此 update()：createScene3D 初始化阶段 update 会派发
+      // change → 访问尚未声明的 lodDirty，导致「场景初始化失败」
+      opts.controls.minDistance = p.cameraMinDistance
+      opts.controls.maxDistance = p.cameraMaxDistance
+      opts.controls.minPolarAngle = MathUtils.degToRad(p.cameraMinPolarDeg)
+      opts.controls.maxPolarAngle = MathUtils.degToRad(p.cameraMaxPolarDeg)
     }
   }
 

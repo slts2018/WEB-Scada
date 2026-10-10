@@ -105,12 +105,14 @@ function syncScene3dOverlays() {
     if (!page3d) continue
     const rect = bundle.getWidgetClientRect(widget.id)
     if (!rect) continue
+    const interactive = widget.props.interactive !== false
     next.push({
       widgetId: widget.id,
       page: page3d,
-      interactive: widget.props.interactive !== false,
-      // 低于 .host(z=10000)，遵循设计端前后顺序
-      zIndex: paintOrder,
+      interactive,
+      // 可交互：盖过 .host(z=10000)，否则模型点选进不了 WebGL（Konva 热区/转发不可靠）
+      // 仅展示：仍垫在 Konva 下作背景
+      zIndex: interactive ? 10000 + paintOrder : paintOrder,
       rect,
     })
   }
@@ -481,7 +483,7 @@ onUnmounted(() => {
 
 .scene3d-overlay {
   position: absolute;
-  /* 默认低于 Konva；具体 zIndex 由绘制顺序写入，保证「底层三维」不会盖住上层图元 */
+  /* zIndex 由 slot 写入：可交互 > host(10000)，仅展示 < host */
   z-index: 1;
   overflow: hidden;
   pointer-events: auto;

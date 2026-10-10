@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useProjectStore } from '@/stores/project'
-import type { Page, Page2D } from '@web-scada/core'
+import { listNavigationPages, type Page, type Page2D } from '@web-scada/core'
 import PageSettingDialog from '@/components/dialogs/PageSettingDialog.vue'
 import ConfirmDialog from '@/components/dialogs/ConfirmDialog.vue'
 
@@ -17,6 +17,8 @@ const pendingDelete = ref<Page | null>(null)
 const fromTemplateId = ref<string | null>(null)
 
 const templates = computed(() => project.document.pageTemplates ?? [])
+/** 跟镜头面板内容页不进页面树 */
+const navPages = computed(() => listNavigationPages(project.document))
 
 const settingDefaults = computed(() => {
   const page = settingPage.value
@@ -102,7 +104,7 @@ function onSettingsConfirm(payload: {
 }
 
 function requestRemove(page: Page) {
-  if (project.document.pages.length <= 1) {
+  if (navPages.value.length <= 1) {
     ElMessage.warning('至少保留一个页面')
     return
   }
@@ -112,8 +114,13 @@ function requestRemove(page: Page) {
 
 function confirmRemove() {
   if (!pendingDelete.value) return
-  project.removePage(pendingDelete.value.id)
+  const res = project.removePage(pendingDelete.value.id)
+  if (!res.ok) {
+    ElMessage.warning(res.reason || '无法删除页面')
+    return
+  }
   pendingDelete.value = null
+  deleteVisible.value = false
 }
 
 function saveAsTemplate(page: Page) {
@@ -149,7 +156,7 @@ function setHome(page: Page) {
     </div>
     <ul class="page-list">
       <li
-        v-for="page in project.document.pages"
+        v-for="page in navPages"
         :key="page.id"
         :class="{ active: page.id === project.activePageId }"
       >

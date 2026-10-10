@@ -26,6 +26,8 @@ const DND_TYPE = 'application/x-scada-widget'
 
 const props = defineProps<{
   page: Page2D
+  /** 可选页面/面板背景图（如跟镜头面板 backgroundResourceId） */
+  backgroundImageUrl?: string
 }>()
 
 const project = useProjectStore()
@@ -59,6 +61,58 @@ let removeTagListener: (() => void) | null = null
 const previewBlinkTimers = new Map<string, ReturnType<typeof setInterval>>()
 let rulerDragging: { orientation: 'h' | 'v' } | null = null
 let rulerGhost: Konva.Line | null = null
+let bgImageNode: Konva.Image | null = null
+let bgImageLoadToken = 0
+
+function pageFillColor() {
+  return props.backgroundImageUrl?.trim()
+    ? 'rgba(0,0,0,0)'
+    : props.page.background || '#1a1d24'
+}
+
+function syncBackgroundImage() {
+  if (!bundle) return
+  bgImageNode?.destroy()
+  bgImageNode = null
+  const url = props.backgroundImageUrl?.trim()
+  bundle.setPageSize(props.page.width, props.page.height, pageFillColor())
+  if (!url) {
+    bundle.contentLayer.batchDraw()
+    return
+  }
+  const token = ++bgImageLoadToken
+  const img = new window.Image()
+  img.crossOrigin = 'anonymous'
+  img.onload = () => {
+    if (!bundle || token !== bgImageLoadToken) return
+    bgImageNode?.destroy()
+    const iw = img.naturalWidth || img.width || 1
+    const ih = img.naturalHeight || img.height || 1
+    const scale = Math.max(props.page.width / iw, props.page.height / ih)
+    const w = iw * scale
+    const h = ih * scale
+    bgImageNode = new Konva.Image({
+      name: 'panel-bg-image',
+      image: img,
+      x: (props.page.width - w) / 2,
+      y: (props.page.height - h) / 2,
+      width: w,
+      height: h,
+      listening: false,
+    })
+    bundle.contentLayer.add(bgImageNode)
+    bgImageNode.moveToBottom()
+    const frame = bundle.contentLayer.findOne('.page-frame')
+    frame?.moveToTop()
+    bundle.contentLayer.batchDraw()
+  }
+  img.onerror = () => {
+    if (token !== bgImageLoadToken) return
+    // 加载失败时回退纯色底，避免透明空洞
+    bundle?.setPageSize(props.page.width, props.page.height, props.page.background || '#1a1d24')
+  }
+  img.src = url
+}
 
 const widgetCount = computed(() =>
   props.page.layers.reduce((n, layer) => n + layer.widgets.length, 0),
@@ -905,15 +959,23 @@ onMounted(() => {
   window.addEventListener('mousemove', onRulerPointerMove)
   window.addEventListener('mouseup', onRulerPointerUp)
   ensureBoxRect()
+  syncBackgroundImage()
   renderAllWidgets()
   paintRulers()
   window.addEventListener('keydown', onKeyDown, true)
 })
 
 watch(
-  () => [props.page.id, props.page.width, props.page.height, props.page.background] as const,
+  () =>
+    [
+      props.page.id,
+      props.page.width,
+      props.page.height,
+      props.page.background,
+      props.backgroundImageUrl ?? '',
+    ] as const,
   () => {
-    bundle?.setPageSize(props.page.width, props.page.height, props.page.background)
+    syncBackgroundImage()
     renderAllWidgets()
     paintRulers()
   },
@@ -976,6 +1038,9 @@ onUnmounted(() => {
   clearVertexHandles()
   rulerGhost?.destroy()
   rulerGhost = null
+  bgImageLoadToken += 1
+  bgImageNode?.destroy()
+  bgImageNode = null
   bundle?.dispose()
   bundle = null
   boxRect = null

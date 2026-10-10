@@ -12,15 +12,16 @@ import {
   createModelEditorPreview,
   type ModelEditorPreview,
 } from '@/shared/three/createModelEditorPreview'
+import HelpTip from '@/components/designer/HelpTip.vue'
 
 type EditorTab = 'basic' | 'material' | 'effects'
 type MapKey = 'diffuse' | 'emissive' | 'metalness' | 'bump'
 
-const MAP_META: Array<{ key: MapKey; label: string }> = [
-  { key: 'diffuse', label: '漫反射纹理' },
-  { key: 'emissive', label: '自发光纹理' },
-  { key: 'metalness', label: '金属纹理' },
-  { key: 'bump', label: '凹凸纹理' },
+const MAP_META: Array<{ key: MapKey; label: string; hint: string }> = [
+  { key: 'diffuse', label: '漫反射纹理', hint: '表面花纹/颜色图，最容易看出效果' },
+  { key: 'emissive', label: '自发光纹理', hint: '发光区域；需自发光色不为黑' },
+  { key: 'metalness', label: '金属纹理', hint: '哪里偏金属；金属因子过低几乎看不见' },
+  { key: 'bump', label: '凹凸纹理', hint: '假凹凸细节，靠光照看，变化较弱' },
 ]
 
 const project = useProjectStore()
@@ -207,16 +208,36 @@ async function onFile(e: Event) {
   }
   try {
     const res = await project.addImageResource(file)
-    const prev = material.value?.maps?.[key]
-    patchMaps(key, {
+    const base = ensureMaterial()
+    const prev = base.maps?.[key]
+    const maps = { ...(base.maps ?? {}) }
+    maps[key] = {
       resourceId: res.id,
       offsetU: prev?.offsetU ?? 0,
       offsetV: prev?.offsetV ?? 0,
       repeatU: prev?.repeatU ?? 1,
       repeatV: prev?.repeatV ?? 1,
-    })
+    }
+    // 贴图与颜色/因子相乘：一并抬高，避免「加了图却看不见」
+    const boost: Partial<Object3DMaterial> = { maps }
+    if (key === 'emissive') {
+      const e = (base.emissive || '#000000').toLowerCase()
+      if (e === '#000000' || e === '#000') boost.emissive = '#ffffff'
+    }
+    if (key === 'metalness' && (base.metalness ?? 0.1) < 0.35) boost.metalness = 1
+    if (key === 'diffuse') boost.color = '#ffffff'
+    patchMaterial(boost)
     editingMap.value = key
-    ElMessage.success(`已添加${MAP_META.find((m) => m.key === key)?.label || '纹理'}`)
+    const label = MAP_META.find((m) => m.key === key)?.label || '纹理'
+    if (key === 'diffuse') {
+      ElMessage.success(`已添加${label}，中间预览应能看到图片花纹`)
+    } else if (key === 'emissive') {
+      ElMessage.success(`已添加${label}（自发光色已自动调亮）`)
+    } else {
+      ElMessage.success(
+        `已添加${label}。普通照片请加到「漫反射纹理」才能当表面图案显示`,
+      )
+    }
   } catch {
     ElMessage.error('上传图片失败')
   }
@@ -229,6 +250,10 @@ function deleteMap(key: MapKey) {
 
 function resourceName(id: string) {
   return project.document.resources.find((r) => r.id === id)?.name || id.slice(-8)
+}
+
+function resourceThumb(id: string | undefined) {
+  return id ? project.getResourceUrl(id) : undefined
 }
 
 function rgbLabel(hex: string | undefined, fallback: string) {
@@ -426,12 +451,18 @@ onBeforeUnmount(() => disposePreview())
         <!-- 材质 -->
         <div v-show="tab === 'material'" class="pane">
           <template v-if="!editingMap">
-            <div class="pane-title">材质</div>
+            <div class="pane-title row-inline-start">
+              <span>材质</span>
+              <HelpTip content="PBR 物理材质：颜色/贴图会互相相乘。想看贴图效果，优先加「漫反射纹理」。" />
+            </div>
             <label class="row">
               <span>材质类型</span>
               <el-input size="small" model-value="PBR材质" disabled />
             </label>
-            <div class="field-label">金属因子</div>
+            <div class="field-label row-inline-start">
+              <span>金属因子</span>
+              <HelpTip content="0=非金属（塑料/油漆），1=纯金属；越高越像金属反光。" />
+            </div>
             <el-slider
               :model-value="material?.metalness ?? 0.1"
               :min="0"
@@ -439,7 +470,10 @@ onBeforeUnmount(() => disposePreview())
               :step="0.01"
               @update:model-value="(v: number | number[]) => patchMaterial({ metalness: Number(v) })"
             />
-            <div class="field-label">粗糙度</div>
+            <div class="field-label row-inline-start">
+              <span>粗糙度</span>
+              <HelpTip content="0=镜面光滑，1=哑光粗糙。" />
+            </div>
             <el-slider
               :model-value="material?.roughness ?? 0.6"
               :min="0"
@@ -448,7 +482,10 @@ onBeforeUnmount(() => disposePreview())
               @update:model-value="(v: number | number[]) => patchMaterial({ roughness: Number(v) })"
             />
             <label class="row">
-              <span>漫反射色</span>
+              <span class="row-inline-start">
+                漫反射色
+                <HelpTip content="物体底色；有漫反射贴图时会与贴图相乘染色。" />
+              </span>
               <div class="color-line">
                 <el-color-picker
                   size="small"
@@ -461,7 +498,10 @@ onBeforeUnmount(() => disposePreview())
               </div>
             </label>
             <label class="row">
-              <span>自发光色</span>
+              <span class="row-inline-start">
+                自发光色
+                <HelpTip content="自身发光；黑=不发光。配自发光纹理时勿保持全黑。" />
+              </span>
               <div class="color-line">
                 <el-color-picker
                   size="small"
@@ -472,7 +512,10 @@ onBeforeUnmount(() => disposePreview())
               </div>
             </label>
             <label class="row">
-              <span>透明模式</span>
+              <span class="row-inline-start">
+                透明模式
+                <HelpTip content="不透明=实心；混合=半透明（可配合上方透明度）。" />
+              </span>
               <el-select
                 size="small"
                 :model-value="(material?.opacity ?? 1) < 1 ? 'blend' : 'opaque'"
@@ -484,27 +527,52 @@ onBeforeUnmount(() => disposePreview())
                 <el-option label="混合" value="blend" />
               </el-select>
             </label>
-            <el-checkbox
-              :model-value="(material?.side ?? 'front') === 'front'"
-              @update:model-value="
-                (v: boolean | string | number) => patchMaterial({ side: Boolean(v) ? 'front' : 'double' })
-              "
-            >
-              隐藏背面
-            </el-checkbox>
+            <div class="row-inline-start check-with-tip">
+              <el-checkbox
+                :model-value="(material?.side ?? 'front') === 'front'"
+                @update:model-value="
+                  (v: boolean | string | number) => patchMaterial({ side: Boolean(v) ? 'front' : 'double' })
+                "
+              >
+                隐藏背面
+              </el-checkbox>
+              <HelpTip content="勾选后不绘制模型内侧，一般保持勾选以提升性能。" />
+            </div>
 
+            <div class="field-label row-inline-start">
+              <span>纹理贴图</span>
+              <HelpTip content="贴图与颜色/因子相乘。自发光纹理需非黑色自发光色；金属纹理需金属因子不要过低。" />
+            </div>
             <div class="map-list">
               <button
                 v-for="m in MAP_META"
                 :key="m.key"
                 type="button"
                 class="map-card"
+                :class="{ 'has-map': Boolean(material?.maps?.[m.key]?.resourceId) }"
                 @click="openMapEditor(m.key)"
               >
-                <template v-if="material?.maps?.[m.key]?.resourceId">
-                  {{ m.label }}：{{ resourceName(material!.maps![m.key]!.resourceId) }}
-                </template>
-                <template v-else>暂无{{ m.label }}，点击添加</template>
+                <div class="map-card-body">
+                  <div
+                    class="map-thumb"
+                    :style="
+                      resourceThumb(material?.maps?.[m.key]?.resourceId)
+                        ? {
+                            backgroundImage: `url(${resourceThumb(material!.maps![m.key]!.resourceId)})`,
+                          }
+                        : undefined
+                    "
+                  />
+                  <div class="map-card-title row-inline-start">
+                    <template v-if="material?.maps?.[m.key]?.resourceId">
+                      <span>{{ m.label }}：{{ resourceName(material!.maps![m.key]!.resourceId) }}</span>
+                    </template>
+                    <template v-else>
+                      <span>暂无{{ m.label }}，点击添加</span>
+                    </template>
+                    <HelpTip :content="m.hint" />
+                  </div>
+                </div>
               </button>
             </div>
 
@@ -523,7 +591,10 @@ onBeforeUnmount(() => disposePreview())
           <template v-else>
             <div class="pane-title row-inline">
               <el-button size="small" text @click="editingMap = null">← 返回</el-button>
-              <span>{{ MAP_META.find((m) => m.key === editingMap)?.label }}</span>
+              <span class="row-inline-start">
+                {{ MAP_META.find((m) => m.key === editingMap)?.label }}
+                <HelpTip :content="MAP_META.find((m) => m.key === editingMap)?.hint || ''" />
+              </span>
             </div>
             <label class="row">
               <span>图片</span>
@@ -536,6 +607,13 @@ onBeforeUnmount(() => disposePreview())
                 <el-button size="small" @click="pickImageForMap(editingMap!)">选择…</el-button>
               </div>
             </label>
+            <div
+              v-if="resourceThumb(material?.maps?.[editingMap!]?.resourceId)"
+              class="map-preview"
+              :style="{
+                backgroundImage: `url(${resourceThumb(material!.maps![editingMap!]!.resourceId)})`,
+              }"
+            />
             <label class="row">
               <span>横向(u)偏移</span>
               <el-input-number
@@ -683,6 +761,46 @@ onBeforeUnmount(() => disposePreview())
   color: var(--el-text-color-secondary);
   line-height: 1.4;
 }
+.row-inline-start {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.check-with-tip {
+  margin-top: 2px;
+}
+.map-card-body {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+}
+.map-thumb {
+  width: 44px;
+  height: 44px;
+  flex-shrink: 0;
+  border-radius: 4px;
+  background: var(--el-fill-color);
+  background-size: cover;
+  background-position: center;
+  border: 1px solid var(--el-border-color-lighter);
+}
+.map-card-title {
+  font-size: 13px;
+  flex: 1;
+  min-width: 0;
+  justify-content: space-between;
+}
+.map-preview {
+  width: 100%;
+  height: 120px;
+  border-radius: 6px;
+  background: var(--el-fill-color);
+  background-size: cover;
+  background-position: center;
+  border: 1px solid var(--el-border-color);
+}
 .props {
   border: 1px solid var(--el-border-color);
   border-radius: 8px;
@@ -698,7 +816,7 @@ onBeforeUnmount(() => disposePreview())
 }
 .row {
   display: grid;
-  grid-template-columns: 110px 1fr;
+  grid-template-columns: 120px 1fr;
   align-items: center;
   gap: 8px;
   font-size: 13px;
@@ -751,9 +869,17 @@ onBeforeUnmount(() => disposePreview())
   cursor: pointer;
   font-size: 13px;
 }
+.map-card.has-map {
+  border-style: solid;
+  border-color: var(--el-color-primary-light-5);
+  color: var(--el-text-color-primary);
+}
 .map-card:hover {
   border-color: var(--el-color-primary);
   color: var(--el-color-primary);
+}
+.map-hint {
+  margin-top: 8px;
 }
 .empty {
   padding: 40px;

@@ -10,7 +10,13 @@ import type {
   EventTrigger,
   PropBinding,
 } from '@web-scada/core'
-import { ANIMATION_LINK_TREE, EVENT_TRIGGER_OPTIONS, OBJECT3D_LINK_TREE, animationLinkTypeLabel } from '@web-scada/core'
+import {
+  ANIMATION_LINK_TREE,
+  EVENT_TRIGGER_OPTIONS,
+  OBJECT3D_LINK_TREE,
+  animationLinkTypeLabel,
+  listNavigationPages,
+} from '@web-scada/core'
 import { useProjectStore } from '@/stores/project'
 import { useTagStore } from '@/stores/tag'
 import { createAnimationLink, createBinding } from '@/shared/runtime/bindingEngine'
@@ -23,7 +29,7 @@ const tags = useTagStore()
 /** 2D 图元或 3D 对象（与当前页选中一致） */
 const is3d = computed(() => Boolean(project.activePage3d && project.selectedObject3d))
 const target = computed(() => (is3d.value ? project.selectedObject3d : project.selectedWidget))
-const pages = computed(() => project.document.pages)
+const pages = computed(() => listNavigationPages(project.document))
 
 const dialogVisible = computed({
   get: () => project.animationConnectionOpen,
@@ -294,7 +300,7 @@ function addWriteEvent() {
         type: 'writeTag',
         tagId: tag.tagId,
         value: tag.dataType === 'bool' ? true : 1,
-        confirm: true,
+        confirm: false,
       },
     ],
   }
@@ -544,6 +550,12 @@ function outLabel(type: AnimationLinkType): string {
                       })
                   "
                 />
+                <el-checkbox
+                  :model-value="Boolean(action.confirm)"
+                  @update:model-value="(v: boolean | string | number) => updateEventAction(i, j, { confirm: Boolean(v) })"
+                >
+                  弹窗二次确认
+                </el-checkbox>
               </template>
               <template v-else-if="action.type === 'runScript'">
                 <span>脚本</span>
@@ -809,7 +821,7 @@ function outLabel(type: AnimationLinkType): string {
                 :model-value="activeLink.confirm !== false"
                 @update:model-value="(v: boolean | string | number) => updateActiveLink({ confirm: Boolean(v) })"
               >
-                写前确认
+                弹窗二次确认
               </el-checkbox>
             </label>
             <label v-if="activeLink.type === 'digitalIn'" class="field">

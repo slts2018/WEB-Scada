@@ -27,6 +27,9 @@ export {
   createGuideLine,
   createSymbolDefinition,
   normalizeProjectDocument,
+  migratePanelWidgetsToPages,
+  isObject3dPanelPage,
+  listNavigationPages,
 } from './factory/project'
 export {
   createWidget2D,
@@ -73,8 +76,27 @@ export {
 } from './factory/panelLayout'
 export type { PanelItemRect } from './factory/panelLayout'
 export {
+  PANEL_WIDGET_TYPES,
+  isPanelWidgetType,
+  panelItemToWidget,
+  panelItemsToWidgets,
+  widgetToPanelItem,
+  widgetsToPanelItems,
+  resolvePanelWidgets,
+  normalizeObject3DPanel,
+  normalizeObject3dPanelsInTree,
+  createDefaultPanelWidgets,
+  panelWidgetWriteAction,
+  panelWidgetValueTagId,
+  panelWidgetPrimaryTagId,
+  setPanelWidgetValueTag,
+  setPanelWidgetWriteTag,
+} from './factory/panelWidgets'
+export type { PanelWidgetType } from './factory/panelWidgets'
+export {
   DEFAULT_PAGE3D_PRESENTATION,
   resolvePage3DPresentation,
+  sunPositionFromAngles,
 } from './factory/page3dPresentation'
 export type { ResolvedPage3DPresentation } from './factory/page3dPresentation'
 export { MOCK_TAG_METAS, MOCK_DEVICES, createInitialMockValues } from './mock/tags'

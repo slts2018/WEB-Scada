@@ -27,8 +27,8 @@ import VariableManageDialog from '@/components/dialogs/VariableManageDialog.vue'
 import ResourceManagerDialog from '@/components/dialogs/ResourceManagerDialog.vue'
 import PublishValidateDialog from '@/components/dialogs/PublishValidateDialog.vue'
 import AnimationConnectionDialog from '@/components/designer/AnimationConnectionDialog.vue'
-import Object3DPanelEditorDialog from '@/components/designer/Object3DPanelEditorDialog.vue'
 import Object3DModelEditorDialog from '@/components/designer/Object3DModelEditorDialog.vue'
+import Object3DPanelPageEditorDialog from '@/components/designer/Object3DPanelPageEditorDialog.vue'
 import { useProjectStore } from '@/stores/project'
 import { useOutputLogStore } from '@/stores/outputLog'
 import { useTagStore } from '@/stores/tag'
@@ -837,14 +837,17 @@ onUnmounted(() => {
 
     <template #center>
       <div class="center-body">
-        <Canvas2DBoard v-if="active2dPage" :page="active2dPage" />
+        <Canvas2DBoard
+          v-if="active2dPage && !project.object3dPanelEditorOpen"
+          :page="active2dPage"
+        />
         <Canvas3DBoard
-          v-else-if="active3dPage"
+          v-else-if="active3dPage && !project.object3dPanelEditorOpen"
           ref="board3dRef"
           :page="active3dPage"
         />
         <div v-else class="empty">
-          <p>请选择页面</p>
+          <p>{{ project.object3dPanelEditorOpen ? '正在编辑面板…' : '请选择页面' }}</p>
         </div>
       </div>
     </template>
@@ -921,8 +924,8 @@ onUnmounted(() => {
     @confirm="confirmPublish"
   />
   <AnimationConnectionDialog />
-  <Object3DPanelEditorDialog />
   <Object3DModelEditorDialog />
+  <Object3DPanelPageEditorDialog />
 
   <el-dialog
     v-model="scriptVisible"

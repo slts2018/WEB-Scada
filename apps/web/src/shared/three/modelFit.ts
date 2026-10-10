@@ -46,7 +46,7 @@ export async function measureModelFitScale(
   return { scale: uniformFitScale(maxDim, target), maxDim }
 }
 
-/** 测量模型在 scale=1 时的包围盒三边（文件单位，上传模型默认按毫米） */
+/** 测量模型在 scale=1 时的包围盒三边（文件单位，默认按米） */
 export async function measureModelSourceSize(
   url: string,
 ): Promise<{ sourceSize: [number, number, number]; maxDim: number }> {

@@ -55,16 +55,32 @@ export function collectResourceRefs(doc: ProjectDocument): ResourceRefHit[] {
             kind: 'model',
           })
         }
-        for (const item of o.panel?.items ?? []) {
-          if (item.type !== 'image' || !item.resourceId) continue
-          hits.push({
-            resourceId: item.resourceId,
-            pageId: page.id,
-            pageName: page.name,
-            ownerId: o.id,
-            ownerName: `${o.name}/面板`,
-            kind: 'image',
-          })
+        if (o.panel?.widgets?.length) {
+          for (const w of o.panel.widgets) {
+            if (w.type !== 'image') continue
+            const rid = String(w.props.resourceId || '')
+            if (!rid) continue
+            hits.push({
+              resourceId: rid,
+              pageId: page.id,
+              pageName: page.name,
+              ownerId: o.id,
+              ownerName: `${o.name}/面板`,
+              kind: 'image',
+            })
+          }
+        } else {
+          for (const item of o.panel?.items ?? []) {
+            if (item.type !== 'image' || !item.resourceId) continue
+            hits.push({
+              resourceId: item.resourceId,
+              pageId: page.id,
+              pageName: page.name,
+              ownerId: o.id,
+              ownerName: `${o.name}/面板`,
+              kind: 'image',
+            })
+          }
         }
         if (o.panel?.backgroundResourceId) {
           hits.push({
@@ -143,7 +159,22 @@ export function replaceResourceRefs(
           o.modelResourceId = toId
           changed += 1
         }
-        if (o.panel?.items?.length) {
+        if (o.panel?.widgets?.length) {
+          let panelChanged = false
+          const widgets = o.panel.widgets.map((w) => {
+            if (w.type !== 'image') return w
+            if (String(w.props.resourceId || '') !== fromId) return w
+            panelChanged = true
+            changed += 1
+            return { ...w, props: { ...w.props, resourceId: toId } }
+          })
+          if (panelChanged) {
+            const next = { ...o.panel, widgets }
+            delete next.items
+            o.panel = next
+          }
+        } else if (o.panel?.items?.length) {
+          // 旧工程兜底：仅 items 时改完再迁到 widgets（由后续 normalize 清 items）
           let panelChanged = false
           const items = o.panel.items.map((it) => {
             if (it.type !== 'image' || it.resourceId !== fromId) return it
@@ -194,7 +225,21 @@ export function clearResourceRefs(doc: ProjectDocument, resourceId: string): num
           o.modelResourceId = undefined
           changed += 1
         }
-        if (o.panel?.items?.length) {
+        if (o.panel?.widgets?.length) {
+          let panelChanged = false
+          const widgets = o.panel.widgets.map((w) => {
+            if (w.type !== 'image') return w
+            if (String(w.props.resourceId || '') !== resourceId) return w
+            panelChanged = true
+            changed += 1
+            return { ...w, props: { ...w.props, resourceId: '', src: '' } }
+          })
+          if (panelChanged) {
+            const next = { ...o.panel, widgets }
+            delete next.items
+            o.panel = next
+          }
+        } else if (o.panel?.items?.length) {
           let panelChanged = false
           const items = o.panel.items.map((it) => {
             if (it.type !== 'image' || it.resourceId !== resourceId) return it

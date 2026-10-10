@@ -1,4 +1,5 @@
 import type { Object3DNode } from '@web-scada/core'
+import { panelItemsToWidgets } from '@web-scada/core'
 import { clonePlain } from '@/shared/utils/clonePlain'
 
 export function walkObject3dTree(
@@ -70,12 +71,20 @@ export function object3dTreeSignature(objects: Object3DNode[]): string {
   return parts.join('|')
 }
 
-/** 面板内容变更签名（属性面板编辑后重建 CSS2D） */
-export function object3dPanelSignature(objects: Object3DNode[]): string {
+/** 面板内容变更签名（属性面板编辑后重建 CSS2D）；可传入工程 pages 以纳入 page2d 内容 */
+export function object3dPanelSignature(
+  objects: Object3DNode[],
+  pages?: Array<{ id: string; type: string; layers?: unknown; width?: number; height?: number }>,
+): string {
   const parts: string[] = []
   walkObject3dTree(objects, (obj) => {
     if (!obj.panel) return
     parts.push(`${obj.id}:${obj.name}:${JSON.stringify(obj.panel)}`)
+    const pid = obj.panel.page2dId?.trim()
+    if (pid && pages) {
+      const p = pages.find((x) => x.id === pid && x.type === '2d')
+      if (p) parts.push(`p2d:${pid}:${p.width}x${p.height}:${JSON.stringify(p.layers)}`)
+    }
   })
   return parts.join('|')
 }
@@ -87,14 +96,28 @@ export function cloneObject3dWithNewIds(src: Object3DNode): Object3DNode {
   const assignIds = (node: Object3DNode) => {
     object3dIdSeq += 1
     node.id = `obj3d_${Date.now()}_${object3dIdSeq}_${Math.random().toString(36).slice(2, 7)}`
-    if (node.panel?.items?.length) {
-      node.panel = {
-        ...node.panel,
-        items: node.panel.items.map((item) => ({
-          ...item,
-          id: `pi_${Date.now()}_${object3dIdSeq}_${Math.random().toString(36).slice(2, 6)}`,
-        })),
+    if (node.panel) {
+      const panel = { ...node.panel }
+      // 若仅有旧 items，先迁到 widgets 再换 id
+      if (!panel.widgets?.length && panel.items?.length) {
+        panel.widgets = panelItemsToWidgets(panel.items)
       }
+      delete panel.items
+      if (panel.widgets?.length) {
+        panel.widgets = panel.widgets.map((w) => ({
+          ...w,
+          id: `w_${Date.now()}_${object3dIdSeq}_${Math.random().toString(36).slice(2, 6)}`,
+          bindings: (w.bindings ?? []).map((b) => ({
+            ...b,
+            id: `bind_${Date.now()}_${object3dIdSeq}_${Math.random().toString(36).slice(2, 5)}`,
+          })),
+          events: (w.events ?? []).map((e) => ({
+            ...e,
+            id: `evt_${Date.now()}_${object3dIdSeq}_${Math.random().toString(36).slice(2, 5)}`,
+          })),
+        }))
+      }
+      node.panel = panel
     }
     for (const child of node.children ?? []) assignIds(child)
   }

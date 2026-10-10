@@ -341,6 +341,8 @@ defineExpose({
   flex-direction: column;
   border-left: 1px solid var(--scada-border);
   background: var(--scada-panel);
+  /* 否则内容增高时被父级裁切，.scroll 无法出现滚动条 */
+  min-height: 0;
 }
 
 .right-rail {

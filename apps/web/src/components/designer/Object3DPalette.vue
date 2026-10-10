@@ -42,7 +42,7 @@ function addPanel() {
     return
   }
   void project.addObject3d({ panel: true, name: '面板' })
-  ElMessage.success('已添加跟镜头面板（在属性里绑定 Tag）')
+  ElMessage.success('已添加跟镜头面板（属性或双击打开编辑弹窗）')
 }
 
 function placeModel(resourceId: string, name?: string) {
@@ -179,6 +179,7 @@ async function onFile(e: Event) {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  min-height: 0;
 }
 
 .hidden {
@@ -265,8 +266,7 @@ async function onFile(e: Event) {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
-  max-height: 360px;
-  overflow: auto;
+  /* 高度交给外层控件库 .scroll，避免双重裁切导致滚不动 */
   padding-right: 2px;
 }
 

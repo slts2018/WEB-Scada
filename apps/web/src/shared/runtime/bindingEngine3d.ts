@@ -1,6 +1,7 @@
-import type { AnimationLink, Object3DNode, Page3D, TagValue, Transform3D } from '@web-scada/core'
+import type { AnimationLink, Object3DNode, Page2D, Page3D, TagValue, Transform3D } from '@web-scada/core'
 import { walkObject3dTree } from '@/shared/project/object3dTree'
 import { clonePlain } from '@/shared/utils/clonePlain'
+import { collectPageTagIds } from '@/shared/runtime/bindingEngine'
 
 export interface ResolvedObject3D {
   object: Object3DNode
@@ -318,7 +319,30 @@ export function resolveObject3DVisual(
   }
 }
 
-export function collectPage3DTagIds(page: Page3D): string[] {
+function collectWidgetTagIdsInto(ids: Set<string>, widgets: { type?: string; bindings?: { tagId?: string }[]; animations?: { tagId?: string }[]; animationLinks?: { tagId?: string }[]; events?: { actions?: { type: string; tagId?: string }[] }[] }[]) {
+  for (const w of widgets) {
+    if (w.type === 'scene3d') continue
+    for (const b of w.bindings ?? []) {
+      if (b.tagId) ids.add(b.tagId)
+    }
+    for (const a of w.animations ?? []) {
+      if (a.tagId) ids.add(a.tagId)
+    }
+    for (const link of w.animationLinks ?? []) {
+      if (link.tagId) ids.add(link.tagId)
+    }
+    for (const e of w.events ?? []) {
+      for (const action of e.actions ?? []) {
+        if (action.type === 'writeTag' && action.tagId) ids.add(action.tagId)
+      }
+    }
+  }
+}
+
+export function collectPage3DTagIds(
+  page: Page3D,
+  resolvePage2d?: (page2dId: string) => Page2D | null | undefined,
+): string[] {
   const ids = new Set<string>()
   walkObject3dTree(page.objects, (obj) => {
     for (const b of obj.bindings ?? []) ids.add(b.tagId)
@@ -329,8 +353,21 @@ export function collectPage3DTagIds(page: Page3D): string[] {
         if (action.type === 'writeTag') ids.add(action.tagId)
       }
     }
-    for (const item of obj.panel?.items ?? []) {
-      if (item.tagId) ids.add(item.tagId)
+    const page2dId = obj.panel?.page2dId?.trim()
+    if (page2dId && resolvePage2d) {
+      const page2d = resolvePage2d(page2dId)
+      if (page2d) {
+        for (const id of collectPageTagIds(page2d)) ids.add(id)
+        return
+      }
+    }
+    const panelWidgets = obj.panel?.widgets
+    if (panelWidgets?.length) {
+      collectWidgetTagIdsInto(ids, panelWidgets)
+    } else {
+      for (const item of obj.panel?.items ?? []) {
+        if (item.tagId) ids.add(item.tagId)
+      }
     }
   })
   return [...ids]

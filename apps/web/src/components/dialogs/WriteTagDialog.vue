@@ -64,6 +64,8 @@ function onClosed() {
     :title="title"
     width="440px"
     align-center
+    append-to-body
+    :z-index="50000"
     :close-on-click-modal="false"
     @update:model-value="emit('update:modelValue', $event)"
     @closed="onClosed"

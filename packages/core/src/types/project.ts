@@ -50,7 +50,10 @@ export interface Widget2D {
   children?: Widget2D[]
 }
 
-/** 3D 跟镜头面板内控件（自由坐标，类似 2D 图元） */
+/**
+ * 3D 跟镜头面板内控件（旧格式）。
+ * @deprecated 请用 Object3DPanel.widgets（Widget2D 子集）；加载时会迁移。
+ */
 export interface Object3DPanelItem {
   id: string
   type: 'label' | 'value' | 'button' | 'image'
@@ -94,7 +97,21 @@ export interface Object3DPanel {
   objectFit?: 'none' | 'contain' | 'cover' | 'fill'
   /** 面板背景图（工程资源 id，kind=image|svg）；缺省为纯色底 */
   backgroundResourceId?: string
-  items: Object3DPanelItem[]
+  /**
+   * 嵌入的完整 2D 页面 id（工程 pages 中 type=2d）。
+   * 有合法 page2dId 时，编辑/运行以该页为准。
+   */
+  page2dId?: string
+  /**
+   * 旧面板内联控件；仅兼容迁移，规范化后迁入 page2d 并清除。
+   * @deprecated 使用 page2dId
+   */
+  widgets?: Widget2D[]
+  /**
+   * 更旧的控件列表；仅兼容读取，规范化后清除。
+   * @deprecated 使用 page2dId
+   */
+  items?: Object3DPanelItem[]
 }
 
 /** 3D 材质贴图槽（工程图片资源 + UV） */
@@ -152,10 +169,10 @@ export interface Object3DNode {
   panel?: Object3DPanel
   /**
    * 几何在 transform.scale=[1,1,1] 时的包围盒尺寸（sourceUnit 单位）。
-   * 上传模型默认按毫米建模；内置图元为米。
+   * 上传模型与内置图元默认均为米；可选 mm（少见）。
    */
   sourceSize?: [number, number, number]
-  /** 缺省：有 modelResourceId → mm，否则 → m */
+  /** 缺省：m（模型与图元统一按米） */
   sourceUnit?: Object3DSourceUnit
   transform: Transform3D
   /** 颜色等样式 */
@@ -210,6 +227,11 @@ export interface Page2D {
   /** 页面持久参考线 */
   guides?: GuideLine2D[]
   scriptIds?: string[]
+  /**
+   * 用途：page=普通画面（页面树可见）；object3d-panel=跟镜头面板内容（隐藏于页面树/运行页签）。
+   * 缺省视为 page。
+   */
+  usage?: 'page' | 'object3d-panel'
 }
 
 export interface Page3D {
@@ -232,6 +254,11 @@ export interface Page3D {
 export interface Page3DPresentation {
   /** 背景色，默认 #12151c */
   background?: string
+  /**
+   * 背景模式：color=纯色；hemi=浅色天空感（仍用 background 作主色调）。
+   * 默认 color。
+   */
+  backgroundMode?: 'color' | 'hemi'
   /** IBL / RoomEnvironment 强度，默认 0.55 */
   environmentIntensity?: number
   /** 环境光强度，默认 0.45 */
@@ -240,12 +267,32 @@ export interface Page3DPresentation {
   sunEnabled?: boolean
   /** 太阳光强度，默认 1.05 */
   sunIntensity?: number
+  /** 阳光水平角（度，绕 Y），默认 35 */
+  sunAzimuthDeg?: number
+  /** 阳光高度角（度，0=地平线 90=顶），默认 55 */
+  sunElevationDeg?: number
   /** 是否产生阴影，默认 true */
   shadowsEnabled?: boolean
   /** 阴影贴图边长，默认 1024 */
   shadowMapSize?: number
   /** 阴影偏移，默认 -0.0002 */
   shadowBias?: number
+  /** 地面网格，默认 true；运行端可用 query showGrid 覆盖 */
+  gridVisible?: boolean
+  /** 网格中心/主线颜色 */
+  gridColor?: string
+  /** 网格次线颜色 */
+  gridDivisionColor?: string
+  /** 阴影接收地面透明度 0–1，默认 0.32 */
+  groundOpacity?: number
+  /** 相机最小距离，默认 0.5 */
+  cameraMinDistance?: number
+  /** 相机最大距离，默认 500 */
+  cameraMaxDistance?: number
+  /** 俯仰下限（极角，度；0=顶视），默认 5 */
+  cameraMinPolarDeg?: number
+  /** 俯仰上限（极角，度；90≈平视），默认 89 */
+  cameraMaxPolarDeg?: number
 }
 
 export type Page = Page2D | Page3D

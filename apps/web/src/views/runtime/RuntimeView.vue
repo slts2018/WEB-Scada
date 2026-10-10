@@ -13,7 +13,7 @@ import {
   getStorageMode,
 } from '@/shared/storage/repository'
 import { RUNTIME_BOOT_KEY } from '@/shared/runtime/openRuntime'
-import type { Page2D, Page3D } from '@web-scada/core'
+import { isObject3dPanelPage, listNavigationPages, type Page2D, type Page3D } from '@web-scada/core'
 
 const route = useRoute()
 const router = useRouter()
@@ -64,15 +64,21 @@ function closeRuntimeDialog() {
   dialogPageId.value = null
 }
 
-/** 只认 URL / 发布包里的真实页面 id，不用加载前空工程的临时 id */
+/** 只认 URL / 发布包里的真实页面 id；跟镜头面板内容页不当作默认可导航页 */
 function resolveRuntimePageId(preferred: string | null | undefined): string | null {
-  const pages = project.document.pages
-  if (!pages.length) return null
-  if (preferred && pages.some((p) => p.id === preferred)) return preferred
+  const nav = listNavigationPages(project.document)
+  if (!nav.length && !project.document.pages.length) return null
+  if (preferred && project.document.pages.some((p) => p.id === preferred)) {
+    // 面板内容页也可被显式 URL 打开，但不作为默认首页
+    return preferred
+  }
   const home = project.document.homePageId
-  if (home && pages.some((p) => p.id === home)) return home
-  const first2d = pages.find((p) => p.type === '2d')
-  return first2d?.id ?? pages[0]?.id ?? null
+  if (home && nav.some((p) => p.id === home)) return home
+  if (home && project.document.pages.some((p) => p.id === home && !isObject3dPanelPage(p))) {
+    return home
+  }
+  const first2d = nav.find((p) => p.type === '2d')
+  return first2d?.id ?? nav[0]?.id ?? null
 }
 
 function applyPageQuery() {
@@ -113,6 +119,12 @@ async function ensurePublished() {
         ...(projectId ? { projectId } : {}),
         v: version,
         ...(publishedAt ? { publishedAt: String(publishedAt) } : {}),
+        // 保留进入运行时的上下文参数：丢掉它们会让上面的 watcher 再跑一遍
+        // ensurePublished（重新加载发布包 → 画布重挂、相机复位，正好吃掉用户第一次点击）
+        ...(from ? { from } : {}),
+        ...(showGrid.value ? { showGrid: '1' } : {}),
+        ...(typeof route.query._ts === 'string' ? { _ts: route.query._ts } : {}),
+        ...(typeof route.query.diag3d === 'string' ? { diag3d: route.query.diag3d } : {}),
       },
     })
   }
@@ -286,6 +298,7 @@ watch(
         v-else-if="active3dPage"
         :key="active3dPage.id + ':' + runtimeRev + ':g' + (showGrid ? '1' : '0')"
         :page="active3dPage"
+        :interactive="true"
         :show-hud="false"
         :show-grid="showGrid"
         @open-dialog="openRuntimeDialog"
