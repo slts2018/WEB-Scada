@@ -45,6 +45,7 @@ import {
   trendHistoryWindowOf,
   zoomTrendHistoryWindow,
 } from '@/shared/runtime/trendHistoryQuery'
+import { jumpTrendHistoryWidgetToTime } from '@/shared/runtime/trendHistoryLink'
 import {
   forgetTrendToolbar,
   setActiveTrendToolbar,
@@ -84,6 +85,11 @@ const follow = ref(true)
 const aggWindow = ref<string | null>(null)
 const notice = ref<{ kind: 'error' | 'empty'; text: string } | null>(null)
 const range = ref<[Date, Date]>([new Date(Date.now() - 3600_000), new Date()])
+/**
+ * 「时刻」：手动选/输**一个时间点**（秒精度），游标跳过去。
+ * 它跟着游标走：图内点一下 / ◀▶ 微调也会同步显示，但改成别的时刻就等于"我要看这一刻"。
+ */
+const jumpAt = ref<Date | null>(null)
 const showHelp = ref(false)
 const showMore = ref(false)
 
@@ -113,11 +119,10 @@ function headerOf(tagId: string): string {
 const measured = ref(props.width && props.width > 0 ? props.width : 9999)
 const barWidth = computed(() => (measured.value > 0 ? measured.value : 9999))
 /** 中档：收起日期区间 / 采样间隔 / 导出 */
-const compact = computed(() => barWidth.value < 760)
+const compact = computed(() => barWidth.value < 1020)
 /** 窄档：只留区间快捷 + 前后平移 + 更多（其余全进气泡） */
-const narrow = computed(() => barWidth.value < 460)
-/** 游标读数一行放不下时改为两行 */
-const narrowCursor = computed(() => barWidth.value < 620)
+const narrow = computed(() => barWidth.value < 540)
+
 
 const root = ref<HTMLDivElement | null>(null)
 let observer: ResizeObserver | null = null
@@ -248,6 +253,12 @@ function syncCursor(): void {
   const at = trendHistoryCursorOf(props.widgetId)
   const moved = at !== cursorAt.value
   cursorAt.value = at
+  // 「时刻」控件跟着游标（游标没变时不回写，避免打断正在手输的用户）
+  if (at == null) {
+    if (jumpAt.value) jumpAt.value = null
+  } else if (jumpAt.value?.getTime() !== at) {
+    jumpAt.value = new Date(at)
+  }
   if (at == null) {
     cursorRows.value = []
     cursorTimeText.value = ''
@@ -262,6 +273,22 @@ function syncCursor(): void {
 
 function stepCursor(dir: -1 | 1): void {
   stepTrendHistoryCursor(props.widgetId, dir, props.tagIds)
+  after()
+}
+
+/** 手动跳到某个时刻（可手输）：见 jumpTrendHistoryWidgetToTime 的注释 */
+function jumpToTime(value: Date | string | number | null): void {
+  const at =
+    value instanceof Date
+      ? value.getTime()
+      : typeof value === 'number'
+        ? value
+        : typeof value === 'string'
+          ? Date.parse(value.replace(/-/g, '/'))
+          : Number.NaN
+  if (!Number.isFinite(at) || at <= 0) return
+  jumpTrendHistoryWidgetToTime(props.widgetId, at)
+  markActive()
   after()
 }
 
@@ -456,6 +483,7 @@ function exportCsv(): void {
 }
 
 const SHORTCUTS: Array<{ key: string; text: string }> = [
+  { key: '时刻', text: '手动选/输一个时间点 → 游标跳过去（不在区间里会自动把窗口挪过去）' },
   { key: '跟随', text: '默认关闭：区间是一次查询的快照；勾上才随时间滚动并按 10s 刷新' },
   { key: '← / →', text: '游标按采样点前后移动' },
   { key: '+ / -', text: '以游标为中心放大 / 缩小时间窗' },
@@ -494,12 +522,24 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
           type="datetimerange"
           size="small"
           class="w-range"
-          format="MM-DD HH:mm"
+          format="MM-DD HH:mm:ss"
           range-separator="~"
           :clearable="false"
           :teleported="false"
           :disabled="!canEdit()"
           @change="applyRange"
+        />
+        <el-date-picker
+          v-model="jumpAt"
+          type="datetime"
+          size="small"
+          class="w-jump"
+          format="MM-DD HH:mm:ss"
+          placeholder="跳到时刻"
+          :clearable="false"
+          :teleported="false"
+          :disabled="!canEdit()"
+          @change="jumpToTime"
         />
       </template>
 
@@ -551,7 +591,7 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
       <el-popover
         v-model:visible="showMore"
         :teleported="false"
-        :width="250"
+        :width="340"
         trigger="click"
         placement="bottom-start"
         popper-class="trend-more-popper"
@@ -561,12 +601,28 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
         </template>
         <div class="more-panel">
           <label class="more-row top">
-            <span>自定义区间</span>
+            <span>跳到时刻（手动选时间）</span>
+            <el-date-picker
+              v-model="jumpAt"
+              type="datetime"
+              size="small"
+              style="width: 100%"
+              format="MM-DD HH:mm:ss"
+              placeholder="选择 / 输入一个时刻"
+              :clearable="false"
+              :teleported="false"
+              :disabled="!canEdit()"
+              @change="jumpToTime"
+            />
+          </label>
+          <label class="more-row top">
+            <span>自定义区间（起止，秒精度）</span>
             <el-date-picker
               v-model="range"
               type="datetimerange"
               size="small"
-              format="MM-DD HH:mm"
+              style="width: 100%"
+              format="MM-DD HH:mm:ss"
               range-separator="~"
               :clearable="false"
               :teleported="false"
@@ -627,9 +683,10 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
       >?</el-button>
 
       <span v-if="aggWindow && interval === 'auto'" class="hint">按 {{ aggWindow }} 平均</span>
-      <span v-if="!follow && !narrow" class="hint">区间已固定 · 刷新取最新</span>
-      <span v-if="cursorAt == null && !narrow" class="hint">图内单击落游标读数</span>
-      <span v-else-if="cursorAt != null" class="cursor" :class="{ 'cursor--wrap': narrowCursor }">
+      <span v-if="!narrow && cursorAt == null" class="hint">
+        {{ follow ? '图内单击落游标读数' : '区间已固定 · 刷新取最新 · 也可直接选「时刻」' }}
+      </span>
+      <span v-if="cursorAt != null" class="cursor">
         <el-button size="small" text @click="stepCursor(-1)">◀</el-button>
         <span class="cursor-time">{{ cursorTimeText }}</span>
         <span v-for="row in cursorRows" :key="row.tagId" class="cursor-row">
@@ -747,7 +804,13 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   width: 84px;
 }
 .w-range {
-  width: 210px;
+  /* 秒精度：起止各要 MM-DD HH:mm:ss */
+  width: 252px;
+  flex: 0 0 auto;
+}
+.w-jump {
+  /* 手动选一个时刻（秒精度） */
+  width: 148px;
   flex: 0 0 auto;
 }
 .w-interval {
@@ -763,21 +826,22 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   padding: 0 6px;
 }
 .spacer {
-  flex: 1 1 auto;
+  flex: 1 1 0;
+  min-width: 0;
 }
 .cursor {
   display: flex;
   align-items: center;
   gap: 4px;
+  /* 可收缩：控件多了先压读数，别把按钮挤出图元 */
+  flex: 0 1 auto;
+  min-width: 0;
   font-size: 11px;
   color: #e2e8f0;
   white-space: nowrap;
   overflow: hidden;
 }
-.cursor--wrap {
-  flex-wrap: wrap;
-  row-gap: 0;
-}
+
 .cursor-time {
   font-family: ui-monospace, Consolas, monospace;
   color: #93c5fd;
@@ -858,6 +922,11 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
 .more-row :deep(.el-select) {
   width: 118px;
 }
+
+.more-row :deep(.el-date-editor) {
+  width: 100%;
+  max-width: 100%;
+}
 .more-btns {
   display: flex;
   flex-wrap: wrap;
@@ -921,9 +990,14 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   gap: 2px;
 }
 .hint {
+  /* 位置不够时先压提示文字，别把按钮挤出图元 */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
   color: #94a3b8;
   font-size: 11px;
   white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .notice {
   font-size: 11px;
