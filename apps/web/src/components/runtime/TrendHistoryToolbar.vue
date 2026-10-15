@@ -15,12 +15,14 @@ import { ElMessage } from 'element-plus'
 import {
   clearTrendHistoryCursor,
   onTrendHistoryCursor,
+  setTrendHistoryCursor,
   stepTrendHistoryCursor,
   trendHistoryCursorOf,
   trendHistoryCursorReadout,
   trendHistoryCursorText,
   type CursorRow,
 } from '@/shared/runtime/trendHistoryCursor'
+import { onTrendAlarmBandsChanged, trendAlarmBandsOf, type AlarmBand } from '@/shared/runtime/trendAlarmEvents'
 import {
   TREND_INTERVALS,
   TREND_RANGES,
@@ -95,6 +97,20 @@ function fmtRowTime(ms: number): string {
   return `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
 }
 
+const alarmBands = ref<AlarmBand[]>([])
+
+/** 点"报警 N"把游标跳到第一条报警时刻（与历史报警表对照时最常用） */
+function jumpToFirstAlarm(): void {
+  const first = alarmBands.value[0]
+  if (!first) return
+  setTrendHistoryCursor(props.widgetId, first.from)
+  after()
+}
+
+function syncAlarms(): void {
+  alarmBands.value = trendAlarmBandsOf(props.widgetId)
+}
+
 const cursorAt = ref<number | null>(null)
 const cursorRows = ref<CursorRow[]>([])
 const cursorTimeText = ref('')
@@ -149,6 +165,7 @@ function sync(): void {
   const win = trendHistoryWindowOf(props.widgetId)
   if (win) range.value = [new Date(win.from), new Date(win.to)]
   syncCursor()
+  syncAlarms()
 }
 
 /** 键盘：有游标时 ←/→ 按采样点微调，Esc 清除（输入框里不抢键） */
@@ -169,10 +186,12 @@ function onKeydown(e: KeyboardEvent): void {
 
 let offLoaded: (() => void) | null = null
 let offCursor: (() => void) | null = null
+let offAlarms: (() => void) | null = null
 onMounted(() => {
   sync()
   offLoaded = onTrendHistoryLoaded(sync)
   offCursor = onTrendHistoryCursor(sync)
+  offAlarms = onTrendAlarmBandsChanged(syncAlarms)
   window.addEventListener('keydown', onKeydown)
 })
 onBeforeUnmount(() => {
@@ -180,6 +199,8 @@ onBeforeUnmount(() => {
   offLoaded = null
   offCursor?.()
   offCursor = null
+  offAlarms?.()
+  offAlarms = null
   window.removeEventListener('keydown', onKeydown)
 })
 
@@ -302,6 +323,9 @@ function exportCsv(): void {
     >跟随</el-checkbox>
     <el-button size="small" @click="refresh">刷新</el-button>
     <el-button size="small" :type="showTable ? 'primary' : 'default'" @click="toggleTable">表</el-button>
+    <el-button v-if="alarmBands.length" size="small" type="danger" plain @click="jumpToFirstAlarm">
+      报警 {{ alarmBands.length }}
+    </el-button>
     <el-button size="small" @click="exportCsv">CSV</el-button>
     <span v-if="aggWindow && interval === 'auto'" class="hint">按 {{ aggWindow }} 平均</span>
     <span v-if="cursorAt == null" class="hint">图内单击落游标读数</span>
