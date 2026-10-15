@@ -81,10 +81,18 @@ const emit = defineEmits<{ change: []; toggleFullscreen: [] }>()
 
 const preset = ref(props.preset || '-1h')
 const interval = ref('auto')
-const follow = ref(true)
+const follow = ref(false)
 const aggWindow = ref<string | null>(null)
 const notice = ref<{ kind: 'error' | 'empty'; text: string } | null>(null)
-const range = ref<[Date, Date]>([new Date(Date.now() - 3600_000), new Date()])
+/**
+ * 起止时间：**两个独立的输入框**（开始 / 结束，各自带日历+时间面板，秒精度）+
+ * 一个「搜索」按钮 —— 现场就是"选开始、选结束、查一下"这个习惯（不是组合控件、也不是只能选相对区间）。
+ * 自动应用：两个都填好且开始早于结束时，改完就查；「搜索」= 按当前这对起止时间重查一遍。
+ */
+const fromAt = ref<Date | null>(null)
+const toAt = ref<Date | null>(null)
+/** 正在编辑起止时间时不要被后台刷新回来的窗口盖掉 */
+const editingRange = ref(false)
 /**
  * 「时刻」：手动选/输**一个时间点**（秒精度），游标跳过去。
  * 它跟着游标走：图内点一下 / ◀▶ 微调也会同步显示，但改成别的时刻就等于"我要看这一刻"。
@@ -118,12 +126,13 @@ function headerOf(tagId: string): string {
 
 const measured = ref(props.width && props.width > 0 ? props.width : 9999)
 const barWidth = computed(() => (measured.value > 0 ? measured.value : 9999))
-/** 中档：收起日期区间 / 采样间隔 / 导出 */
-const compact = computed(() => barWidth.value < 1020)
-/** 窄档：只留区间快捷 + 前后平移 + 更多（其余全进气泡） */
-const narrow = computed(() => barWidth.value < 540)
-/** 极窄档：连「时刻」也放不下，一起收进气泡 */
-const tiny = computed(() => barWidth.value < 480)
+/**
+ * 宽档（≥1240）：全量控件常驻。
+ * 中档：收起采样间隔 / 跟随 / 刷新 / 导出、「时刻」（起止时间还留着 —— 那是现场最常用的）。
+ */
+const compact = computed(() => barWidth.value < 1240)
+/** 窄档：起止时间也放不下 → 收进「⋯」（只留区间快捷 + 前后平移） */
+const narrow = computed(() => barWidth.value < 640)
 
 
 const root = ref<HTMLDivElement | null>(null)
@@ -319,7 +328,10 @@ function sync(): void {
   notice.value = trendHistoryNoticeOf(props.widgetId)
   aggWindow.value = trendHistoryStatusOf(props.widgetId)?.aggWindow ?? null
   const win = trendHistoryWindowOf(props.widgetId)
-  if (win) range.value = [new Date(win.from), new Date(win.to)]
+  if (win && !editingRange.value) {
+    if (fromAt.value?.getTime() !== win.from) fromAt.value = new Date(win.from)
+    if (toAt.value?.getTime() !== win.to) toAt.value = new Date(win.to)
+  }
   syncCursor()
   syncAlarms()
 }
@@ -424,12 +436,21 @@ function applyPreset(): void {
   after()
 }
 
-function applyRange(): void {
-  const [from, to] = range.value
-  const f = from?.getTime()
-  const t = to?.getTime()
-  if (!Number.isFinite(f) || !Number.isFinite(t) || t <= f) return
-  setTrendHistoryWindow(props.widgetId, f, t)
+/**
+ * 按"开始 ~ 结束"查询。
+ * search=true（点「搜索」或回车）= 这一对起止时间重查一遍；否则是改完自动应用。
+ * 起止时间是用户明确指定的绝对区间 → 先关跟随，刷新时也保持这一段（不跳回最新）。
+ */
+function applyRange(search = false): void {
+  const f = fromAt.value?.getTime()
+  const t = toAt.value?.getTime()
+  if (!Number.isFinite(f) || !Number.isFinite(t) || (t as number) <= (f as number)) {
+    if (search) ElMessage.warning('开始时间要早于结束时间')
+    return
+  }
+  setTrendHistoryFollow(props.widgetId, false)
+  setTrendHistoryWindow(props.widgetId, f as number, t as number)
+  if (search) refreshTrendHistory(props.widgetId)
   after()
 }
 
@@ -485,7 +506,8 @@ function exportCsv(): void {
 }
 
 const SHORTCUTS: Array<{ key: string; text: string }> = [
-  { key: '时刻', text: '手动选/输一个时间点 → 游标跳过去（不在区间里会自动把窗口挪过去）' },
+  { key: '开始/结束', text: '起止时间各自一个输入框（秒精度）→ 改完自动查，或点「搜索」重查一遍' },
+  { key: '时刻', text: '看某一个瞬间 → 游标跳过去（不在起止区间里会自动把窗口挪过去）' },
   { key: '跟随', text: '默认关闭：区间是一次查询的快照；勾上才随时间滚动并按 10s 刷新' },
   { key: '← / →', text: '游标按采样点前后移动' },
   { key: '+ / -', text: '以游标为中心放大 / 缩小时间窗' },
@@ -500,7 +522,7 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   <div ref="root" class="trend-toolbar" @pointerenter="markActive">
     <div
       class="trend-bar"
-      :class="{ 'is-narrow': narrow, 'is-compact': compact, 'is-tiny': tiny }"
+      :class="{ 'is-narrow': narrow, 'is-compact': compact }"
       @pointerdown.stop
       @mousedown.stop
       @click.stop="markActive"
@@ -518,24 +540,49 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
         <el-option v-for="item in TREND_RANGES" :key="item.id" :label="item.label" :value="item.id" />
       </el-select>
 
-      <template v-if="!compact">
+      <!-- 起止时间：两个独立输入框 + 搜索（现场"选开始、选结束、查一下"的习惯） -->
+      <template v-if="!narrow">
+        <span class="time-label">开始</span>
         <el-date-picker
-          v-model="range"
-          type="datetimerange"
+          v-model="fromAt"
+          type="datetime"
           size="small"
-          class="w-range"
+          class="w-datetime"
           format="MM-DD HH:mm:ss"
-          range-separator="~"
+          placeholder="开始时间"
           :clearable="false"
           :teleported="false"
           :disabled="!canEdit()"
-          @change="applyRange"
+          @focus="editingRange = true"
+          @blur="editingRange = false"
+          @change="applyRange()"
         />
+        <span class="time-label">结束</span>
+        <el-date-picker
+          v-model="toAt"
+          type="datetime"
+          size="small"
+          class="w-datetime"
+          format="MM-DD HH:mm:ss"
+          placeholder="结束时间"
+          :clearable="false"
+          :teleported="false"
+          :disabled="!canEdit()"
+          @focus="editingRange = true"
+          @blur="editingRange = false"
+          @change="applyRange()"
+        />
+        <el-button
+          size="small"
+          :disabled="!canEdit()"
+          title="按这对起止时间查询（重新拉一次数据）"
+          @click="applyRange(true)"
+        >搜索</el-button>
       </template>
 
-      <!-- 手动选时间：这是"看某一刻"的主入口，能显示就常驻（极窄时才收进 ⋯） -->
+      <!-- 「时刻」：看某一个瞬间（不在起止区间里会自动把窗口挪过去） -->
       <el-date-picker
-        v-if="!tiny"
+        v-if="!compact"
         v-model="jumpAt"
         type="datetime"
         size="small"
@@ -620,19 +667,38 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
               @change="jumpToTime"
             />
           </label>
-          <label class="more-row top">
-            <span>自定义区间（起止，秒精度）</span>
+          <label class="more-row">
+            <span>开始</span>
             <el-date-picker
-              v-model="range"
-              type="datetimerange"
+              v-model="fromAt"
+              type="datetime"
               size="small"
               style="width: 100%"
               format="MM-DD HH:mm:ss"
-              range-separator="~"
+              placeholder="开始时间"
               :clearable="false"
               :teleported="false"
               :disabled="!canEdit()"
-              @change="applyRange"
+              @focus="editingRange = true"
+              @blur="editingRange = false"
+              @change="applyRange()"
+            />
+          </label>
+          <label class="more-row">
+            <span>结束</span>
+            <el-date-picker
+              v-model="toAt"
+              type="datetime"
+              size="small"
+              style="width: 100%"
+              format="MM-DD HH:mm:ss"
+              placeholder="结束时间"
+              :clearable="false"
+              :teleported="false"
+              :disabled="!canEdit()"
+              @focus="editingRange = true"
+              @blur="editingRange = false"
+              @change="applyRange()"
             />
           </label>
           <label class="more-row">
@@ -652,6 +718,7 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
           <div class="more-btns">
             <el-button size="small" :disabled="!canEdit()" title="放大时间窗" @click="zoom(2)">－ 缩小范围</el-button>
             <el-button size="small" :disabled="!canEdit()" title="缩小时间窗" @click="zoom(0.5)">＋ 放大范围</el-button>
+            <el-button size="small" :disabled="!canEdit()" @click="applyRange(true)">按起止查询</el-button>
             <el-button
               size="small"
               :title="follow ? '重新查询当前窗口' : '重新查询（回到最新）'"
@@ -689,7 +756,7 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
 
       <span v-if="aggWindow && interval === 'auto'" class="hint">按 {{ aggWindow }} 平均</span>
       <span v-if="!narrow && cursorAt == null" class="hint">
-        {{ follow ? '图内单击落游标读数' : '区间已固定 · 刷新取最新 · 也可直接选「时刻」' }}
+        {{ follow ? '图内单击落游标读数' : '起止时间可手输/日历选（秒精度）· 刷新取最新' }}
       </span>
       <span v-if="cursorAt != null" class="cursor">
         <el-button size="small" text @click="stepCursor(-1)">◀</el-button>
@@ -808,15 +875,22 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
 .trend-bar.is-compact .w-preset {
   width: 84px;
 }
-/* 窄档把「时刻」也压窄一点，尽量留在工具条上 */
-.trend-bar.is-compact .w-jump,
-.trend-bar.is-narrow .w-jump {
-  width: 130px;
+.trend-bar.is-compact .w-jump {
+  width: 132px;
 }
-.w-range {
-  /* 秒精度：起止各要 MM-DD HH:mm:ss */
-  width: 252px;
+.w-datetime {
+  /* 起止各一个：MM-DD HH:mm:ss 要放得下（含日历图标） */
+  width: 138px;
   flex: 0 0 auto;
+}
+.time-label {
+  flex: 0 0 auto;
+  color: #94a3b8;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.trend-bar.is-compact .w-datetime {
+  width: 130px;
 }
 .w-jump {
   /* 手动选一个时刻（秒精度） */
