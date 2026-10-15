@@ -122,6 +122,8 @@ const barWidth = computed(() => (measured.value > 0 ? measured.value : 9999))
 const compact = computed(() => barWidth.value < 1020)
 /** 窄档：只留区间快捷 + 前后平移 + 更多（其余全进气泡） */
 const narrow = computed(() => barWidth.value < 540)
+/** 极窄档：连「时刻」也放不下，一起收进气泡 */
+const tiny = computed(() => barWidth.value < 480)
 
 
 const root = ref<HTMLDivElement | null>(null)
@@ -498,7 +500,7 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   <div ref="root" class="trend-toolbar" @pointerenter="markActive">
     <div
       class="trend-bar"
-      :class="{ 'is-narrow': narrow, 'is-compact': compact }"
+      :class="{ 'is-narrow': narrow, 'is-compact': compact, 'is-tiny': tiny }"
       @pointerdown.stop
       @mousedown.stop
       @click.stop="markActive"
@@ -529,19 +531,22 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
           :disabled="!canEdit()"
           @change="applyRange"
         />
-        <el-date-picker
-          v-model="jumpAt"
-          type="datetime"
-          size="small"
-          class="w-jump"
-          format="MM-DD HH:mm:ss"
-          placeholder="跳到时刻"
-          :clearable="false"
-          :teleported="false"
-          :disabled="!canEdit()"
-          @change="jumpToTime"
-        />
       </template>
+
+      <!-- 手动选时间：这是"看某一刻"的主入口，能显示就常驻（极窄时才收进 ⋯） -->
+      <el-date-picker
+        v-if="!tiny"
+        v-model="jumpAt"
+        type="datetime"
+        size="small"
+        class="w-jump"
+        format="MM-DD HH:mm:ss"
+        placeholder="跳到时刻"
+        :clearable="false"
+        :teleported="false"
+        :disabled="!canEdit()"
+        @change="jumpToTime"
+      />
 
       <el-button-group>
         <el-button size="small" :disabled="!canEdit()" title="前移一个窗口" @click="shift(-1)">◀</el-button>
@@ -802,6 +807,11 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
 .trend-bar.is-narrow .w-preset,
 .trend-bar.is-compact .w-preset {
   width: 84px;
+}
+/* 窄档把「时刻」也压窄一点，尽量留在工具条上 */
+.trend-bar.is-compact .w-jump,
+.trend-bar.is-narrow .w-jump {
+  width: 130px;
 }
 .w-range {
   /* 秒精度：起止各要 MM-DD HH:mm:ss */
