@@ -6,10 +6,31 @@
  * 用 Element Plus 的日期选择器比在画布上自绘省事得多；与"历史报警"的搜索条同一套做法
  * （按图元矩形定位，见 trendToolbarClientRect）。
  *
- * 窄图元自适应：工具条是按图元宽度定位的，图元一小就必然放不下全部控件，
- * 所以按实测宽度分档（宽 / 中 / 窄），放不下的收进"更多"气泡里，而不是被裁掉。
+ * 布局（越重要的越靠左，成组用竖线分隔，只留最常用的在条上）：
+ *
+ *   区间 │ 开始 结束 搜索 │ ⇤ ⇥ 跟随 刷新 表 │ ⋯        ◀ 08:32:11 ▶ ✕
+ *   └── 时间 ──┘└── 导航 ──┘└─ 工具 ─┘   └─ 游标读数（有游标才出现）─┘
+ *
+ * 其余（跳到时刻 / 采样间隔 / 缩放 / 点表 / 导出 CSV / 复制读数 / 报警跳转 / 全屏 / 快捷键）
+ * 一律收进「⋯」，不再和主控件抢地方；图元变窄时"起止时间"这一组也并进「⋯」。
+ * 成对按钮用图标（⇤⇥ 平移一个窗口、◀▶ 游标步进），文字按钮只留给动词（搜索/刷新/表/跟随）。
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import {
+  ArrowLeft,
+  ArrowRight,
+  Close,
+  CopyDocument,
+  DArrowLeft,
+  DArrowRight,
+  FullScreen,
+  Memo,
+  Operation,
+  Refresh,
+  ScaleToOriginal,
+  ZoomIn,
+  ZoomOut,
+} from '@element-plus/icons-vue'
 import { formatTrendValue, type TrendValueFormat } from '@web-scada/core'
 import {
   setTrendHistoryTableVisible,
@@ -100,6 +121,8 @@ const editingRange = ref(false)
 const jumpAt = ref<Date | null>(null)
 const showHelp = ref(false)
 const showMore = ref(false)
+/** 「⋯」面板表头显示当前区间（sync 时刷新；模块里的窗口状态不是响应式的） */
+const rangeText = ref('')
 
 /* ---------- 曲线显示格式（单位 / 小数位） ---------- */
 
@@ -126,13 +149,12 @@ function headerOf(tagId: string): string {
 
 const measured = ref(props.width && props.width > 0 ? props.width : 9999)
 const barWidth = computed(() => (measured.value > 0 ? measured.value : 9999))
-/**
- * 宽档（≥1240）：全量控件常驻。
- * 中档：收起采样间隔 / 跟随 / 刷新 / 导出、「时刻」（起止时间还留着 —— 那是现场最常用的）。
- */
-const compact = computed(() => barWidth.value < 1240)
-/** 窄档：起止时间也放不下 → 收进「⋯」（只留区间快捷 + 前后平移） */
-const narrow = computed(() => barWidth.value < 640)
+/** 起止时间这一组（开始+结束+搜索 ≈ 380px）放不下时并进「⋯」 */
+const showRange = computed(() => barWidth.value >= 800)
+/** 「跟随」这种模式开关在很窄的图元上也让位（状态在「⋯」里也能看到） */
+const showFollow = computed(() => barWidth.value >= 460)
+/** 条上是否还有余量显示"按 Xs 平均"这类小字提示 */
+const showAggHint = computed(() => barWidth.value >= 900)
 
 
 const root = ref<HTMLDivElement | null>(null)
@@ -253,6 +275,13 @@ const cursorAt = ref<number | null>(null)
 const cursorRows = ref<CursorRow[]>([])
 const cursorTimeText = ref('')
 
+/** 面板表头用的完整时间戳（月-日 时:分:秒） */
+function fmtStamp(ms: number): string {
+  const d = new Date(ms)
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  return `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
+}
+
 function fmtClock(ms: number): string {
   const d = new Date(ms)
   const p = (n: number) => String(n).padStart(2, '0')
@@ -328,9 +357,12 @@ function sync(): void {
   notice.value = trendHistoryNoticeOf(props.widgetId)
   aggWindow.value = trendHistoryStatusOf(props.widgetId)?.aggWindow ?? null
   const win = trendHistoryWindowOf(props.widgetId)
-  if (win && !editingRange.value) {
-    if (fromAt.value?.getTime() !== win.from) fromAt.value = new Date(win.from)
-    if (toAt.value?.getTime() !== win.to) toAt.value = new Date(win.to)
+  if (win) {
+    rangeText.value = `${fmtStamp(win.from)} ~ ${fmtStamp(win.to)}`
+    if (!editingRange.value) {
+      if (fromAt.value?.getTime() !== win.from) fromAt.value = new Date(win.from)
+      if (toAt.value?.getTime() !== win.to) toAt.value = new Date(win.to)
+    }
   }
   syncCursor()
   syncAlarms()
@@ -522,13 +554,14 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   <div ref="root" class="trend-toolbar" @pointerenter="markActive">
     <div
       class="trend-bar"
-      :class="{ 'is-narrow': narrow, 'is-compact': compact }"
+      :class="{ 'is-narrow': !showRange }"
       @pointerdown.stop
       @mousedown.stop
       @click.stop="markActive"
       @dblclick.stop
       @wheel.stop
     >
+      <!-- ① 时间：区间快捷 -->
       <el-select
         v-model="preset"
         size="small"
@@ -540,8 +573,9 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
         <el-option v-for="item in TREND_RANGES" :key="item.id" :label="item.label" :value="item.id" />
       </el-select>
 
-      <!-- 起止时间：两个独立输入框 + 搜索（现场"选开始、选结束、查一下"的习惯） -->
-      <template v-if="!narrow">
+      <!-- ② 时间：起止时间 + 搜索（宽图元常驻，窄图元并进「⋯」） -->
+      <template v-if="showRange">
+        <span class="divider" />
         <span class="time-label">开始</span>
         <el-date-picker
           v-model="fromAt"
@@ -580,80 +614,108 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
         >搜索</el-button>
       </template>
 
-      <!-- 「时刻」：看某一个瞬间（不在起止区间里会自动把窗口挪过去） -->
-      <el-date-picker
-        v-if="!compact"
-        v-model="jumpAt"
-        type="datetime"
-        size="small"
-        class="w-jump"
-        format="MM-DD HH:mm:ss"
-        placeholder="跳到时刻"
-        :clearable="false"
-        :teleported="false"
-        :disabled="!canEdit()"
-        @change="jumpToTime"
-      />
-
+      <!-- ③ 导航：平移一个窗口 / 跟随 / 刷新 / 点表 -->
+      <span class="divider" />
       <el-button-group>
-        <el-button size="small" :disabled="!canEdit()" title="前移一个窗口" @click="shift(-1)">◀</el-button>
-        <el-button size="small" :disabled="!canEdit()" title="后移一个窗口" @click="shift(1)">▶</el-button>
-      </el-button-group>
-      <el-button-group v-if="!narrow">
-        <el-button size="small" :disabled="!canEdit()" title="放大时间窗（键盘 -）" @click="zoom(2)">－</el-button>
-        <el-button size="small" :disabled="!canEdit()" title="缩小时间窗（键盘 +）" @click="zoom(0.5)">＋</el-button>
-      </el-button-group>
-
-      <template v-if="!compact">
-        <el-select
-          v-model="interval"
-          size="small"
-          class="w-interval"
-          :teleported="false"
-          :disabled="!canEdit()"
-          @change="applyInterval"
-        >
-          <el-option v-for="item in TREND_INTERVALS" :key="item.id" :label="item.label" :value="item.id" />
-        </el-select>
-        <el-checkbox
-          :model-value="follow"
-          size="small"
-          :disabled="!canEdit()"
-          @update:model-value="toggleFollow"
-        >跟随</el-checkbox>
         <el-button
           size="small"
-          :title="follow ? '重新查询当前窗口' : '重新查询（回到最新）'"
-          @click="refresh"
-        >刷新</el-button>
-        <el-button size="small" :type="showTable ? 'primary' : 'default'" @click="toggleTable">表</el-button>
-      </template>
-
-      <el-button
-        v-if="alarmBands.length && !narrow"
+          :icon="DArrowLeft"
+          :disabled="!canEdit()"
+          title="前移一个窗口"
+          @click="shift(-1)"
+        />
+        <el-button
+          size="small"
+          :icon="DArrowRight"
+          :disabled="!canEdit()"
+          title="后移一个窗口"
+          @click="shift(1)"
+        />
+      </el-button-group>
+      <el-checkbox
+        v-if="showFollow"
+        :model-value="follow"
         size="small"
-        type="danger"
-        plain
-        @click="jumpToFirstAlarm"
-      >
-        报警 {{ alarmBands.length }}
-      </el-button>
+        :disabled="!canEdit()"
+        :title="follow ? '勾选：区间随时间滚动 + 10s 自动刷新' : '未勾选：区间固定为一次查询的快照'"
+        @update:model-value="toggleFollow"
+      >跟随</el-checkbox>
+      <el-button
+        size="small"
+        :icon="Refresh"
+        :title="follow ? '重新查询当前窗口' : '重新查询（回到最新）'"
+        @click="refresh"
+      >刷新</el-button>
+      <el-button
+        size="small"
+        :type="showTable ? 'primary' : 'default'"
+        :icon="Memo"
+        title="图下数据表（与游标联动、可导出）"
+        @click="toggleTable"
+      >表</el-button>
 
-      <!-- 窄档：其余控件收进"更多"，不再被裁掉 -->
+      <!-- ④ 工具：其余控件一律收进「⋯」 -->
       <el-popover
         v-model:visible="showMore"
         :teleported="false"
-        :width="340"
+        :width="330"
         trigger="click"
-        placement="bottom-start"
+        placement="bottom-end"
         popper-class="trend-more-popper"
       >
         <template #reference>
-          <el-button size="small" :type="showMore ? 'primary' : 'default'" title="更多控件">⋯</el-button>
+          <el-button
+            size="small"
+            :icon="Operation"
+            :type="showMore ? 'primary' : 'default'"
+            title="更多：起止时间 / 时刻 / 采样间隔 / 缩放 / 导出 / 最大化 / 快捷键"
+          />
         </template>
         <div class="more-panel">
+          <div class="more-head">当前区间 {{ rangeText }}</div>
+
+          <template v-if="!showRange">
+            <div class="more-title">起止时间</div>
+            <label class="more-row">
+              <span>开始</span>
+              <el-date-picker
+                v-model="fromAt"
+                type="datetime"
+                size="small"
+                style="width: 100%"
+                format="MM-DD HH:mm:ss"
+                placeholder="开始时间"
+                :clearable="false"
+                :teleported="false"
+                :disabled="!canEdit()"
+                @focus="editingRange = true"
+                @blur="editingRange = false"
+                @change="applyRange()"
+              />
+            </label>
+            <label class="more-row">
+              <span>结束</span>
+              <el-date-picker
+                v-model="toAt"
+                type="datetime"
+                size="small"
+                style="width: 100%"
+                format="MM-DD HH:mm:ss"
+                placeholder="结束时间"
+                :clearable="false"
+                :teleported="false"
+                :disabled="!canEdit()"
+                @focus="editingRange = true"
+                @blur="editingRange = false"
+                @change="applyRange()"
+              />
+            </label>
+            <el-button size="small" :disabled="!canEdit()" @click="applyRange(true)">按起止查询</el-button>
+          </template>
+
+          <div class="more-title">时刻与采样</div>
           <label class="more-row top">
-            <span>跳到时刻（手动选时间）</span>
+            <span>跳到时刻（看某一个瞬间）</span>
             <el-date-picker
               v-model="jumpAt"
               type="datetime"
@@ -668,111 +730,79 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
             />
           </label>
           <label class="more-row">
-            <span>开始</span>
-            <el-date-picker
-              v-model="fromAt"
-              type="datetime"
-              size="small"
-              style="width: 100%"
-              format="MM-DD HH:mm:ss"
-              placeholder="开始时间"
-              :clearable="false"
-              :teleported="false"
-              :disabled="!canEdit()"
-              @focus="editingRange = true"
-              @blur="editingRange = false"
-              @change="applyRange()"
-            />
-          </label>
-          <label class="more-row">
-            <span>结束</span>
-            <el-date-picker
-              v-model="toAt"
-              type="datetime"
-              size="small"
-              style="width: 100%"
-              format="MM-DD HH:mm:ss"
-              placeholder="结束时间"
-              :clearable="false"
-              :teleported="false"
-              :disabled="!canEdit()"
-              @focus="editingRange = true"
-              @blur="editingRange = false"
-              @change="applyRange()"
-            />
-          </label>
-          <label class="more-row">
             <span>采样间隔</span>
-            <el-select v-model="interval" size="small" :teleported="false" :disabled="!canEdit()" @change="applyInterval">
+            <el-select
+              v-model="interval"
+              size="small"
+              :teleported="false"
+              :disabled="!canEdit()"
+              @change="applyInterval"
+            >
               <el-option v-for="item in TREND_INTERVALS" :key="item.id" :label="item.label" :value="item.id" />
             </el-select>
           </label>
-          <div class="more-row">
+          <div v-if="!showFollow" class="more-row">
             <el-checkbox
               :model-value="follow"
               size="small"
               :disabled="!canEdit()"
               @update:model-value="toggleFollow"
-            >跟随最新</el-checkbox>
+            >跟随最新（随时间滚动 + 10s 刷新）</el-checkbox>
           </div>
+
+          <div class="more-title">时间窗</div>
           <div class="more-btns">
-            <el-button size="small" :disabled="!canEdit()" title="放大时间窗" @click="zoom(2)">－ 缩小范围</el-button>
-            <el-button size="small" :disabled="!canEdit()" title="缩小时间窗" @click="zoom(0.5)">＋ 放大范围</el-button>
-            <el-button size="small" :disabled="!canEdit()" @click="applyRange(true)">按起止查询</el-button>
-            <el-button
-              size="small"
-              :title="follow ? '重新查询当前窗口' : '重新查询（回到最新）'"
-              @click="refresh"
-            >刷新</el-button>
-            <el-button size="small" :type="showTable ? 'primary' : 'default'" @click="toggleTable">点表</el-button>
-            <el-button v-if="alarmBands.length" size="small" type="danger" plain @click="jumpToFirstAlarm">
-              报警 {{ alarmBands.length }}
+            <el-button size="small" :icon="ZoomIn" :disabled="!canEdit()" title="缩小跨度（看得更细）" @click="zoom(0.5)">
+              放大范围
             </el-button>
-            <el-button size="small" @click="exportCsv">CSV</el-button>
+            <el-button size="small" :icon="ZoomOut" :disabled="!canEdit()" title="放大跨度（看得更久）" @click="zoom(2)">
+              缩小范围
+            </el-button>
+          </div>
+
+          <div class="more-title">读数与导出</div>
+          <div class="more-btns">
+            <el-button size="small" :icon="CopyDocument" :disabled="cursorAt == null" @click="copyCursor">
+              复制读数
+            </el-button>
+            <el-button size="small" @click="exportCsv">导出 CSV</el-button>
+            <el-button v-if="alarmBands.length" size="small" type="danger" plain @click="jumpToFirstAlarm">
+              跳到报警 {{ alarmBands.length }} 处
+            </el-button>
+          </div>
+
+          <div class="more-title">窗口</div>
+          <div class="more-btns">
+            <el-button
+              v-if="fullscreenSupported !== false"
+              size="small"
+              :icon="fullscreen ? ScaleToOriginal : FullScreen"
+              @click="emit('toggleFullscreen')"
+            >{{ fullscreen ? '退出最大化' : '最大化查看' }}</el-button>
+            <el-button size="small" @click="showMore = false; showHelp = true">快捷键提示</el-button>
           </div>
         </div>
       </el-popover>
 
-      <template v-if="!narrow">
-        <el-button size="small" @click="exportCsv">CSV</el-button>
-      </template>
+      <!-- 错误/空态提示比读数重要：排在伸缩空位之前，先给它地方 -->
+      <span v-if="notice" class="notice" :class="notice.kind">{{ notice.text }}</span>
 
-      <span v-if="!narrow" class="spacer" />
+      <span class="spacer" />
 
-      <el-button
-        v-if="fullscreenSupported !== false"
-        size="small"
-        class="btn-icon"
-        :title="fullscreen ? '退出最大化（Esc）' : '最大化查看'"
-        @click="emit('toggleFullscreen')"
-      >{{ fullscreen ? '⤡' : '⛶' }}</el-button>
-      <el-button
-        size="small"
-        class="btn-icon"
-        :type="showHelp ? 'primary' : 'default'"
-        title="快捷键提示"
-        @click="showHelp = !showHelp"
-      >?</el-button>
-
-      <span v-if="aggWindow && interval === 'auto'" class="hint">按 {{ aggWindow }} 平均</span>
-      <span v-if="!narrow && cursorAt == null" class="hint">
-        {{ follow ? '图内单击落游标读数' : '起止时间可手输/日历选（秒精度）· 刷新取最新' }}
-      </span>
+      <span v-if="showAggHint && aggWindow && interval === 'auto'" class="hint">按 {{ aggWindow }} 平均</span>
       <span v-if="cursorAt != null" class="cursor">
-        <el-button size="small" text @click="stepCursor(-1)">◀</el-button>
+        <el-button size="small" text :icon="ArrowLeft" title="游标前一个采样点（←）" @click="stepCursor(-1)" />
         <span class="cursor-time">{{ cursorTimeText }}</span>
         <span v-for="row in cursorRows" :key="row.tagId" class="cursor-row">
           <i class="dot" :class="row.quality === 'Good' || row.quality == null ? 'ok' : 'bad'" />
           {{ row.tagId }} {{ fmtNumber(row.tagId, row.value) }}
         </span>
-        <el-button size="small" text @click="stepCursor(1)">▶</el-button>
-        <el-button v-if="!narrow" size="small" text @click="copyCursor">复制</el-button>
-        <el-button size="small" text @click="clearCursor">✕</el-button>
+        <el-button size="small" text :icon="ArrowRight" title="游标后一个采样点（→）" @click="stepCursor(1)" />
+        <el-button size="small" text :icon="Close" title="清除游标（Esc）" @click="clearCursor" />
       </span>
-      <span v-if="notice" class="notice" :class="notice.kind">{{ notice.text }}</span>
     </div>
 
-    <!-- 快捷键提示：工具条右侧 "?" 打开，Esc 关闭 -->
+    <!-- 快捷键提示：从「⋯」或按 ? 打开，Esc 关闭 -->
     <div v-if="showHelp" class="shortcuts" @pointerdown.stop @wheel.stop>
       <div class="shortcuts-head">
         <span>快捷键 / 鼠标操作</span>
@@ -867,16 +897,21 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
 .trend-bar :deep(.el-button + .el-button) {
   margin-left: 0;
 }
+/* 成组之间的竖线：把"时间 / 导航 / 工具"三组分清楚 */
+.divider {
+  flex: 0 0 auto;
+  width: 1px;
+  height: 14px;
+  margin: 0 3px;
+  background: #24344f;
+}
 .w-preset {
   width: 104px;
   flex: 0 0 auto;
 }
-.trend-bar.is-narrow .w-preset,
-.trend-bar.is-compact .w-preset {
+.trend-bar.is-narrow .w-preset {
+  /* 起止时间收进「⋯」后条上只有区间快捷，窄一点更省地方 */
   width: 84px;
-}
-.trend-bar.is-compact .w-jump {
-  width: 132px;
 }
 .w-datetime {
   /* 起止各一个：MM-DD HH:mm:ss 要放得下（含日历图标） */
@@ -889,13 +924,9 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   font-size: 11px;
   white-space: nowrap;
 }
-.trend-bar.is-compact .w-datetime {
-  width: 130px;
-}
 .w-jump {
-  /* 手动选一个时刻（秒精度） */
-  width: 148px;
-  flex: 0 0 auto;
+  /* 手动选一个时刻（秒精度）；在「⋯」面板里占满整行 */
+  width: 100%;
 }
 .w-interval {
   width: 88px;
@@ -905,10 +936,7 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   width: 92px;
   flex: 0 0 auto;
 }
-.btn-icon {
-  flex: 0 0 auto;
-  padding: 0 6px;
-}
+
 .spacer {
   flex: 1 1 0;
   min-width: 0;
@@ -989,6 +1017,20 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+.more-head {
+  color: #93c5fd;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.more-title {
+  margin-top: 2px;
+  padding-top: 4px;
+  border-top: 1px solid #1e293b;
+  color: #64748b;
+  font-size: 11px;
 }
 .more-row {
   display: flex;
@@ -1084,6 +1126,8 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   text-overflow: ellipsis;
 }
 .notice {
+  flex: 0 1 auto;
+  min-width: 0;
   font-size: 11px;
   white-space: nowrap;
   overflow: hidden;
