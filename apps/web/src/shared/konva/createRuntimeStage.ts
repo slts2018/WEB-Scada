@@ -1,11 +1,22 @@
 import Konva from 'konva'
 import type { AnimationLinkRange, EventBinding, EventTrigger, Page2D, Widget2D } from '@web-scada/core'
-import { createWidgetNode, syncWidgetNode } from '@/shared/konva/widgetNodes'
+import { trendCurves } from '@web-scada/core'
+import {
+  createWidgetNode,
+  setHiddenCurves,
+  syncWidgetNode,
+  widgetHasCurveLegend,
+} from '@/shared/konva/widgetNodes'
+import { setTrendZoom } from '@/shared/konva/trendChart'
+import { createTrendLiveOverlay } from '@/shared/konva/trendChartLive'
+import { syncNativeTrendCharts } from '@/shared/konva/trendNativeCharts'
+import { attachTrendChartInteraction } from '@/shared/konva/trendChartInteraction'
 import {
   isWidgetRuntimeEnabled,
   mapDragOffsetToTag,
   widgetHasInteractiveLinks,
 } from '@/shared/runtime/bindingEngine'
+import { createClickDblclickGate } from '@/shared/runtime/clickDblclickGate'
 
 export interface RuntimeStageHandlers {
   /** 图元交互事件（含 mouseEnter / mouseLeave） */
@@ -13,6 +24,8 @@ export interface RuntimeStageHandlers {
   /** @deprecated 请用 onWidgetEvent；保留兼容 */
   onWidgetClick?: (widgetId: string, events: EventBinding[]) => void
   onAnimationInput?: (widgetId: string) => void
+  /** 实时报警行被点击，确认这一条 */
+  onAlarmAck?: (alarmId: string) => void
   onDragWrite?: (
     widgetId: string,
     axis: 'h' | 'v',
@@ -35,6 +48,12 @@ export interface RuntimeStageBundle {
   getWidgetClientRect: (widgetId: string) => { x: number; y: number; width: number; height: number } | null
   /** 舞台缩放/平移变化时回调（用于 HTML 叠层同步） */
   setViewChangeListener: (fn: (() => void) | null) => void
+  /** 趋势图元是否可交互（悬停读数 / 拖拽缩放时间窗） */
+  setChartInteraction: (on: boolean) => void
+  /** 视图/数据变化后同步趋势图元的原生叠层 */
+  syncOverlays: () => void
+  /** 原生叠层是否接收鼠标（只读 3D 面板里关掉） */
+  setOverlayInteractive: (on: boolean) => void
 }
 
 /**
@@ -44,6 +63,7 @@ export function createRuntimeStage(
   container: HTMLDivElement,
   page: Page2D,
   handlers: RuntimeStageHandlers = {},
+  opts?: { chartInteraction?: boolean },
 ): RuntimeStageBundle {
   let pageWidth = page.width
   let pageHeight = page.height
@@ -51,6 +71,8 @@ export function createRuntimeStage(
   let currentPage: Page2D = page
   const sourceMap = new Map<string, Widget2D>()
   const blinkTimers = new Map<string, ReturnType<typeof setInterval>>()
+  /** 同图元既有单击又有双击时，延时单击以免双击误触 */
+  const clickDblGate = createClickDblclickGate()
 
   const stage = new Konva.Stage({
     container,
@@ -76,6 +98,65 @@ export function createRuntimeStage(
     for (const id of blinkTimers.keys()) clearBlink(id)
   }
 
+  let alarmBlinkOn = true
+  const alarmBlinkTimer = setInterval(() => {
+    alarmBlinkOn = !alarmBlinkOn
+    const nodes = widgetLayer.find('.alarm-blink')
+    if (!nodes.length) return
+    nodes.forEach((n) => n.opacity(alarmBlinkOn ? 1 : 0.2))
+    widgetLayer.batchDraw()
+  }, 500)
+
+  // ── 趋势图元：原生 ECharts 活控件叠层 ───────────────────────────────
+  // 图片模式（离屏位图贴回 Konva）拿不到鼠标，ECharts 自带的游标/滑块/图例/导出都用不了；
+  // 这里给趋势图元挂真实例：只要图元没旋转、也没有业务点击事件（那两个场景仍走图片模式）。
+  const allWidgetsOf = (): Widget2D[] => {
+    const out: Widget2D[] = []
+    for (const layer of currentPage.layers ?? []) {
+      for (const widget of layer.widgets ?? []) out.push(widget)
+    }
+    return out
+  }
+
+  /** 原生叠层是否接收鼠标（只读面板里关掉，避免抢 3D 的指针） */
+  let overlayInteractive = true
+
+  const sourceWidgetOf = (id: string): Widget2D | undefined =>
+    sourceMap.get(id) ?? currentPage.layers.flatMap((layer) => layer.widgets).find((w) => w.id === id)
+
+  const isTrendWidget = (widget: Widget2D): boolean =>
+    widget.type === 'trend' || widget.type === 'trendHistory'
+
+  const trendLiveOverlay = createTrendLiveOverlay({
+    host: container,
+    onLegendSelect: (widgetId, hiddenNames) => {
+      const widget = sourceWidgetOf(widgetId)
+      if (!widget) return
+      // 图例用的是显示名，这里换算回 tagId
+      const hiddenTags = trendCurves(widget.props)
+        .filter((curve) => hiddenNames.includes(curve.label || curve.tagId))
+        .map((curve) => curve.tagId)
+      setHiddenCurves(widget, hiddenTags)
+      // 立刻按新的显隐重画图元（原生叠层与图片路径都要跟着变）
+      const node = widgetLayer.findOne('#' + widgetId) as Konva.Group | null
+      if (node) syncWidgetNode(node, sourceWidgetOf(widgetId) ?? widget)
+      syncTrendOverlays()
+    },
+    onZoom: (widgetId, zoom) => {
+      setTrendZoom(widgetId, { start: zoom.start, end: zoom.end })
+    },
+  })
+
+  /** 同步原生 ECharts：位置、数据，以及位图是否还要画 */
+  const syncTrendOverlays = () => {
+    syncNativeTrendCharts({
+      stage,
+      widgetLayer,
+      widgets: allWidgetsOf().map((widget) => sourceWidgetOf(widget.id) ?? widget),
+      overlay: trendLiveOverlay,
+      interactive: overlayInteractive,
+    })
+  }
   const fitToView = () => {
     const cw = stage.width()
     const ch = stage.height()
@@ -88,6 +169,8 @@ export function createRuntimeStage(
     })
     stage.batchDraw()
     viewChangeListener?.()
+    // 视图变了：原生叠层的位置/字号跟着重算
+    syncTrendOverlays()
   }
 
   let viewChangeListener: (() => void) | null = null
@@ -123,17 +206,23 @@ export function createRuntimeStage(
 
     const interactive =
       (widget.events?.length ?? 0) > 0 || widgetHasInteractiveLinks(widget)
+    const alarmWidget = widget.type === 'alarm'
+    // 趋势图元的图例要能点（隐藏/恢复曲线）：它不是"图元事件"，但必须参与命中测试，
+    // 否则 listening(false) 会让整棵子树都点不到 —— 运行端"点了没反应"的根因。
+    const legendToggle = widgetHasCurveLegend(widget)
     const dragH = getDragLink(widget, 'h')
     const dragV = getDragLink(widget, 'v')
     const canDrag = Boolean(dragH || dragV)
 
     node.draggable(canDrag)
-    node.listening(interactive)
+    node.listening(interactive || alarmWidget || legendToggle)
 
-    if (!interactive) return
+    if (!interactive && !alarmWidget) return
 
     const designX = widget.transform.x
     const designY = widget.transform.y
+
+    const expectDblclick = (widget.events ?? []).some((e) => e.trigger === 'dblclick')
 
     const emitEvent = (trigger: EventTrigger) => {
       handlers.onWidgetEvent?.(widget.id, trigger, widget.events ?? [])
@@ -143,14 +232,22 @@ export function createRuntimeStage(
       }
     }
 
+    const emitClickOrDbl = (trigger: 'click' | 'dblclick') => {
+      if (trigger === 'click') {
+        clickDblGate.scheduleClick(widget.id, () => emitEvent('click'), expectDblclick)
+        return
+      }
+      clickDblGate.triggerDblclick(widget.id, () => emitEvent('dblclick'))
+    }
+
     node.on('mouseenter', () => {
       if (spacePressed) return
       stage.container().style.cursor = canDrag ? 'grab' : 'pointer'
-      emitEvent('mouseEnter')
+      if (interactive) emitEvent('mouseEnter')
     })
     node.on('mouseleave', () => {
       if (!spacePressed) stage.container().style.cursor = 'default'
-      emitEvent('mouseLeave')
+      if (interactive) emitEvent('mouseLeave')
     })
 
     node.on('dragstart', () => {
@@ -198,23 +295,28 @@ export function createRuntimeStage(
 
     node.on('mousedown', (e) => {
       e.cancelBubble = true
-      if (spacePressed) return
+      if (spacePressed || !interactive) return
       emitEvent('mousedown')
     })
     node.on('mouseup', (e) => {
       e.cancelBubble = true
-      if (spacePressed) return
+      if (spacePressed || !interactive) return
       emitEvent('mouseup')
     })
     node.on('click', (e) => {
       e.cancelBubble = true
       if (spacePressed) return
-      emitEvent('click')
+      const alarmId = e.target?.getAttr?.('alarmId')
+      if (alarmWidget && alarmId) {
+        handlers.onAlarmAck?.(String(alarmId))
+        return
+      }
+      if (interactive) emitClickOrDbl('click')
     })
     node.on('dblclick', (e) => {
       e.cancelBubble = true
-      if (spacePressed) return
-      emitEvent('dblclick')
+      if (spacePressed || !interactive) return
+      emitClickOrDbl('dblclick')
     })
   }
 
@@ -380,6 +482,7 @@ export function createRuntimeStage(
       bindNodeEvents(created, source)
       widgetLayer.add(created)
       widgetLayer.batchDraw()
+      if (isTrendWidget(visual)) syncTrendOverlays()
       return
     }
 
@@ -387,6 +490,7 @@ export function createRuntimeStage(
       clearBlink(widgetId)
       node.visible(false)
       widgetLayer.batchDraw()
+      if (isTrendWidget(visual)) syncTrendOverlays()
       return
     }
 
@@ -406,7 +510,9 @@ export function createRuntimeStage(
     const interactive =
       enabled &&
       ((source?.events?.length ?? 0) > 0 || (source ? widgetHasInteractiveLinks(source) : false))
-    node.listening(interactive)
+    // 图例点击是纯本地显示开关，不受"图元使能/有无事件"影响
+    const legendToggle = widgetHasCurveLegend(source ?? visual)
+    node.listening(interactive || (visual.type === 'alarm' && enabled) || legendToggle)
     if (source) {
       const dragH = getDragLink(source, 'h')
       const dragV = getDragLink(source, 'v')
@@ -428,6 +534,8 @@ export function createRuntimeStage(
       node.opacity(Number(visual.style.opacity ?? 1))
     }
     widgetLayer.batchDraw()
+    // 趋势图元：数据每 tick 都在变，原生叠层跟着刷新
+    if (isTrendWidget(visual)) syncTrendOverlays()
   }
 
   // 运行端固定 fitToView 适配，不提供滚轮缩放（设计端 createKonvaStage 才有）
@@ -462,6 +570,14 @@ export function createRuntimeStage(
     stage.height(container.clientHeight || 600)
     fitToView()
   }
+  const findWidgetById = (id: string): Widget2D | undefined =>
+    sourceMap.get(id) ?? currentPage.layers.flatMap((l) => l.widgets).find((w) => w.id === id)
+
+  // 趋势图元交互（悬停读数 / 拖时间窗缩放 / 双击还原）；运行端默认开
+  const trendInteraction = attachTrendChartInteraction(stage, findWidgetById, {
+    enabled: opts?.chartInteraction === true,
+  })
+
   const ro = new ResizeObserver(onResize)
   ro.observe(container)
 
@@ -474,15 +590,22 @@ export function createRuntimeStage(
     setPage: renderPage,
     renderPage,
     applyVisual,
-    getSourceWidget: (id) =>
-      sourceMap.get(id) ??
-      currentPage.layers.flatMap((l) => l.widgets).find((w) => w.id === id),
+    syncOverlays: () => syncTrendOverlays(),
+    setOverlayInteractive: (on: boolean) => {
+      overlayInteractive = on
+      syncTrendOverlays()
+    },
+    getSourceWidget: sourceWidgetOf,
     getWidgetClientRect,
     setViewChangeListener: (fn) => {
       viewChangeListener = fn
     },
+    setChartInteraction: (on: boolean) => trendInteraction.setEnabled(on),
     dispose: () => {
+      trendLiveOverlay.dispose()
       clearAllBlink()
+      clearInterval(alarmBlinkTimer)
+      clickDblGate.dispose()
       viewChangeListener = null
       ro.disconnect()
       window.removeEventListener('keydown', onKeyDown)

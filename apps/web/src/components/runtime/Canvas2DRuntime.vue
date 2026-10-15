@@ -23,6 +23,9 @@ import { useOutputLogStore } from '@/stores/outputLog'
 import WriteTagDialog from '@/components/dialogs/WriteTagDialog.vue'
 import Canvas3DRuntime from '@/components/runtime/Canvas3DRuntime.vue'
 import { object3dTreeSignature } from '@/shared/project/object3dTree'
+import { historyPagerClientRect, historySearchClientRect } from '@/shared/runtime/alarmHistoryQuery'
+import AlarmHistorySearchBar from '@/components/runtime/AlarmHistorySearchBar.vue'
+import AlarmHistoryPager from '@/components/runtime/AlarmHistoryPager.vue'
 
 const props = defineProps<{
   page: Page2D
@@ -58,6 +61,65 @@ type Scene3dSlot = {
 }
 
 const scene3dSlots = ref<Scene3dSlot[]>([])
+
+type HistoryBar = {
+  id: string
+  x: number
+  y: number
+  w: number
+  h: number
+  px: number
+  py: number
+  pw: number
+  ph: number
+}
+const historyBars = ref<HistoryBar[]>([])
+
+function syncHistoryBars() {
+  if (!bundle || !host.value) {
+    historyBars.value = []
+    return
+  }
+  const board = host.value.parentElement
+  const hostBox = host.value.getBoundingClientRect()
+  const boardBox = board?.getBoundingClientRect()
+  const origin = {
+    x: boardBox ? hostBox.left - boardBox.left : 0,
+    y: boardBox ? hostBox.top - boardBox.top : 0,
+  }
+  const next: HistoryBar[] = []
+  for (const layer of props.page.layers) {
+    if (!layer.visible) continue
+    for (const widget of layer.widgets) {
+    if (widget.type !== 'alarmHistory' || widget.visible === false) continue
+    const node = bundle.stage.findOne(`#${widget.id}`)
+    if (!node) continue
+    const rect = historySearchClientRect(
+      (p) => node.getAbsoluteTransform().point(p),
+      widget,
+      origin,
+    )
+    const pager = historyPagerClientRect(
+      (p) => node.getAbsoluteTransform().point(p),
+      widget,
+      origin,
+    )
+    next.push({
+      id: widget.id,
+      ...rect,
+      px: pager.x,
+      py: pager.y,
+      pw: pager.w,
+      ph: pager.h,
+    })
+    }
+  }
+  historyBars.value = next
+}
+
+function onHistorySearch() {
+  refreshAllVisuals()
+}
 
 const writeDialogVisible = ref(false)
 const writeTagId = ref('')
@@ -140,6 +202,7 @@ function refreshAllVisuals() {
   }
   emit('quality', { good, bad, uncertain, offline })
   syncScene3dOverlays()
+  syncHistoryBars()
 }
 
 function firePageTrigger(trigger: 'load' | 'unload') {
@@ -372,8 +435,16 @@ onMounted(() => {
     onDragWrite: (id, axis, tagId, value) => {
       void handleDragWrite(id, axis, tagId, value)
     },
+    onAlarmAck: (alarmId) => {
+      void tags.ackAlarm(alarmId).then((res) => {
+        if (!res.ok) ElMessage.error(res.message)
+      })
+    },
+  }, { chartInteraction: true })
+  bundle.setViewChangeListener(() => {
+    syncScene3dOverlays()
+    syncHistoryBars()
   })
-  bundle.setViewChangeListener(() => syncScene3dOverlays())
   setupSubscription(props.page)
   if (!props.embedded) tags.connectRealtime()
   removeListener = tags.addListener(() => {
@@ -426,6 +497,22 @@ onUnmounted(() => {
 <template>
   <div class="runtime-board">
     <div ref="host" class="host" />
+    <AlarmHistorySearchBar
+      v-for="bar in historyBars"
+      :key="bar.id"
+      class="history-search"
+      :widget-id="bar.id"
+      :style="{ left: bar.x + 'px', top: bar.y + 'px', width: bar.w + 'px', height: bar.h + 'px' }"
+      @change="onHistorySearch"
+    />
+    <AlarmHistoryPager
+      v-for="bar in historyBars"
+      :key="bar.id + ':page'"
+      class="history-search"
+      :widget-id="bar.id"
+      :style="{ left: bar.px + 'px', top: bar.py + 'px', width: bar.pw + 'px', height: bar.ph + 'px' }"
+      @change="onHistorySearch"
+    />
     <div
       v-for="slot in scene3dSlots"
       :key="slot.widgetId + ':' + slot.page.id"
@@ -479,6 +566,11 @@ onUnmounted(() => {
   width: 100%;
   height: 100%;
   background: transparent;
+}
+
+.history-search {
+  position: absolute;
+  z-index: 10001;
 }
 
 .scene3d-overlay {

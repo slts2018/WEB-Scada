@@ -77,7 +77,36 @@ export interface PanelKonvaRuntime {
   widgets: Widget2D[]
   setWidgets: (widgets: Widget2D[], panel?: Object3DPanel | null) => void
   refresh: (getTag: (id: string) => TagValue | undefined) => void
+  /**
+   * CSS2D 世界缩放（createScene3D 的 zoom）会拉伸画布位图。
+   * 按距离同步提高 pixelRatio，避免近处面板发糊。
+   */
+  setWorldScale: (worldScale: number) => void
   dispose: () => void
+}
+
+/** 面板画布最大像素比（过大占显存；覆盖常见近距 + 高分屏） */
+const MAX_PANEL_PIXEL_RATIO = 4
+
+function applyPanelStageSharpness(stage: Konva.Stage, worldScale: number) {
+  const dpr =
+    typeof window !== 'undefined' && Number.isFinite(window.devicePixelRatio)
+      ? window.devicePixelRatio
+      : 1
+  // zoom>1 时 CSS 放大位图；画布 pixelRatio 需覆盖 dpr×zoom。量化到 0.5 档，避免每帧重建。
+  const raw = Math.min(
+    MAX_PANEL_PIXEL_RATIO,
+    Math.max(1, dpr * Math.max(1, Number.isFinite(worldScale) ? worldScale : 1)),
+  )
+  const need = Math.min(MAX_PANEL_PIXEL_RATIO, Math.ceil(raw * 2) / 2)
+  let changed = false
+  for (const layer of stage.getLayers()) {
+    const canvas = layer.getCanvas()
+    if (Math.abs(canvas.getPixelRatio() - need) < 0.01) continue
+    canvas.setPixelRatio(need)
+    changed = true
+  }
+  if (changed) stage.batchDraw()
 }
 
 function filterPanelWidgets(widgets: Widget2D[]): Widget2D[] {
@@ -169,15 +198,24 @@ export function mountPanelKonvaRuntime(
   container.style.position = 'relative'
   container.style.overflow = 'hidden'
 
-  const bundle = createRuntimeStage(container, page, stageHandlers)
+  const bundle = createRuntimeStage(container, page, stageHandlers, { chartInteraction: true })
   // 1:1 像素，取消 fitToView 的等比缩放（容器已等于页面）
   bundle.stage.scale({ x: 1, y: 1 })
   bundle.stage.position({ x: 0, y: 0 })
   bundle.stage.width(page.width)
   bundle.stage.height(page.height)
+  applyPanelStageSharpness(bundle.stage, 1)
   bundle.widgetLayer.batchDraw()
   syncRuntimeBackgroundImage(bundle, panel, handlers.resolveResourceUrl)
 
+  let lastWorldScale = 1
+  const setWorldScale = (worldScale: number) => {
+    lastWorldScale = Number.isFinite(worldScale) && worldScale > 0 ? worldScale : 1
+    applyPanelStageSharpness(bundle.stage, lastWorldScale)
+  }
+
+  bundle.setOverlayInteractive(!readOnly)
+  bundle.syncOverlays()
   if (readOnly) {
     for (const node of bundle.widgetLayer.getChildren()) {
       node.listening(false)
@@ -200,6 +238,8 @@ export function mountPanelKonvaRuntime(
     bundle.stage.position({ x: 0, y: 0 })
     bundle.stage.width(next.width)
     bundle.stage.height(next.height)
+    applyPanelStageSharpness(bundle.stage, lastWorldScale)
+    bundle.syncOverlays()
     syncRuntimeBackgroundImage(bundle, currentPanel, handlers.resolveResourceUrl)
     if (readOnly) {
       for (const node of bundle.widgetLayer.getChildren()) {
@@ -227,6 +267,7 @@ export function mountPanelKonvaRuntime(
     },
     setWidgets,
     refresh,
+    setWorldScale,
     dispose: () => bundle.dispose(),
   }
 }

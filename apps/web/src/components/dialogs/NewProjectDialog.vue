@@ -21,7 +21,7 @@ const form = reactive({
 })
 
 const storageLabel = computed(() =>
-  getStorageMode() === 'api' ? '服务端 (apps/server/data)' : '浏览器本地存储 (localStorage)',
+  getStorageMode() === 'api' ? '服务端 (apps/data)' : '浏览器本地存储 (localStorage)',
 )
 
 watch(

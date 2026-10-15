@@ -2,6 +2,7 @@ import type {
   AnimationLink,
   AnimationLinkColor,
   AnimationLinkEnable,
+  AnimationLinkFlow,
   AnimationLinkHide,
   AnimationLinkInput,
   AnimationLinkRange,
@@ -11,10 +12,16 @@ import type {
   PropBinding,
   StateAnimationRule,
   TagValue,
+  TrendCurve,
   Widget2D,
 } from '@web-scada/core'
-import { parseSeries } from '@web-scada/core'
+import { formatBoolText, parseSeries, trendCurves, trendCurveTagIds } from '@web-scada/core'
 import { clonePlain } from '@/shared/utils/clonePlain'
+import { useTagStore } from '@/stores/tag'
+import { formatActiveAlarmItems, formatAlarmHistoryItems } from '@/shared/runtime/alarmText'
+import { alarmHistoryEvents, alarmHistoryQuery, requestAlarmHistory } from '@/shared/runtime/alarmHistoryQuery'
+import { requestTrendHistory, trendHistorySeries } from '@/shared/runtime/trendHistoryQuery'
+import { pushCurveSample, pushLiveSeries, retainCurveTimeWindow } from '@/shared/runtime/trendSeries'
 
 export interface ResolvedVisual {
   widget: Widget2D
@@ -47,9 +54,25 @@ function matchColorRange(
   return range.min !== undefined || range.max !== undefined
 }
 
-function formatValue(v: TagValue['value'], format?: string): string {
+function boolLabels(tagId: string) {
+  return useTagStore().metas.find((item) => item.tagId === tagId)
+}
+
+function formatValue(
+  v: TagValue['value'],
+  format?: string,
+  labels?: { onText?: string; offText?: string },
+): string {
   if (v === null || v === undefined) return '--'
-  if (format === 'bool') return v ? 'ON' : 'OFF'
+  if (format === 'bool' || (typeof v === 'boolean' && !format?.startsWith('fixed:'))) {
+    const text = formatBoolText(
+      v,
+      labels,
+      format === 'bool' ? { on: 'ON', off: 'OFF' } : { on: 'true', off: 'false' },
+    )
+    if (text != null) return text
+    if (format === 'bool') return v ? 'ON' : 'OFF'
+  }
   if (format?.startsWith('fixed:')) {
     const digits = Number(format.split(':')[1] || 1)
     const n = asNumber(v)
@@ -58,7 +81,12 @@ function formatValue(v: TagValue['value'], format?: string): string {
   return String(v)
 }
 
-function applyValueToWidget(widget: Widget2D, v: TagValue['value'], format?: string): void {
+function applyValueToWidget(
+  widget: Widget2D,
+  v: TagValue['value'],
+  format?: string,
+  labels?: { onText?: string; offText?: string },
+): void {
   if (widget.type === 'tank') {
     const n = asNumber(v)
     if (n !== null) widget.props = { ...widget.props, level: Math.min(100, Math.max(0, n)) }
@@ -72,6 +100,8 @@ function applyValueToWidget(widget: Widget2D, v: TagValue['value'], format?: str
     const n = asNumber(v)
     if (n !== null) widget.props = { ...widget.props, value: n }
     else widget.props = { ...widget.props, value: v }
+  } else if (widget.type === 'trendHistory') {
+    return
   } else if (widget.type === 'chart' || widget.type === 'trend') {
     const text =
       typeof v === 'string' ? v : Array.isArray(v) ? (v as number[]).join(',') : String(v)
@@ -89,7 +119,7 @@ function applyValueToWidget(widget: Widget2D, v: TagValue['value'], format?: str
   } else if (widget.type === 'list' || widget.type === 'alarm') {
     widget.props = { ...widget.props, items: String(v ?? '') }
   } else {
-    widget.props = { ...widget.props, text: formatValue(v, format) }
+    widget.props = { ...widget.props, text: formatValue(v, format, labels) }
   }
 }
 
@@ -109,6 +139,162 @@ function applyFillPercent(
     fillRatio: p,
     fillOrient: orient,
     fillDirection: direction,
+  }
+}
+
+function liveAlarmItems(columns: unknown): {
+  text: string
+  ids: string[]
+  statuses: string[]
+  levels: string[]
+} | null {
+  try {
+    const tags = useTagStore()
+    if (tags.mode !== 'live') return null
+    return formatActiveAlarmItems(tags.activeAlarms, columns, tags.metas)
+  } catch {
+    return null
+  }
+}
+
+function boundTrendTagId(widget: Widget2D): string | null {
+  for (const link of widget.animationLinks ?? []) {
+    if (link.enabled !== false && link.type === 'valueOut' && link.tagId) return link.tagId
+  }
+  for (const binding of widget.bindings ?? []) {
+    if (binding.prop === 'value' && binding.tagId) return binding.tagId
+  }
+  return null
+}
+
+/**
+ * 实时趋势是否已由 props.curves 接管。
+ * 接管后值由 feedTrendCurves() 统一按"新采样"入队，不再走旧的单序列路径
+ * （否则同一采样会既进 curves 又进 props.series，出现重复点）。
+ */
+function trendCurvesTakeOver(widget: Widget2D): boolean {
+  return widget.type === 'trend' && trendCurveTagIds(widget.props).length > 0
+}
+
+/**
+ * 曲线"鲜活"判定阀值：超过这么久没有新采样（值很久没变）就按"现在"记点 ——
+ * 既保活让线不断，又不会把几小时前的老时间戳写进缓冲把时间轴拉成十几小时。
+ */
+const TREND_KEEP_ALIVE_MS = 3000
+
+/** 每条曲线各自的"最后一次入队的采样时间戳"（key = 图元 id | 变量 id） */
+const trendIngestStamp = new Map<string, number>()
+
+/** 实时趋势多曲线：每条曲线按自己的采样时间戳入队（同一次求值重复跑不会重复进点） */
+function feedTrendCurves(
+  widget: Widget2D,
+  getTag: (tagId: string) => TagValue | undefined,
+): void {
+  const curves = trendCurves(widget.props)
+  if (!curves.length) return
+  const maxPoints = Math.max(5, Number(widget.props.maxPoints) || 40)
+  if (!curves.some((curve) => curve.tagId)) return
+  // 每条曲线按自己的采样时间戳入队，不把慢变量补成台阶。
+  // 点数上限不能按曲线各自截断：刷新快的变量会先把旧点丢掉，时间轴又被慢变量拉长，
+  // 快变量就只剩右半段。先按硬上限留住，最后再用同一段时间窗裁齐。
+  let newest = 0
+  for (const curve of curves) {
+    if (!curve.tagId) continue
+    const stamp = getTag(curve.tagId)?.timestamp ?? 0
+    if (stamp > newest) newest = stamp
+  }
+  for (const curve of curves) {
+    if (!curve.tagId) continue
+    const tag = getTag(curve.tagId)
+    if (!tag || !(tag.timestamp > 0)) continue
+    const key = `${widget.id}|${curve.tagId}`
+    const last = trendIngestStamp.get(key) ?? 0
+    // ① 时间戳刚更新、而且离"现在"不远 → 用它自己的时间戳记点（斜线/台阶都来自这里）
+    const fresh = tag.timestamp !== last
+    const lagging = newest > 0 && newest - tag.timestamp >= TREND_KEEP_ALIVE_MS
+    // ② 时间戳停在很久以前（几分钟没变过的常量、模拟关闭的变量）→ 按"现在"补点：
+    //    既保活让线不断，又不会把老时间戳塞进缓冲（否则时间轴会被拉成十几小时，实时数据全挤成一根竖线）
+    const keepAlive = newest > 0 && newest - last >= TREND_KEEP_ALIVE_MS
+    if (!(fresh && !lagging) && !keepAlive) continue
+    const at = fresh && !lagging ? tag.timestamp : newest
+    trendIngestStamp.set(key, at)
+    // 质量坏了/离线 = 真缺口（画断线）
+    const value = tag.quality === 'Bad' || tag.quality === 'Offline' ? null : asNumber(tag.value)
+    // 先按硬上限留点；下面再用各曲线共用的时间窗裁，不能在这里按 maxPoints 把快变量裁短
+    pushCurveSample(widget.id, curve.tagId, value, 5000, at)
+  }
+  retainCurveTimeWindow(
+    widget.id,
+    curves.map((curve) => curve.tagId).filter((id) => Boolean(id)),
+    maxPoints,
+  )
+}
+
+/**
+ * 旧路径（单曲线）的实时采样：同样进运行时缓冲，理由见 trendSeries.ts。
+ * 返回 true = 已由趋势路径接管（调用方不再走通用的 applyValueToWidget）。
+ */
+function applyTrendLiveSample(widget: Widget2D, tag: TagValue): boolean {
+  if (widget.type !== 'trend') return false
+  const n = asNumber(tag.value)
+  const key = `${widget.id}|__live__`
+  if (trendIngestStamp.get(key) === tag.timestamp) return true
+  trendIngestStamp.set(key, tag.timestamp)
+  if (n === null) return true
+  pushLiveSeries(widget.id, n, Math.max(5, Number(widget.props.maxPoints) || 40))
+  return true
+}
+
+/** 历史趋势的旧路径：单曲线（props.series） */
+function liveTrendHistory(widget: Widget2D): number[] | null {
+  try {
+    const tags = useTagStore()
+    if (tags.mode !== 'live') return null
+    const tagId = boundTrendTagId(widget)
+    if (!tagId) return null
+    const start = String(widget.props.range ?? '-1h')
+    const limit = Math.max(10, Math.min(2000, Number(widget.props.maxPoints) || 240))
+    requestTrendHistory(widget.id, tagId, start, limit)
+    return trendHistorySeries(widget.id, tagId) ?? null
+  } catch {
+    return null
+  }
+}
+
+/** 历史趋势的多曲线路径：每条曲线各自查一次，写回 curves[i].series */
+function liveTrendHistoryCurves(widget: Widget2D, curves: TrendCurve[]): TrendCurve[] | null {
+  try {
+    const tags = useTagStore()
+    if (tags.mode !== 'live') return null
+    const start = String(widget.props.range ?? '-1h')
+    const limit = Math.max(10, Math.min(2000, Number(widget.props.maxPoints) || 240))
+    let loaded = false
+    const next = curves.map((curve) => {
+      requestTrendHistory(widget.id, curve.tagId, start, limit)
+      const series = trendHistorySeries(widget.id, curve.tagId)
+      if (!series) return curve
+      loaded = true
+      return { ...curve, series }
+    })
+    return loaded ? next : null
+  } catch {
+    return null
+  }
+}
+
+function liveAlarmHistory(widgetId: string, columns: unknown) {
+  try {
+    const tags = useTagStore()
+    if (tags.mode !== 'live') return null
+    requestAlarmHistory(widgetId)
+    return formatAlarmHistoryItems(
+      alarmHistoryEvents(widgetId),
+      columns,
+      tags.metas,
+      alarmHistoryQuery(widgetId),
+    )
+  } catch {
+    return null
   }
 }
 
@@ -190,11 +376,13 @@ function applyAnimationLink(
       break
     }
     case 'valueOut': {
-      applyValueToWidget(widget, tag.value, link.format ?? 'fixed:1')
+      if (trendCurvesTakeOver(widget)) break
+      if (applyTrendLiveSample(widget, tag)) break
+      applyValueToWidget(widget, tag.value, link.format ?? 'fixed:1', boolLabels(tag.tagId))
       break
     }
     case 'textOut': {
-      widget.props = { ...widget.props, text: formatValue(tag.value, link.format) }
+      widget.props = { ...widget.props, text: formatValue(tag.value, link.format, boolLabels(tag.tagId)) }
       break
     }
     case 'valueIn':
@@ -226,9 +414,11 @@ function applyPropBinding(
   const v = tag.value
   switch (binding.prop) {
     case 'text':
-      widget.props = { ...widget.props, text: formatValue(v, binding.format) }
+      widget.props = { ...widget.props, text: formatValue(v, binding.format, boolLabels(tag.tagId)) }
       break
     case 'value':
+      if (trendCurvesTakeOver(widget)) break
+      if (applyTrendLiveSample(widget, tag)) break
       applyValueToWidget(widget, v, binding.format)
       break
     case 'fill':
@@ -405,6 +595,48 @@ export function resolveWidgetVisual(
     }
   }
 
+  if (widget.type === 'alarm') {
+    const live = liveAlarmItems(widget.props.columns)
+    if (live != null) {
+      widget.props = {
+        ...widget.props,
+        items: live.text,
+        alarmRowIds: live.ids,
+        alarmRowStatus: live.statuses,
+        alarmRowLevel: live.levels,
+      }
+    }
+  }
+
+  if (widget.type === 'alarmHistory') {
+    const live = liveAlarmHistory(widget.id, widget.props.columns)
+    if (live != null) {
+      widget.props = {
+        ...widget.props,
+        items: live.text,
+        alarmRowStatus: live.statuses,
+        alarmRowLevel: live.levels,
+      }
+    }
+  }
+
+  if (widget.type === 'trend') {
+    feedTrendCurves(widget, getTag)
+  }
+
+  if (widget.type === 'trendHistory') {
+    const curves = trendCurves(widget.props)
+    if (curves.length) {
+      const next = liveTrendHistoryCurves(widget, curves)
+      if (next) widget.props = { ...widget.props, curves: next }
+    } else {
+      const series = liveTrendHistory(widget)
+      if (series != null) {
+        widget.props = { ...widget.props, series: series.join(',') }
+      }
+    }
+  }
+
   return { widget, blink: flags.blink, quality }
 }
 
@@ -412,6 +644,9 @@ export function resolveWidgetVisual(
 export function collectPageTagIds(page: { layers: Array<{ widgets: Widget2D[] }> }): string[] {
   const ids = new Set<string>()
   const collect = (w: Widget2D) => {
+    // 趋势图元的多曲线变量存在 props.curves 里（不在 bindings/animationLinks 中），必须一起订阅，
+    // 否则 WS 不会推这些变量，曲线会一直是空的且不报错。
+    for (const tagId of trendCurveTagIds(w.props)) ids.add(tagId)
     for (const b of w.bindings ?? []) ids.add(b.tagId)
     for (const a of w.animations ?? []) ids.add(a.tagId)
     for (const link of w.animationLinks ?? []) ids.add(link.tagId)
@@ -625,6 +860,18 @@ export function createAnimationLink(
       return { ...base, type, confirm: true } satisfies AnimationLinkInput
     case 'enable':
       return { ...base, type, trueEnable: true } satisfies AnimationLinkEnable
+    case 'flow':
+      return {
+        ...base,
+        type,
+        inMin: 0,
+        inMax: 100,
+        outMin: 0,
+        outMax: 1,
+        speed: 0.4,
+        style: 'skin',
+        axis: 'auto',
+      } satisfies AnimationLinkFlow
   }
 }
 

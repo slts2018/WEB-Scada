@@ -1,0 +1,272 @@
+/**
+ * Element Plus 弹层统一深色主题（与 --scada-* 一致）。
+ * Dialog / MessageBox 挂到 body，必须用全局样式，不能写 scoped。
+ */
+
+/* ── Dialog 壳 ── */
+.el-dialog {
+  --el-dialog-bg-color: var(--scada-panel);
+  --el-bg-color: var(--scada-panel);
+  --el-bg-color-overlay: var(--scada-panel);
+  --el-fill-color-blank: var(--scada-bg);
+  --el-fill-color-light: #1e2430;
+  --el-text-color-primary: var(--scada-text);
+  --el-text-color-regular: var(--scada-text);
+  --el-text-color-secondary: var(--scada-muted);
+  --el-text-color-placeholder: #6b7280;
+  --el-border-color: var(--scada-border);
+  --el-border-color-light: var(--scada-border);
+  --el-border-color-lighter: var(--scada-border);
+  --el-border-color-hover: #3d4454;
+  --el-border-color-darker: #232833;
+  --el-color-primary: var(--scada-accent);
+  --el-disabled-bg-color: #1a1f29;
+  --el-disabled-border-color: var(--scada-border);
+  --el-disabled-text-color: #6b7280;
+  --el-mask-color: rgba(0, 0, 0, 0.55);
+  background: var(--scada-panel) !important;
+  border: 1px solid var(--scada-border);
+  border-radius: 10px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+}
+
+.el-dialog__header {
+  margin: 0;
+  padding: 14px 18px 10px;
+  border-bottom: 1px solid var(--scada-border);
+  background: var(--scada-panel);
+}
+
+.el-dialog__title {
+  color: var(--scada-text);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.el-dialog__headerbtn .el-dialog__close {
+  color: var(--scada-muted);
+}
+
+.el-dialog__headerbtn:hover .el-dialog__close {
+  color: var(--scada-text);
+}
+
+.el-dialog__body {
+  padding: 14px 18px;
+  background: var(--scada-panel);
+  color: var(--scada-text);
+}
+
+.el-dialog__footer {
+  padding: 10px 18px 14px;
+  border-top: 1px solid var(--scada-border);
+  background: var(--scada-panel);
+}
+
+/* Dialog 内表单控件 */
+.el-dialog .el-input__wrapper,
+.el-dialog .el-textarea__inner,
+.el-dialog .el-select__wrapper,
+.el-dialog .el-input-number .el-input__wrapper {
+  background-color: var(--scada-bg) !important;
+  box-shadow: 0 0 0 1px var(--scada-border) inset !important;
+}
+
+.el-dialog .el-input__inner,
+.el-dialog .el-textarea__inner {
+  color: var(--scada-text);
+}
+
+.el-dialog .el-input-number__decrease,
+.el-dialog .el-input-number__increase {
+  background: #1e2430;
+  color: var(--scada-muted);
+  border-color: var(--scada-border);
+}
+
+.el-dialog .el-input-number__decrease:hover,
+.el-dialog .el-input-number__increase:hover {
+  color: var(--scada-accent);
+}
+
+.el-dialog .el-checkbox__label,
+.el-dialog .el-radio__label,
+.el-dialog .el-form-item__label {
+  color: var(--scada-text);
+}
+
+.el-dialog .el-checkbox__inner,
+.el-dialog .el-radio__inner {
+  background-color: var(--scada-bg);
+  border-color: var(--scada-border);
+}
+
+.el-dialog .el-slider__runway {
+  background-color: #232833;
+}
+
+.el-dialog .el-slider__bar {
+  background-color: var(--scada-accent);
+}
+
+.el-dialog .el-slider__button {
+  width: 16px;
+  height: 16px;
+  background: var(--scada-panel);
+  border: 2px solid var(--scada-accent);
+}
+
+.el-dialog .el-color-picker__trigger {
+  border-color: var(--scada-border);
+}
+
+.el-dialog .el-table {
+  --el-table-bg-color: var(--scada-panel);
+  --el-table-tr-bg-color: var(--scada-panel);
+  --el-table-header-bg-color: #1e2430;
+  --el-table-row-hover-bg-color: rgba(61, 139, 253, 0.12);
+  --el-table-border-color: var(--scada-border);
+  --el-table-text-color: var(--scada-text);
+  --el-table-header-text-color: var(--scada-muted);
+}
+
+.el-dialog .el-radio-button__inner {
+  background: var(--scada-bg);
+  border-color: var(--scada-border);
+  color: var(--scada-text);
+}
+
+.el-dialog .el-radio-button__original-radio:checked + .el-radio-button__inner {
+  background: rgba(61, 139, 253, 0.25);
+  border-color: var(--scada-accent);
+  color: #93c5fd;
+  box-shadow: none;
+}
+
+.el-dialog .el-button:not(.el-button--primary):not(.el-button--danger):not(.el-button--warning):not(.el-button--success) {
+  --el-button-bg-color: var(--scada-bg);
+  --el-button-border-color: var(--scada-border);
+  --el-button-text-color: var(--scada-text);
+  --el-button-hover-bg-color: #1e2430;
+  --el-button-hover-border-color: var(--scada-accent);
+  --el-button-hover-text-color: #93c5fd;
+}
+
+/* 配置类大弹窗：限制 body 高度 */
+.flow-config-dialog .el-dialog__body,
+.liquid-config-dialog .el-dialog__body,
+.anim-connection-dialog .el-dialog__body {
+  max-height: calc(100vh - 170px);
+  overflow-y: auto;
+}
+
+/* ── MessageBox ── */
+.el-message-box,
+.scada-message-box {
+  --el-bg-color: var(--scada-panel);
+  --el-text-color-primary: var(--scada-text);
+  --el-text-color-regular: var(--scada-text);
+  --el-border-color: var(--scada-border);
+  --el-color-primary: var(--scada-accent);
+  background: var(--scada-panel) !important;
+  border: 1px solid var(--scada-border);
+  border-radius: 10px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
+}
+
+.el-message-box__header,
+.scada-message-box .el-message-box__header {
+  padding-bottom: 8px;
+}
+
+.el-message-box__title,
+.scada-message-box .el-message-box__title {
+  color: var(--scada-text);
+  font-weight: 600;
+}
+
+.el-message-box__content,
+.scada-message-box .el-message-box__content {
+  color: var(--scada-text);
+}
+
+.el-message-box__message p,
+.scada-message-box .el-message-box__message p {
+  color: var(--scada-text);
+}
+
+.el-message-box__headerbtn .el-message-box__close {
+  color: var(--scada-muted);
+}
+
+.el-message-box__input input.el-input__inner,
+.el-message-box .el-input__wrapper {
+  background-color: var(--scada-bg) !important;
+  box-shadow: 0 0 0 1px var(--scada-border) inset !important;
+  color: var(--scada-text);
+}
+
+/* 运行端写值确认：盖过 3D/面板层 */
+.scada-message-box--top {
+  z-index: 50000 !important;
+}
+.scada-message-box--top + .el-overlay,
+.el-overlay:has(.scada-message-box--top) {
+  z-index: 49999 !important;
+}
+
+/* 兼容旧类名 */
+.scada-runtime-write-confirm {
+  z-index: 50000 !important;
+}
+.scada-runtime-write-confirm + .el-overlay,
+.el-overlay:has(.scada-runtime-write-confirm) {
+  z-index: 49999 !important;
+}
+
+/* ── HelpTip 备注气泡 ── */
+.scada-help-tip-popper.el-popper {
+  max-width: 280px;
+  line-height: 1.45;
+  font-size: 12px;
+}
+
+/* ── Select 下拉（teleport 到 body，弹窗内请加 popper-class="scada-select-dropdown"） ── */
+.scada-select-dropdown.el-popper,
+.scada-select-dropdown .el-select-dropdown,
+.flow-config-select-dropdown.el-popper,
+.flow-config-select-dropdown .el-select-dropdown,
+.liquid-config-select-dropdown.el-popper,
+.liquid-config-select-dropdown .el-select-dropdown,
+.anim-connection-select-dropdown.el-popper,
+.anim-connection-select-dropdown .el-select-dropdown {
+  background: var(--scada-panel, #171a21) !important;
+  border: 1px solid var(--scada-border, #2a2f3a) !important;
+  color: var(--scada-text, #e8eaed) !important;
+}
+
+.scada-select-dropdown .el-select-dropdown__item,
+.flow-config-select-dropdown .el-select-dropdown__item,
+.liquid-config-select-dropdown .el-select-dropdown__item,
+.anim-connection-select-dropdown .el-select-dropdown__item {
+  color: var(--scada-text, #e8eaed);
+}
+
+.scada-select-dropdown .el-select-dropdown__item.is-hovering,
+.scada-select-dropdown .el-select-dropdown__item:hover,
+.flow-config-select-dropdown .el-select-dropdown__item.is-hovering,
+.flow-config-select-dropdown .el-select-dropdown__item:hover,
+.liquid-config-select-dropdown .el-select-dropdown__item.is-hovering,
+.liquid-config-select-dropdown .el-select-dropdown__item:hover,
+.anim-connection-select-dropdown .el-select-dropdown__item.is-hovering,
+.anim-connection-select-dropdown .el-select-dropdown__item:hover {
+  background: rgba(61, 139, 253, 0.18);
+}
+
+.scada-select-dropdown .el-select-dropdown__item.is-selected,
+.flow-config-select-dropdown .el-select-dropdown__item.is-selected,
+.liquid-config-select-dropdown .el-select-dropdown__item.is-selected,
+.anim-connection-select-dropdown .el-select-dropdown__item.is-selected {
+  color: #93c5fd;
+  font-weight: 600;
+}

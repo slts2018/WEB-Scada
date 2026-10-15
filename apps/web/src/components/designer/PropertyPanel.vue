@@ -1,13 +1,34 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import type { Page3D } from '@web-scada/core'
+import {
+  TREND_MAX_CURVES,
+  trendCurveColor,
+  trendCurves,
+  type Page3D,
+  type TrendCurve,
+} from '@web-scada/core'
+import {
+  ALARM_FIELDS,
+  ALARM_HISTORY_FIELDS,
+  alarmFieldsOf,
+  alarmHistoryFieldsOf,
+  type AlarmFieldId,
+  type AlarmHistoryFieldId,
+} from '@/shared/runtime/alarmText'
+import { TREND_RANGES, releaseTrendHistory } from '@/shared/runtime/trendHistoryQuery'
+import { clearCurveSamples } from '@/shared/runtime/trendSeries'
+import { exportTrendWidgetImage } from '@/shared/konva/widgetNodes'
 import { useProjectStore } from '@/stores/project'
+import { useTagStore } from '@/stores/tag'
+import { formatTagOptionLabel } from '@/shared/runtime/tagLabel'
 import { ElMessage } from 'element-plus'
 import WidgetBindingPanel from '@/components/designer/WidgetBindingPanel.vue'
 
 const project = useProjectStore()
+const tags = useTagStore()
 const fileInput = ref<HTMLInputElement | null>(null)
-const activeTab = ref('props')
+/** 与三维属性一致：默认全部折叠，点标题再展开 */
+const propCollapse = ref<string[]>([])
 
 const widget = computed(() => project.selectedWidget)
 const multiCount = computed(() => project.selectedWidgetIds.length)
@@ -27,11 +48,156 @@ function updateStyle(key: string, value: string | number) {
   })
 }
 
-function updateProp(key: string, value: string | number | boolean) {
+function updateProp(key: string, value: string | number | boolean | string[]) {
   if (!widget.value) return
   project.updateWidget(widget.value.id, {
     props: { ...widget.value.props, [key]: value },
   })
+}
+
+/**
+ * 趋势图元的多曲线变量（props.curves）。
+ * 列表非空时优先于旧的 valueOut / prop=value 单值绑定；为空时完全沿用旧行为。
+ */
+const trendCurveList = computed(() => trendCurves(widget.value?.props))
+
+function writeTrendCurves(next: TrendCurve[]) {
+  if (!widget.value) return
+  project.updateWidget(widget.value.id, {
+    props: {
+      ...widget.value.props,
+      curves: next.map((curve) => ({
+        tagId: curve.tagId,
+        ...(curve.label ? { label: curve.label } : {}),
+        ...(curve.color ? { color: curve.color } : {}),
+        ...(curve.series && curve.series.length ? { series: curve.series } : {}),
+      })),
+    },
+  })
+}
+
+function addTrendCurve() {
+  const list = trendCurveList.value
+  if (!widget.value) return
+  if (list.length >= TREND_MAX_CURVES) {
+    ElMessage.warning(`最多 ${TREND_MAX_CURVES} 条曲线`)
+    return
+  }
+  // 只加一行"空变量"，由你自己选 —— 不再自动挑一个变量塞进来（否则会静默改掉图元绑定的变量）
+  writeTrendCurves([...list, { tagId: '', color: trendCurveColor(list.length) }])
+}
+
+function setTrendCurve(tagId: string, patch: Partial<TrendCurve>) {
+  writeTrendCurves(
+    trendCurveList.value.map((curve) => (curve.tagId === tagId ? { ...curve, ...patch } : curve)),
+  )
+}
+
+function setTrendCurveTag(prevTagId: string, nextTagId: string) {
+  if (!nextTagId || nextTagId === prevTagId) return
+  if (trendCurveList.value.some((curve) => curve.tagId === nextTagId)) {
+    ElMessage.warning('该变量已经在曲线列表里')
+    return
+  }
+  if (widget.value) {
+    releaseTrendHistory(widget.value.id, prevTagId)
+    clearCurveSamples(widget.value.id, prevTagId)
+  }
+  writeTrendCurves(
+    trendCurveList.value.map((curve) =>
+      curve.tagId === prevTagId ? { ...curve, tagId: nextTagId, series: undefined } : curve,
+    ),
+  )
+}
+
+/** 设计端把当前趋势图元导出成 PNG（等价于运行端右上角那个"导出"按钮） */
+function exportTrendPng() {
+  const current = widget.value
+  if (!current) return
+  exportTrendWidgetImage(current)
+}
+
+function removeTrendCurve(tagId: string) {
+  if (widget.value) {
+    releaseTrendHistory(widget.value.id, tagId)
+    clearCurveSamples(widget.value.id, tagId)
+  }
+  writeTrendCurves(trendCurveList.value.filter((curve) => curve.tagId !== tagId))
+}
+
+const alarmColumns = computed(() => alarmFieldsOf(widget.value?.props.columns))
+const historyColumns = computed(() => alarmHistoryFieldsOf(widget.value?.props.columns))
+
+const CONTENT_TYPES = new Set([
+  'text',
+  'button',
+  'value',
+  'switch',
+  'list',
+  'alarm',
+  'alarmHistory',
+  'chart',
+  'trend',
+  'trendHistory',
+  'gauge',
+  'tank',
+  'lamp',
+  'pump',
+  'valve',
+  'image',
+  'scene3d',
+])
+
+const hasAppearance = computed(() => {
+  const current = widget.value
+  if (!current) return false
+  return (
+    current.style.fill !== undefined ||
+    current.style.stroke !== undefined ||
+    current.type === 'rect' ||
+    current.type === 'roundRect'
+  )
+})
+
+const hasContent = computed(() => {
+  const current = widget.value
+  if (!current) return false
+  return CONTENT_TYPES.has(current.type) || current.props.text !== undefined
+})
+
+const sectionTitle = computed(() => {
+  const names = ['basic', 'transform']
+  if (hasAppearance.value) names.push('look')
+  if (hasContent.value) names.push('content')
+  names.push('anim')
+  const labels: Record<string, string> = {
+    basic: '基础',
+    transform: '变换',
+    look: '外观',
+    content: '内容',
+    anim: '动画连接',
+  }
+  const titled: Record<string, string> = {}
+  names.forEach((name, index) => {
+    titled[name] = `${index + 1} · ${labels[name]}`
+  })
+  return titled
+})
+
+function toggleAlarmColumn(id: AlarmFieldId, on: boolean) {
+  const next = ALARM_FIELDS.map((field) => field.id).filter((fieldId) =>
+    fieldId === id ? on : alarmColumns.value.includes(fieldId),
+  )
+  if (!next.length) return
+  updateProp('columns', next)
+}
+
+function toggleHistoryColumn(id: AlarmHistoryFieldId, on: boolean) {
+  const next = ALARM_HISTORY_FIELDS.map((field) => field.id).filter((fieldId) =>
+    fieldId === id ? on : historyColumns.value.includes(fieldId),
+  )
+  if (!next.length) return
+  updateProp('columns', next)
 }
 
 function updateName(name: string) {
@@ -97,9 +263,9 @@ async function replaceImage(e: Event) {
       </div>
     </div>
     <div v-else-if="widget" class="single">
-      <el-tabs v-model="activeTab" class="tabs">
-        <el-tab-pane label="属性" name="props">
-          <div class="form">
+      <p class="hint">按分类编辑当前图元</p>
+      <el-collapse v-model="propCollapse" class="prop-collapse">
+        <el-collapse-item :title="sectionTitle.basic" name="basic">
       <label>
         <span>名称</span>
         <el-input size="small" :model-value="widget.name" @update:model-value="updateName" />
@@ -108,7 +274,23 @@ async function replaceImage(e: Event) {
         <span>类型</span>
         <el-input size="small" :model-value="widget.type" disabled />
       </label>
+      <div class="flags">
+        <el-checkbox
+          :model-value="widget.visible !== false"
+          @update:model-value="(v: boolean | string | number) => updateFlag('visible', Boolean(v))"
+        >
+          可见
+        </el-checkbox>
+        <el-checkbox
+          :model-value="Boolean(widget.locked)"
+          @update:model-value="(v: boolean | string | number) => updateFlag('locked', Boolean(v))"
+        >
+          锁定
+        </el-checkbox>
+      </div>
+        </el-collapse-item>
 
+        <el-collapse-item :title="sectionTitle.transform" name="transform">
       <div class="row">
         <label>
           <span>X</span>
@@ -166,7 +348,9 @@ async function replaceImage(e: Event) {
       <p v-if="widget.type === 'polyline' || widget.type === 'polygon' || widget.type === 'pipe'" class="hint">
         选中后拖动白色顶点可改折点
       </p>
+        </el-collapse-item>
 
+        <el-collapse-item v-if="hasAppearance" :title="sectionTitle.look" name="look">
       <label v-if="widget.style.fill !== undefined">
         <span>填充</span>
         <el-color-picker
@@ -196,7 +380,9 @@ async function replaceImage(e: Event) {
           @update:model-value="(v: number | undefined) => updateStyle('cornerRadius', Number(v) || 0)"
         />
       </label>
+        </el-collapse-item>
 
+        <el-collapse-item v-if="hasContent" :title="sectionTitle.content" name="content">
       <label v-if="widget.props.text !== undefined && widget.type !== 'list'">
         <span>文本</span>
         <el-input
@@ -264,7 +450,7 @@ async function replaceImage(e: Event) {
         </div>
       </template>
 
-      <template v-if="widget.type === 'list' || widget.type === 'alarm'">
+      <template v-if="widget.type === 'list' || widget.type === 'alarm' || widget.type === 'alarmHistory'">
         <label>
           <span>标题</span>
           <el-input
@@ -273,20 +459,137 @@ async function replaceImage(e: Event) {
             @update:model-value="(v: string) => updateProp('title', v)"
           />
         </label>
+        <label>
+          <span>字号</span>
+          <el-input-number
+            size="small"
+            :min="8"
+            :max="72"
+            controls-position="right"
+            :model-value="Number(widget.style.fontSize ?? 12)"
+            @update:model-value="(v: number | undefined) => updateStyle('fontSize', Number(v) || 12)"
+          />
+        </label>
+        <div v-if="widget.type === 'alarm'" class="flags">
+          <span class="field-label">显示字段</span>
+          <el-checkbox
+            v-for="field in ALARM_FIELDS"
+            :key="field.id"
+            :model-value="alarmColumns.includes(field.id)"
+            @update:model-value="(v: boolean | string | number) => toggleAlarmColumn(field.id, Boolean(v))"
+          >
+            {{ field.label }}
+          </el-checkbox>
+        </div>
+        <div v-if="widget.type === 'alarmHistory'" class="flags">
+          <span class="field-label">显示字段</span>
+          <el-checkbox
+            v-for="field in ALARM_HISTORY_FIELDS"
+            :key="field.id"
+            :model-value="historyColumns.includes(field.id)"
+            @update:model-value="(v: boolean | string | number) => toggleHistoryColumn(field.id, Boolean(v))"
+          >
+            {{ field.label }}
+          </el-checkbox>
+        </div>
         <label class="top">
           <span>行数据</span>
           <el-input
             type="textarea"
             :rows="5"
             size="small"
-            placeholder="每行一项，列用 Tab 或 | 分隔"
+            :placeholder="
+              widget.type === 'alarm'
+                ? '未连接时的示例。实时报警按上面的字段显示'
+                : widget.type === 'alarmHistory'
+                  ? '未连接时的示例。历史报警按上面的字段显示最近一段时间的事件'
+                  : '每行一项，列用 Tab 或 | 分隔'
+            "
             :model-value="String(widget.props.items ?? '')"
             @update:model-value="(v: string) => updateProp('items', v)"
           />
         </label>
       </template>
 
-      <template v-if="widget.type === 'chart' || widget.type === 'trend'">
+      <template v-if="widget.type === 'chart' || widget.type === 'trend' || widget.type === 'trendHistory'">
+        <label v-if="widget.type === 'trend' || widget.type === 'trendHistory'" class="top">
+          <span>曲线变量（最多 {{ TREND_MAX_CURVES }} 条）</span>
+          <div class="curve-list">
+            <div v-for="(curve, i) in trendCurveList" :key="curve.tagId" class="curve-row">
+              <el-select
+                size="small"
+                filterable
+                placeholder="选择变量"
+                :model-value="curve.tagId"
+                @update:model-value="(v: string) => setTrendCurveTag(curve.tagId, v)"
+              >
+                <el-option
+                  v-for="item in tags.list"
+                  :key="item.meta.tagId"
+                  :label="formatTagOptionLabel(item.meta, item.value?.quality)"
+                  :value="item.meta.tagId"
+                />
+              </el-select>
+              <el-color-picker
+                size="small"
+                :model-value="curve.color || trendCurveColor(i)"
+                @update:model-value="(v: string | null) => setTrendCurve(curve.tagId, { color: v || trendCurveColor(i) })"
+              />
+              <el-input
+                size="small"
+                placeholder="图例名"
+                :model-value="curve.label ?? ''"
+                @update:model-value="(v: string) => setTrendCurve(curve.tagId, { label: v })"
+              />
+              <el-button size="small" text type="danger" @click="removeTrendCurve(curve.tagId)">
+                删除
+              </el-button>
+            </div>
+            <el-button
+              size="small"
+              :disabled="trendCurveList.length >= TREND_MAX_CURVES"
+              @click="addTrendCurve"
+            >
+              添加变量
+            </el-button>
+            <el-button size="small" @click="exportTrendPng">导出图片</el-button>
+          </div>
+        </label>
+        <p v-if="widget.type === 'trend' || widget.type === 'trendHistory'" class="hint">
+          {{
+            trendCurveList.length
+              ? '每条曲线按自身数据自动缩放。图元直接用 ECharts：实时预览和运行时可点图例、滚轮缩放、悬停读数、导出图片。'
+              : '未添加变量时显示下面的示例数据；添加变量后由动画连接 / 属性绑定提供实时值。'
+          }}
+        </p>
+        <label v-if="widget.type === 'trend' || widget.type === 'trendHistory'">
+          <span>图表字号</span>
+          <el-input-number
+            size="small"
+            placeholder="自动（随图元大小）"
+            :max="48"
+            controls-position="right"
+            :model-value="Number(widget.props.chartFontSize) || undefined"
+            @update:model-value="(v: number | undefined) => updateProp('chartFontSize', v == null ? undefined as never : Number(v))"
+          />
+        </label>
+        <p v-if="widget.type === 'trend' || widget.type === 'trendHistory'" class="hint">
+          留空 = 自动（图元短边 ÷ 10，14~22px）；坐标轴、图例、标题都按这个字号排。
+        </p>
+        <el-checkbox
+          v-if="widget.type === 'trend' || widget.type === 'trendHistory'"
+          :model-value="widget.props.chartStack === true"
+          @update:model-value="(v: boolean | string | number) => updateProp('chartStack', Boolean(v))"
+        >
+          堆叠显示（Stacked Line：各曲线累加）
+        </el-checkbox>
+        <p
+          v-if="(widget.type === 'trend' || widget.type === 'trendHistory') && widget.props.chartStack === true"
+          class="hint"
+        >
+          堆叠会把各曲线**累加**成一条总量线：只适合分量求和（能耗构成 / 班次产量 / 计数）；
+          液位、压力、温度这类工程值请保持"叠加"（取消勾选）。
+        </p>
         <label>
           <span>标题</span>
           <el-input
@@ -295,7 +598,17 @@ async function replaceImage(e: Event) {
             @update:model-value="(v: string) => updateProp('title', v)"
           />
         </label>
-        <label>
+        <label v-if="widget.type === 'trendHistory'">
+          <span>时间范围</span>
+          <el-select
+            size="small"
+            :model-value="String(widget.props.range ?? '-1h')"
+            @update:model-value="(v: string) => updateProp('range', v)"
+          >
+            <el-option v-for="item in TREND_RANGES" :key="item.id" :label="item.label" :value="item.id" />
+          </el-select>
+        </label>
+        <label v-if="widget.type !== 'trendHistory'">
           <span>类型</span>
           <el-select
             size="small"
@@ -312,12 +625,16 @@ async function replaceImage(e: Event) {
             type="textarea"
             :rows="3"
             size="small"
-            placeholder="逗号分隔，如 12,18,22"
+            :placeholder="
+              widget.type === 'trendHistory'
+                ? '未连接时的示例。绑定变量后按时间范围读取历史'
+                : '逗号分隔，如 12,18,22'
+            "
             :model-value="String(widget.props.series ?? '')"
             @update:model-value="(v: string) => updateProp('series', v)"
           />
         </label>
-        <div class="row">
+        <div v-if="!trendCurveList.length" class="row">
           <label>
             <span>最小</span>
             <el-input-number
@@ -337,17 +654,20 @@ async function replaceImage(e: Event) {
             />
           </label>
         </div>
-        <label v-if="widget.type === 'trend'">
+        <label v-if="widget.type === 'trend' || widget.type === 'trendHistory'">
           <span>点数</span>
           <el-input-number
             size="small"
             controls-position="right"
-            :min="5"
-            :max="500"
-            :model-value="Number(widget.props.maxPoints ?? 40)"
+            :min="widget.type === 'trendHistory' ? 10 : 5"
+            :max="widget.type === 'trendHistory' ? 2000 : 500"
+            :model-value="Number(widget.props.maxPoints ?? (widget.type === 'trendHistory' ? 240 : 40))"
             @update:model-value="(v: number | undefined) => updateProp('maxPoints', Math.max(5, Number(v) || 40))"
           />
         </label>
+        <p v-if="widget.type === 'trendHistory'" class="hint">
+          用动画连接把变量接到数值输出。运行和实时预览会按时间范围读取该变量的历史曲线。
+        </p>
       </template>
 
       <template v-if="widget.type === 'gauge'">
@@ -475,28 +795,14 @@ async function replaceImage(e: Event) {
         </div>
       </template>
 
-      <div class="flags">
-        <el-checkbox
-          :model-value="widget.visible !== false"
-          @update:model-value="(v: boolean | string | number) => updateFlag('visible', Boolean(v))"
-        >
-          可见
-        </el-checkbox>
-        <el-checkbox
-          :model-value="Boolean(widget.locked)"
-          @update:model-value="(v: boolean | string | number) => updateFlag('locked', Boolean(v))"
-        >
-          锁定
-        </el-checkbox>
-      </div>
+        </el-collapse-item>
+
+        <el-collapse-item :title="sectionTitle.anim" name="anim">
+          <WidgetBindingPanel />
+        </el-collapse-item>
+      </el-collapse>
 
       <el-button size="small" type="danger" plain @click="remove">删除图元</el-button>
-          </div>
-        </el-tab-pane>
-        <el-tab-pane label="动画连接" name="binding">
-          <WidgetBindingPanel />
-        </el-tab-pane>
-      </el-tabs>
     </div>
   </div>
 </template>
@@ -526,12 +832,32 @@ async function replaceImage(e: Event) {
   gap: 10px;
 }
 
-.form label {
+.form label,
+.prop-collapse label {
   display: flex;
   flex-direction: column;
   gap: 4px;
   font-size: 12px;
   color: var(--scada-muted);
+}
+
+.curve-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.curve-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 26px 80px 40px;
+  gap: 6px;
+  align-items: center;
+}
+
+.curve-row :deep(.el-select),
+.curve-row :deep(.el-input) {
+  width: 100%;
 }
 
 label.top :deep(.el-textarea__inner) {
@@ -553,6 +879,12 @@ label.top :deep(.el-textarea__inner) {
   gap: 8px;
 }
 
+.field-label {
+  width: 100%;
+  font-size: 12px;
+  color: var(--scada-muted);
+}
+
 .hidden {
   display: none;
 }
@@ -569,5 +901,35 @@ label.top :deep(.el-textarea__inner) {
   font-size: 12px;
   padding: 0 10px;
   height: 32px;
+}
+
+.prop-collapse {
+  border: none;
+  --el-collapse-header-height: 36px;
+}
+
+.prop-collapse :deep(.el-collapse-item__header) {
+  background: transparent;
+  color: var(--scada-text);
+  font-size: 12px;
+  font-weight: 600;
+  border-bottom-color: var(--scada-border);
+  letter-spacing: 0.02em;
+}
+
+.prop-collapse :deep(.el-collapse-item__wrap) {
+  background: transparent;
+  border-bottom-color: var(--scada-border);
+}
+
+.prop-collapse :deep(.el-collapse-item__content) {
+  padding: 8px 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.single > .el-button {
+  margin-top: 10px;
 }
 </style>

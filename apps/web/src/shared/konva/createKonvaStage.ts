@@ -1,5 +1,10 @@
 import Konva from 'konva'
-import type { Page2D } from '@web-scada/core'
+import { trendCurves, type Page2D, type Widget2D } from '@web-scada/core'
+import { attachTrendChartInteraction } from '@/shared/konva/trendChartInteraction'
+import { setTrendZoom } from '@/shared/konva/trendChart'
+import { createTrendLiveOverlay } from '@/shared/konva/trendChartLive'
+import { syncNativeTrendCharts } from '@/shared/konva/trendNativeCharts'
+import { setHiddenCurves, syncWidgetNode } from '@/shared/konva/widgetNodes'
 
 export interface KonvaStageBundle {
   stage: Konva.Stage
@@ -20,10 +25,19 @@ export interface KonvaStageBundle {
   getView: () => { scale: number; x: number; y: number }
   showGuides: (guides: Array<{ orientation: 'v' | 'h'; pos: number }>) => void
   clearGuides: () => void
+  /** 趋势图元是否可交互（悬停读数 / 拖拽缩放时间窗）；设计端仅实时预览时开 */
+  setChartInteraction: (on: boolean) => void
+  /**
+   * 同步趋势图元上的原生 ECharts。
+   * interactive 为 false 时图表仍显示，鼠标穿透，方便拖拽图元。
+   */
+  syncTrendOverlays: (widgets: Widget2D[], interactive: boolean, layoutOnly?: boolean) => void
 }
 
 export interface CreateKonvaStageOptions {
   onViewChange?: (view: { scale: number; x: number; y: number }) => void
+  /** 按 id 找图元（趋势图元交互用） */
+  resolveWidget?: (id: string) => Widget2D | undefined
 }
 
 const GRID = 20
@@ -132,12 +146,46 @@ export function createKonvaStage(
 
   drawGrid(gridLayer, pageWidth, pageHeight)
 
+  const trendLiveOverlay = createTrendLiveOverlay({
+    host: container,
+    onLegendSelect: (widgetId, hiddenNames) => {
+      const widget = options.resolveWidget?.(widgetId)
+      if (!widget) return
+      const hiddenTags = trendCurves(widget.props)
+        .filter((curve) => hiddenNames.includes(curve.label || curve.tagId))
+        .map((curve) => curve.tagId)
+      setHiddenCurves(widget, hiddenTags)
+      const node = widgetLayer.findOne('#' + widgetId) as Konva.Group | null
+      const next = options.resolveWidget?.(widgetId) ?? widget
+      if (node) syncWidgetNode(node, next)
+      flushTrend(false)
+    },
+    onZoom: (widgetId, zoom) => {
+      setTrendZoom(widgetId, { start: zoom.start, end: zoom.end })
+    },
+  })
+
+  let trendWidgets: Widget2D[] = []
+  let trendInteractive = false
+
+  const flushTrend = (layoutOnly: boolean) => {
+    syncNativeTrendCharts({
+      stage,
+      widgetLayer,
+      widgets: trendWidgets,
+      overlay: trendLiveOverlay,
+      interactive: trendInteractive,
+      layoutOnly,
+    })
+  }
+
   const notifyView = () => {
     options.onViewChange?.({
       scale: stage.scaleX(),
       x: stage.x(),
       y: stage.y(),
     })
+    if (trendWidgets.length) flushTrend(false)
   }
 
   const applyPanState = () => {
@@ -279,6 +327,10 @@ export function createKonvaStage(
 
   fitToView()
 
+  const trendInteraction = attachTrendChartInteraction(stage, (id) => options.resolveWidget?.(id), {
+    enabled: false,
+  })
+
   return {
     stage,
     gridLayer,
@@ -301,12 +353,19 @@ export function createKonvaStage(
     toPagePoint,
     showGuides,
     clearGuides,
+    setChartInteraction: (on: boolean) => trendInteraction.setEnabled(on),
+    syncTrendOverlays: (widgets: Widget2D[], interactive: boolean, layoutOnly = false) => {
+      trendWidgets = widgets
+      trendInteractive = interactive
+      flushTrend(layoutOnly)
+    },
     getView: () => ({
       scale: stage.scaleX(),
       x: stage.x(),
       y: stage.y(),
     }),
     dispose: () => {
+      trendLiveOverlay.dispose()
       ro.disconnect()
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener('keyup', onKeyUp)

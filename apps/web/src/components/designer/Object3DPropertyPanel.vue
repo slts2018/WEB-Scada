@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import type { Object3DPanel, Page2D, Page3DPresentation } from '@web-scada/core'
+import type {
+  AnimationLinkFlow,
+  Object3DPanel,
+  Page2D,
+  Page3DPresentation,
+} from '@web-scada/core'
 import {
   animationLinkTypeLabel,
   createDefaultObject3DPanel,
@@ -33,6 +38,24 @@ const isPanelOnly = computed(
 )
 
 const animLinks = computed(() => obj.value?.animationLinks ?? [])
+
+/** 当前选中的是液位层（配置入口在「液位」对话框里） */
+const liquid = computed(() => obj.value?.liquid ?? null)
+/** 流动连接挂在主选对象上（配置入口在「流动」对话框里） */
+const flowLink = computed(() => {
+  const link = (obj.value?.animationLinks ?? []).find((l) => l.type === 'flow')
+  return link as AnimationLinkFlow | undefined
+})
+const FLOW_STYLE_LABELS: Record<string, string> = {
+  skin: '贴皮箭头',
+  ribbon: '浮空箭头',
+  chevron: '管面斜箭',
+  arrow: '锥形箭头',
+  stripe: '条纹',
+}
+const flowStyleLabel = computed(
+  () => FLOW_STYLE_LABELS[flowLink.value?.style ?? 'skin'] ?? '贴皮箭头',
+)
 
 const sizeMeters = computed(() =>
   obj.value ? sizeMetersFromObject3d(obj.value) : ([0, 0, 0] as [number, number, number]),
@@ -115,21 +138,16 @@ function patchPanel(next: Object3DPanel | undefined) {
   patch({ panel: next })
 }
 
-function enablePanel() {
-  if (!obj.value) return
-  if (obj.value.panel) return
-  patchPanel(createDefaultObject3DPanel(obj.value.name || '操作面板'))
-  const page = project.ensurePanelPage2d(obj.value.id)
-  if (page) ElMessage.success(`已启用：${page.name}`)
-}
-
-function disablePanel() {
-  patchPanel(undefined)
-}
-
 function openPanelIn2dEditor() {
   if (!obj.value) return
-  if (!obj.value.panel) enablePanel()
+  if (!isPanelOnly.value) {
+    ElMessage.warning('跟镜头面板请从「基础图元」添加，不能挂在模型上')
+    return
+  }
+  if (!obj.value.panel) {
+    patchPanel(createDefaultObject3DPanel(obj.value.name || '操作面板'))
+    project.ensurePanelPage2d(obj.value.id)
+  }
   project.openObject3dPanelEditor(obj.value.id)
   if (!project.object3dPanelEditorOpen) ElMessage.warning('无法打开面板编辑器')
 }
@@ -296,34 +314,104 @@ const panelSummary = computed(() => {
         </template>
       </el-collapse-item>
 
-      <el-collapse-item title="3 · 跟镜头面板" name="panel">
-        <div v-if="!obj.panel" class="ops">
-          <el-button size="small" type="primary" plain style="width: 100%" @click="enablePanel">
-            启用面板
+      <el-collapse-item v-if="isPanelOnly" title="3 · 跟镜头面板" name="panel">
+        <p class="multi-hint">{{ panelSummary }} · 始终朝向相机</p>
+        <div class="ops">
+          <el-button size="small" type="primary" style="flex: 1" @click="openPanelIn2dEditor">
+            编辑面板内容
           </el-button>
-          <p class="multi-hint">给模型挂一块跟镜头面板；纯面板请从「基础图元」拖入。</p>
         </div>
-        <template v-else>
-          <p class="multi-hint">{{ panelSummary }} · 始终朝向相机</p>
-          <div class="ops">
-            <el-button size="small" type="primary" style="flex: 1" @click="openPanelIn2dEditor">
-              编辑面板内容
-            </el-button>
-            <el-button
-              v-if="!isPanelOnly"
-              size="small"
-              type="danger"
-              plain
-              @click="disablePanel"
-            >
-              关闭面板
-            </el-button>
-          </div>
-          <p class="multi-hint">双击场景中的面板也可打开编辑弹窗。</p>
-        </template>
+        <p class="multi-hint">双击场景中的面板也可打开编辑弹窗。</p>
       </el-collapse-item>
 
-      <el-collapse-item title="4 · 动画连接" name="animLink">
+      <el-collapse-item
+        v-if="!isPanelOnly"
+        :title="isPanelOnly ? '4 · 液位' : '3 · 液位'"
+        name="liquid"
+      >
+        <p class="multi-hint">
+          给罐体加一层液体，变量驱动液位（0%~100%）。
+          变量、量程、颜色、生成方式、内缩、罐壁透明度都在对话框里配。
+        </p>
+        <div class="ops">
+          <el-button
+            type="primary"
+            size="small"
+            style="flex: 1"
+            @click="project.openLiquidConfig()"
+          >
+            {{ liquid ? '液位配置…' : '添加液位层…' }}
+          </el-button>
+        </div>
+        <div v-if="liquid" class="summary-list">
+          <div class="summary-item">
+            <span>变量</span>
+            <span>{{ liquid.tagId || '未选择' }}</span>
+          </div>
+          <div class="summary-item">
+            <span>量程</span>
+            <span>{{ liquid.inMin }} ~ {{ liquid.inMax }}</span>
+          </div>
+          <div class="summary-item">
+            <span>生成方式</span>
+            <span>{{ liquid.mode === 'primitive' ? '圆柱 / 长方体图元' : '沿用罐体形状' }}</span>
+          </div>
+          <div class="summary-item">
+            <span>液体色</span>
+            <span class="swatch"><i :style="{ background: liquid.color }" />{{ liquid.color }}</span>
+          </div>
+        </div>
+        <p v-if="liquid" class="multi-hint">
+          液位层已锁定变换：位置与高度由连接 / 液面裁剪接管。
+        </p>
+      </el-collapse-item>
+
+      <el-collapse-item
+        v-if="!isPanelOnly"
+        :title="isPanelOnly ? '5 · 流动' : '4 · 流动'"
+        name="flow"
+      >
+        <p class="multi-hint">
+          管道流动：贴管壁滚动的箭头，速度由变量驱动（不依赖模型 UV）。
+          变量、速度、样式、箭头长度、间隔、颜色都在对话框里配。
+          <template v-if="multiCount > 1">对 {{ multiCount }} 个选中对象批量生效。</template>
+        </p>
+        <div class="ops">
+          <el-button
+            type="primary"
+            size="small"
+            style="flex: 1"
+            @click="project.openFlowConfig()"
+          >
+            {{ flowLink ? '流动配置…' : '添加流动效果…' }}
+          </el-button>
+        </div>
+        <div v-if="flowLink" class="summary-list">
+          <div class="summary-item">
+            <span>变量</span>
+            <span>{{ flowLink.tagId || '未选择' }}</span>
+          </div>
+          <div class="summary-item">
+            <span>基准速度</span>
+            <span>{{ flowLink.speed }} m/s</span>
+          </div>
+          <div class="summary-item">
+            <span>样式</span>
+            <span>{{ flowStyleLabel }}</span>
+          </div>
+          <div class="summary-item">
+            <span>颜色</span>
+            <span class="swatch">
+              <i :style="{ background: flowLink.color || '#67e8f9' }" />{{ flowLink.color || '默认青' }}
+            </span>
+          </div>
+        </div>
+        <p class="multi-hint">
+          运行时按变量速度滚动；变量为 0 或测点坏 → 停流并隐藏箭头。
+        </p>
+      </el-collapse-item>
+
+      <el-collapse-item :title="isPanelOnly ? '6 · 动画连接' : '5 · 动画连接'" name="animLink">
         <div class="anim-summary">
           <el-button
             type="primary"
@@ -719,6 +807,10 @@ label {
   grid-template-columns: 1fr 1fr;
 }
 
+.xyz.liquid-range {
+  grid-template-columns: 1fr 1fr;
+}
+
 .xyz.panel-size > label {
   display: flex;
   flex-direction: column;
@@ -758,6 +850,24 @@ label {
   border-radius: 4px;
   background: #12151c;
   border: 1px solid var(--scada-border);
+}
+
+.summary-item > span:last-child {
+  color: var(--scada-text);
+}
+
+.summary-item .swatch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.summary-item .swatch i {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid var(--scada-border);
+  display: inline-block;
 }
 
 .empty {

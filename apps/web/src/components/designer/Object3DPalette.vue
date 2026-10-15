@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import type { BuiltinPrimitive3D } from '@web-scada/core'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { scadaConfirm } from '@/shared/ui/scadaMessageBox'
 import { useProjectStore } from '@/stores/project'
 import ModelResourceThumb from '@/components/designer/ModelResourceThumb.vue'
 import { countRefsByResource } from '@/shared/project/resourceRefs'
@@ -36,6 +37,23 @@ function addPrimitive(type: BuiltinPrimitive3D) {
   }
 }
 
+/**
+ * 一键生成「透明液位罐」：半透明圆罐 + 液位层（内置图元组合，不需要模型文件）。
+ * 生成后在属性栏「3 · 液位」里选变量即可显示液位；尺寸在「2 · 变换」里调。
+ */
+function addLiquidTank() {
+  if (!project.activePage3d) {
+    ElMessage.warning('请先选择 3D 页面')
+    return
+  }
+  const node = project.addGlassLiquidTank()
+  if (!node) {
+    ElMessage.warning('生成失败，请重试')
+    return
+  }
+  ElMessage.success('已生成透明液位罐：在右侧属性栏「液位」里选择变量')
+}
+
 function addPanel() {
   if (!project.activePage3d) {
     ElMessage.warning('请先选择 3D 页面')
@@ -62,16 +80,14 @@ async function removeModel(res: { id: string; name: string }, ev: Event) {
   const refs = countRefsByResource(project.document).get(res.id) ?? 0
   try {
     if (refs > 0) {
-      await ElMessageBox.confirm(
+      await scadaConfirm(
         `「${res.name}」在场景中有 ${refs} 处引用。删除后将一并移除这些对象，是否继续？`,
         '删除模型',
-        { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' },
+        { confirmButtonText: '删除' },
       )
     } else {
-      await ElMessageBox.confirm(`确定删除模型「${res.name}」？`, '删除模型', {
-        type: 'warning',
+      await scadaConfirm(`确定删除模型「${res.name}」？`, '删除模型', {
         confirmButtonText: '删除',
-        cancelButtonText: '取消',
       })
     }
   } catch {
@@ -137,6 +153,10 @@ async function onFile(e: Event) {
       <button type="button" class="item" @click="addPanel">
         <span class="icon panel" />
         <span>面板</span>
+      </button>
+      <button type="button" class="item" @click="addLiquidTank">
+        <span class="icon liquid-tank" />
+        <span>液位罐</span>
       </button>
     </div>
     <div class="panel-title">模型</div>
@@ -247,6 +267,12 @@ async function onFile(e: Event) {
   border-top: 16px solid #38bdf8;
   background: transparent;
   border-radius: 0;
+}
+
+.icon.liquid-tank {
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.15) 0%, rgba(56, 189, 248, 0.85) 62%);
+  border: 1px solid rgba(148, 197, 255, 0.8);
+  border-radius: 6px / 8px;
 }
 
 .icon.panel {

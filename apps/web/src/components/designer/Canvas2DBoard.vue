@@ -20,6 +20,9 @@ import { useTagStore } from '@/stores/tag'
 import { collectPageTagIds, resolveWidgetVisual } from '@/shared/runtime/bindingEngine'
 import { rectsIntersect, snapTransform, snapWithGuides } from '@/shared/designer/geometry'
 import { isDesignerCanvasContext, isTypingTarget } from '@/shared/designer/designerHotkeys'
+import { historyPagerClientRect, historySearchClientRect } from '@/shared/runtime/alarmHistoryQuery'
+import AlarmHistorySearchBar from '@/components/runtime/AlarmHistorySearchBar.vue'
+import AlarmHistoryPager from '@/components/runtime/AlarmHistoryPager.vue'
 
 const RULER = 24
 const DND_TYPE = 'application/x-scada-widget'
@@ -126,7 +129,82 @@ const drawHint = computed(() => {
   return '点画布后：拖放添加 · Ctrl+C/V 复制粘贴 · Delete 删除 · 方向键微调'
 })
 
+type HistoryBar = {
+  id: string
+  x: number
+  y: number
+  w: number
+  h: number
+  px: number
+  py: number
+  pw: number
+  ph: number
+}
+const historyBars = ref<HistoryBar[]>([])
+
+function pageWidgets(): Widget2D[] {
+  const out: Widget2D[] = []
+  for (const layer of props.page.layers) {
+    if (!layer.visible) continue
+    for (const widget of layer.widgets) out.push(widget)
+  }
+  return out
+}
+
+/** 趋势图元挂原生 ECharts。编辑时鼠标穿透，实时预览时才能点图例 / 缩放。 */
+function syncTrendCharts(layoutOnly = false) {
+  bundle?.syncTrendOverlays(pageWidgets(), project.previewLive, layoutOnly)
+}
+
+function syncHistoryBars() {
+  if (!bundle || !host.value) {
+    historyBars.value = []
+    return
+  }
+  const board = host.value.parentElement
+  const hostBox = host.value.getBoundingClientRect()
+  const boardBox = board?.getBoundingClientRect()
+  const origin = {
+    x: boardBox ? hostBox.left - boardBox.left : 0,
+    y: boardBox ? hostBox.top - boardBox.top : 0,
+  }
+  const next: HistoryBar[] = []
+  for (const layer of props.page.layers) {
+    if (!layer.visible) continue
+    for (const widget of layer.widgets) {
+      if (widget.type !== 'alarmHistory' || widget.visible === false) continue
+      const node = bundle.widgetLayer.findOne(`#${widget.id}`)
+      if (!node) continue
+      const rect = historySearchClientRect(
+        (p) => node.getAbsoluteTransform().point(p),
+        widget,
+        origin,
+      )
+      const pager = historyPagerClientRect(
+        (p) => node.getAbsoluteTransform().point(p),
+        widget,
+        origin,
+      )
+      next.push({
+        id: widget.id,
+        ...rect,
+        px: pager.x,
+        py: pager.y,
+        pw: pager.w,
+        ph: pager.h,
+      })
+    }
+  }
+  historyBars.value = next
+}
+
+function onHistorySearch() {
+  if (project.previewLive) applyDesignerPreview()
+  else renderAllWidgets()
+}
+
 function paintRulers(view?: { scale: number; x: number; y: number }) {
+  syncHistoryBars()
   const v = view ?? bundle?.getView()
   if (!v || !rulerX.value || !rulerY.value || !host.value) return
   const { scale, x, y } = v
@@ -206,11 +284,34 @@ function renderAllWidgets() {
   syncingFromModel = false
   syncPageGuides()
   if (project.previewLive) applyDesignerPreview()
+  else syncTrendCharts()
+  syncHistoryBars()
 }
 
 function clearPreviewBlink() {
   for (const t of previewBlinkTimers.values()) clearInterval(t)
   previewBlinkTimers.clear()
+}
+
+let alarmRowBlinkOn = true
+let alarmRowBlinkTimer: ReturnType<typeof setInterval> | null = null
+
+function startAlarmRowBlink() {
+  if (alarmRowBlinkTimer) return
+  alarmRowBlinkTimer = setInterval(() => {
+    if (!bundle || !project.previewLive) return
+    alarmRowBlinkOn = !alarmRowBlinkOn
+    const nodes = bundle.widgetLayer.find('.alarm-blink')
+    if (!nodes.length) return
+    nodes.forEach((n) => n.opacity(alarmRowBlinkOn ? 1 : 0.2))
+    bundle.widgetLayer.batchDraw()
+  }, 500)
+}
+
+function stopAlarmRowBlink() {
+  if (!alarmRowBlinkTimer) return
+  clearInterval(alarmRowBlinkTimer)
+  alarmRowBlinkTimer = null
 }
 
 function syncPageGuides() {
@@ -344,6 +445,7 @@ function applyDesignerPreview() {
   }
   bundle.transformer.nodes([])
   bundle.widgetLayer.batchDraw()
+  syncTrendCharts()
 }
 
 function startPreviewMode() {
@@ -351,6 +453,7 @@ function startPreviewMode() {
   tags.setPageSubscription(ids)
   removeTagListener?.()
   removeTagListener = tags.addListener(() => applyDesignerPreview())
+  startAlarmRowBlink()
   applyDesignerPreview()
 }
 
@@ -358,6 +461,7 @@ function stopPreviewMode() {
   removeTagListener?.()
   removeTagListener = null
   clearPreviewBlink()
+  stopAlarmRowBlink()
   tags.clearPageSubscription()
   renderAllWidgets()
 }
@@ -633,6 +737,8 @@ function bindWidgetEvents(group: Konva.Group) {
       }
     }
     bundle.transformer.forceUpdate()
+    syncHistoryBars()
+    syncTrendCharts(true)
   })
 
   group.on('dragend', () => {
@@ -646,9 +752,16 @@ function bindWidgetEvents(group: Konva.Group) {
     dragHistoryPushed = false
   })
 
+  group.on('transform', () => {
+    if (syncingFromModel) return
+    syncHistoryBars()
+    syncTrendCharts()
+  })
+
   group.on('transformend', () => {
     if (syncingFromModel) return
     commitSelectionTransforms()
+    syncHistoryBars()
   })
 }
 
@@ -680,6 +793,7 @@ function commitSelectionTransforms() {
   }
   bundle.transformer.forceUpdate()
   bundle.widgetLayer.batchDraw()
+  syncTrendCharts()
 }
 
 function applySelection(ids: string[]) {
@@ -948,8 +1062,11 @@ onMounted(() => {
   if (!host.value) return
   bundle = createKonvaStage(host.value, props.page, {
     onViewChange: (view) => paintRulers(view),
+    resolveWidget: (id) => project.getActiveWidgets().find((w) => w.id === id),
   })
   bundle.setGridVisible(project.gridVisible)
+  // 趋势图元交互（悬停读数 / 拖时间窗）只在实时预览里开，否则拖图元会被当成拖时间轴
+  bundle.setChartInteraction(project.previewLive)
   bundle.stage.on('mousedown', onStagePointerDown)
   bundle.stage.on('mousemove', onStagePointerMove)
   bundle.stage.on('mouseup', onStagePointerUp)
@@ -1007,6 +1124,7 @@ watch(
 watch(
   () => project.previewLive,
   (on) => {
+    bundle?.setChartInteraction(on)
     if (on) startPreviewMode()
     else stopPreviewMode()
   },
@@ -1034,6 +1152,7 @@ onUnmounted(() => {
   removeTagListener?.()
   removeTagListener = null
   clearPreviewBlink()
+  stopAlarmRowBlink()
   clearDrawPreview()
   clearVertexHandles()
   rulerGhost?.destroy()
@@ -1070,6 +1189,22 @@ defineExpose({ fitView, zoomBy, zoomExact, toggleHand, handMode })
       @mousedown="(e) => onRulerPointerDown('v', e)"
     />
     <div ref="host" class="konva-host" />
+    <AlarmHistorySearchBar
+      v-for="bar in historyBars"
+      :key="bar.id"
+      class="history-search"
+      :widget-id="bar.id"
+      :style="{ left: bar.x + 'px', top: bar.y + 'px', width: bar.w + 'px', height: bar.h + 'px' }"
+      @change="onHistorySearch"
+    />
+    <AlarmHistoryPager
+      v-for="bar in historyBars"
+      :key="bar.id + ':page'"
+      class="history-search"
+      :widget-id="bar.id"
+      :style="{ left: bar.px + 'px', top: bar.py + 'px', width: bar.pw + 'px', height: bar.ph + 'px' }"
+      @change="onHistorySearch"
+    />
 
     <div class="view-bar">
       <el-button size="small" :type="handMode ? 'primary' : 'default'" @click="toggleHand">
@@ -1173,11 +1308,17 @@ defineExpose({ fitView, zoomBy, zoomExact, toggleHand, handMode })
 }
 
 .konva-host {
+  position: relative;
   grid-column: 2;
   grid-row: 2;
   width: 100%;
   height: 100%;
   min-height: 0;
+}
+
+.history-search {
+  position: absolute;
+  z-index: 4;
 }
 
 .view-bar {

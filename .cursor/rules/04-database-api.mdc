@@ -1,6 +1,6 @@
 ---
 description: 数据库与 REST/WS API 契约约束
-globs: apps/server/**/*,apps/web/src/shared/api/**/*,packages/core/**/*
+globs: apps/server-java/**/*,apps/web/src/shared/api/**/*,packages/core/**/*
 alwaysApply: false
 ---
 
@@ -8,7 +8,7 @@ alwaysApply: false
 
 ## 数据库
 
-- MySQL：工程 / 发布 / tags 元数据（`mysql2` 参数化）  
+- MySQL：工程 / 发布 / tags 元数据（JdbcTemplate 参数化）  
 - Influx：Tag 历史（可选；不可用时不得破坏实时）  
 - 文件回退：`MYSQL_FALLBACK_FILE`  
 

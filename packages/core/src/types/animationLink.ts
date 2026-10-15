@@ -25,6 +25,7 @@ export type AnimationLinkType =
   | 'dragV'
   | 'dragZ'
   | 'enable'
+  | 'flow'
 
 export interface AnimationLinkBase {
   id: string
@@ -96,6 +97,58 @@ export interface AnimationLinkInput extends AnimationLinkBase {
   digitalMode?: 'toggle' | 'on' | 'off'
 }
 
+/**
+ * 管道流动（3D 专用）：变量 → 速度系数，条纹沿物体「最长轴」滚动。
+ * 模型没有 UV 也能用（用世界坐标沿轴向生成伪 UV），所以 CAD 直出的直管可以直接绑。
+ */
+export interface AnimationLinkFlow extends AnimationLinkBase {
+  type: 'flow'
+  /** 变量量程下限 */
+  inMin: number
+  /** 变量量程上限 */
+  inMax: number
+  /** 量程映射出的速度系数下限（一般 0） */
+  outMin: number
+  /** 量程映射出的速度系数上限（一般 1） */
+  outMax: number
+  /** 满速时的流动速度（米/秒）；负值 = 反向 */
+  speed: number
+  /** 条纹间隔（米）；缺省按管径自动（约 6 倍最小边，0.03~0.6m） */
+  stripe?: number
+  /** 条纹颜色；缺省青色 #67e8f9 */
+  color?: string
+  /** 条纹宽度占比 0.05~0.9；缺省 0.42 */
+  duty?: number
+  /** 流向轴：auto = 物体局部最长轴（推荐，直管不用配） */
+  axis?: 'auto' | 'x' | 'y' | 'z'
+  /**
+   * 样式：
+   * - skin（默认）：**贴皮箭头** —— 在管壁**左右两侧**各贴一个「长杆 + 三角头」的箭头，
+   *   随管壁弯曲，正面/侧面都看得见（不会侧看成一条线）
+   * - ribbon：浮在管子上方的平面箭头（只适合俯视角度看）
+   * - chevron：发光「»」双斜箭（贴管壁，亮芯 + 光晕）
+   * - arrow：锥形箭头（整圈包裹的实心箭头）
+   * - stripe：条纹
+   */
+  style?: 'skin' | 'ribbon' | 'chevron' | 'arrow' | 'stripe'
+  /** 斜箭 Stroke 粗细 0.06~0.5（绕管角度比例）；默认 0.22 */
+  thick?: number
+  /** 浮空箭头长度（米）；缺省 = 0.62 × 间隔 */
+  size?: number
+  /** 浮空箭头不透明度 0.15~1；默认 0.85 */
+  alpha?: number
+  /**
+   * 光晕强度 0~1；**默认 0（不要光晕）**。
+   * =0 时箭头是纯色平面（和参考图一致）；调大才会有"亮芯 + 外圈柔光"。
+   */
+  glow?: number
+  /**
+   * 箭头横向张开 0.3~1：1 = 整圈包裹（任何视角都看得见，默认），
+   * 越小越像贴在管子一侧的箭头。
+   */
+  width?: number
+}
+
 /** 禁止使能：按变量控制是否可交互 */
 export interface AnimationLinkEnable extends AnimationLinkBase {
   type: 'enable'
@@ -110,6 +163,7 @@ export type AnimationLink =
   | AnimationLinkTextOut
   | AnimationLinkInput
   | AnimationLinkEnable
+  | AnimationLinkFlow
 
 /** 需要运行时点击/拖拽交互的动画类型 */
 export const INTERACTIVE_LINK_TYPES: AnimationLinkType[] = [
@@ -224,6 +278,10 @@ export const OBJECT3D_LINK_TREE: Array<{
       { type: 'colorStroke', label: '发光' },
       { type: 'colorFill2', label: '辅色' },
     ],
+  },
+  {
+    group: '流动',
+    items: [{ type: 'flow', label: '管道流动' }],
   },
   {
     group: '鼠标动作',

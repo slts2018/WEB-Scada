@@ -10,8 +10,6 @@ dist-ssr
 coverage
 .turbo
 *.tsbuildinfo
-apps/server/data
 apps/data
-apps/server/.env
 .env
 release

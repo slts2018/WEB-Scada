@@ -17,11 +17,7 @@
 pnpm pack:win
 ```
 
-内嵌便携 Node（体积更大，目标机可不装 Node）：
-
-```bash
-pnpm pack:win:node
-```
+`pnpm pack:win` 与 `pnpm pack:win:java` 相同，产物是 Spring Boot 的 `server.jar`（目录名 `WebScada-0.1.0-win-x64-java`）。目标机需要 JDK/JRE 17，或打包时设置 `SCADA_BUNDLE_JRE=1` 内嵌 JRE。
 
 导出**网站包**（需已有工程数据在 `apps/data`，或传 `-ProjectId`）：
 
@@ -31,7 +27,7 @@ pnpm pack:site
 pnpm pack:site -- -ProjectId prj_xxx
 ```
 
-设计端也可：**文件 → 导出网站包**（需先 `pnpm pack:win:node` 生成模板，或设置 `SCADA_SITE_TEMPLATE`）。
+设计端也可：**文件 → 导出网站包**（需先 `pnpm pack:win` 生成模板，或设置 `SCADA_SITE_TEMPLATE`）。
 
 ## 绿色版试用
 
@@ -58,7 +54,7 @@ pnpm pack:site -- -ProjectId prj_xxx
 ## 生成 Setup.exe
 
 1. 安装 [Inno Setup 6](https://jrsoftware.org/isinfo.php)
-2. 先执行 `pnpm pack:win`（或 `pack:win:node`）
+2. 先执行 `pnpm pack:win`（或 `pnpm pack:setup`，会顺便编安装包）
 3. 用 Inno 打开 `packaging/web-scada.iss` → Compile
 4. 输出：`release/WebScada-Setup-0.1.0.exe`
 
@@ -70,7 +66,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 ## 架构说明
 
-打包后由 **单个 Node 进程** 同时提供：
+打包后由 **Spring Boot** 同时提供：
 
 - API / WebSocket（原 8787）
 - 前端静态资源（Designer / Runtime）

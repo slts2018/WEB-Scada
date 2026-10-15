@@ -7,7 +7,7 @@
 ```text
 web-scada/
 ├── apps/web              # Vue3 前端（Designer / Runtime 双模式）
-├── apps/server           # Fastify 后端（MySQL + InfluxDB）
+├── apps/server-java      # Spring Boot 后端
 ├── packages/core         # 工程模型、Tag、绑定、发布包等共享契约
 └── package.json
 ```
@@ -17,44 +17,27 @@ web-scada/
 | 层 | 选型 |
 |----|------|
 | 前端 | Vue 3 · TypeScript · Vite · Pinia · Vue Router · Element Plus |
-| 后端 | Node.js · Fastify |
+| 后端 | **Spring Boot 3**（`pnpm dev`） |
 | 关系库 | MySQL 8（工程 / 发布包） |
 | 时序库 | InfluxDB 2.x（Tag 历史） |
 | 2D / 3D | Konva / Three.js |
-| 实时 | 前期 Mock Tag；预留 WebSocket |
+| 实时 | Mock Tag + WebSocket `/api/ws/tags` |
 
-> 原计划 Java17 + Spring Boot 3；当前环境仅有 Java 8，首期用 Node 后端落地同一套契约。
+> 后端只有 Spring Boot（`apps/server-java`）。安装包用 `pnpm pack:win`。迁移过程记录见 `docs/spring-boot-migration-design.md`。
 
 ## 数据库配置
 
-复制并编辑：
-
-```bash
-cp apps/server/.env.example apps/server/.env
-```
-
-默认（本机已验证 MySQL `root` / `root`）：
+`pnpm dev` 会拉起内嵌 MariaDB（3306）和 InfluxDB（8087）。连接默认值在 `apps/server-java/src/main/resources/application.yml`，可用环境变量覆盖。
 
 | 变量 | 默认 | 说明 |
 |------|------|------|
-| `MYSQL_*` | `127.0.0.1:3306` / `web_scada` | 工程与发布包 |
-| `MYSQL_FALLBACK_FILE` | `true` | MySQL 挂了回退 JSON 文件 |
-| `INFLUX_URL` | `http://127.0.0.1:8086` | InfluxDB |
-| `INFLUX_TOKEN` | 空 | **必填后才启用时序** |
+| `MYSQL_*` | `127.0.0.1:3306` / `web_scada` / `root` | 工程与发布包 |
+| `MYSQL_FALLBACK_FILE` | `true` | MySQL 不可用时回退 `apps/data` |
+| `INFLUX_URL` | 开发脚本设为 `http://127.0.0.1:8087` | InfluxDB |
+| `INFLUX_TOKEN` | 开发脚本设为 `web-scada-dev-token` | 空则不写历史 |
 | `INFLUX_ORG` / `INFLUX_BUCKET` | `web-scada` / `tags` | Org / Bucket |
 
-启动时自动建库建表：`projects` · `publishes` · `app_meta`。
-
-InfluxDB 未安装或未配 Token 时：**服务仍可启动**（`INFLUX_REQUIRED=false`），仅 Tag 历史接口返回 503。
-
-一键起 Influx（需先打开 Docker Desktop）：
-
-```bash
-cd apps/server
-docker compose up -d
-```
-
-然后重启后端；`GET /api/health` 中 `influx.ready` 应为 `true`。
+MySQL 可用时自动建库，Flyway 建表。Influx 不可用时服务仍启动（`INFLUX_REQUIRED=false`），历史接口返回 503。
 
 ## 快速开始
 
@@ -63,9 +46,11 @@ pnpm install
 pnpm dev
 ```
 
-- 前端 `http://localhost:5173/`（`/api` 代理到后端）
-- 后端 `http://127.0.0.1:8787/`
-- 健康检查：`GET /api/health`（含 mysql / influx 状态）
+需本机 **JDK 17+**（及首次构建时的 Maven）。`pnpm dev` = 前端 + Spring。
+
+- 前端 `http://localhost:5173/`（`/api` 代理到 `8787`）
+- 后端 `http://127.0.0.1:8787/`（health 含 `"backend":"spring"`）
+- 健康检查：`GET /api/health`（含 mysql / influx / storage）
 
 ## 后端 API
 
@@ -88,7 +73,7 @@ pnpm dev
 
 ### 资源文件（磁盘）
 
-工程里只存路径，不存 dataURL。文件落在 `apps/server/data/resources/{projectId}/`。
+工程里只存路径，不存 dataURL。文件落在 `apps/data/resources/{projectId}/`。
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -99,4 +84,4 @@ pnpm dev
 
 **做**：工程模型、2D/3D 组态、发布包、Mock/服务端实时、MySQL 工程与变量配置、InfluxDB Tag 历史。
 
-**暂不做**：多协议采集、完整权限、报警/报表业务、Spring Boot 迁移。
+**暂不做**：多协议采集、完整权限、报警/报表业务。

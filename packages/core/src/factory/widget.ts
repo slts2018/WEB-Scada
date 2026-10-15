@@ -15,7 +15,9 @@ export type BuiltinWidgetType =
   | 'list'
   | 'chart'
   | 'trend'
+  | 'trendHistory'
   | 'alarm'
+  | 'alarmHistory'
   | 'gauge'
   | 'valve'
   | 'pump'
@@ -54,8 +56,10 @@ export const BUILTIN_WIDGETS: WidgetPaletteItem[] = [
   { type: 'switch', label: '开关', description: '开关/切换', group: 'data' },
   { type: 'list', label: '列表', description: '多行数据列表', group: 'data' },
   { type: 'chart', label: '图表', description: '折线/柱状趋势', group: 'data' },
-  { type: 'trend', label: '趋势', description: '实时趋势曲线（工业）', group: 'industrial' },
-  { type: 'alarm', label: '报警', description: '报警列表控件', group: 'industrial' },
+  { type: 'trend', label: '实时趋势', description: '跟随当前值滚动的趋势曲线', group: 'industrial' },
+  { type: 'trendHistory', label: '历史趋势', description: '按时间范围读取历史曲线', group: 'industrial' },
+  { type: 'alarm', label: '实时报警', description: '实时报警列表', group: 'industrial' },
+  { type: 'alarmHistory', label: '历史报警', description: '已发生的报警事件', group: 'industrial' },
   { type: 'gauge', label: '仪表', description: '半圆/圆形仪表盘', group: 'data' },
   { type: 'image', label: '图片', description: '图片/SVG 资源', group: 'media' },
   { type: 'scene3d', label: '三维画面', description: '嵌入已制作的三维页面', group: 'media' },
@@ -203,7 +207,7 @@ const DEFAULTS: Record<BuiltinWidgetType, WidgetDefaults> = {
     },
   },
   trend: {
-    name: '趋势',
+    name: '实时趋势',
     transform: { x: 80, y: 80, width: 280, height: 160, rotation: 0, scaleX: 1, scaleY: 1 },
     style: {
       fill: '#0b1220',
@@ -225,8 +229,32 @@ const DEFAULTS: Record<BuiltinWidgetType, WidgetDefaults> = {
       max: 100,
     },
   },
+  trendHistory: {
+    name: '历史趋势',
+    transform: { x: 80, y: 260, width: 320, height: 180, rotation: 0, scaleX: 1, scaleY: 1 },
+    style: {
+      fill: '#0b1220',
+      stroke: '#3f2e12',
+      strokeWidth: 1,
+      opacity: 1,
+      cornerRadius: 6,
+      lineColor: '#f59e0b',
+      gridColor: '#132033',
+      textColor: '#94a3b8',
+      fontSize: 11,
+    },
+    props: {
+      title: '历史趋势',
+      chartType: 'line',
+      series: '18,22,19,25,28,24,30,27,26,31',
+      range: '-1h',
+      maxPoints: 240,
+      min: 0,
+      max: 100,
+    },
+  },
   alarm: {
-    name: '报警',
+    name: '实时报警',
     transform: { x: 80, y: 80, width: 300, height: 180, rotation: 0, scaleX: 1, scaleY: 1 },
     style: {
       fill: '#140f0f',
@@ -242,8 +270,31 @@ const DEFAULTS: Record<BuiltinWidgetType, WidgetDefaults> = {
     props: {
       title: '实时报警',
       rowHeight: 28,
+      columns: ['date', 'time', 'level', 'status', 'alarmName', 'tagName', 'value'],
       items:
         '10:21:03\t告警\t液位偏高\n10:18:44\t故障\t1#泵通讯中断\n10:12:01\t提示\t阀门开度超限',
+    },
+  },
+  alarmHistory: {
+    name: '历史报警',
+    transform: { x: 80, y: 280, width: 680, height: 248, rotation: 0, scaleX: 1, scaleY: 1 },
+    style: {
+      fill: '#0c121b',
+      stroke: '#1e3a5f',
+      strokeWidth: 1,
+      opacity: 1,
+      cornerRadius: 6,
+      headerColor: '#93c5fd',
+      textColor: '#e2e8f0',
+      rowAlt: '#111827',
+      fontSize: 12,
+    },
+    props: {
+      title: '历史报警',
+      rowHeight: 28,
+      columns: ['date', 'time', 'event', 'level', 'alarmName', 'tagName', 'value'],
+      items:
+        '2026-10-13\t10:21:03\t触发\t报警\t液位偏高\t液位\t86\n2026-10-13\t10:18:44\t恢复\t故障\t泵通讯中断\t泵运行\tfalse\n2026-10-13\t10:12:01\t确认\t提示\t阀门开度超限\t阀门开度\t92',
     },
   },
   gauge: {
@@ -410,6 +461,128 @@ export function parseSeries(input: unknown): number[] {
     .split(/[,，\s]+/)
     .map((s) => Number(s))
     .filter((n) => Number.isFinite(n))
+}
+
+/**
+ * 趋势图元（trend / trendHistory）的多曲线绑定。
+ *
+ * 数据模型（工程 JSON）：
+ *   props.curves = [{ tagId, label?, color?, series?, min?, max? }]
+ * - 旧工程没有 curves 字段 → 返回空数组，调用方回退到"单曲线"路径
+ *   （旧的 valueOut / prop=value 绑定 + props.series），旧工程行为不变。
+ * - series 是运行时缓冲（实时趋势滚动窗口 / 历史趋势查询结果），与旧 props.series 同样由运行端写入。
+ */
+export interface TrendCurve {
+  tagId: string
+  /** 图例名；留空时图例显示 tagId */
+  label?: string
+  /** 曲线颜色；留空时按序号从内置色板取 */
+  color?: string
+  /** 该曲线的数据点（运行时写入） */
+  series?: number[]
+  /** 该曲线单独的 Y 轴量程；留空 = 按自身数据自动缩放（多曲线默认） */
+  min?: number
+  max?: number
+}
+
+/** 一个趋势图元最多绑定的曲线数 */
+export const TREND_MAX_CURVES = 8
+
+/** 多曲线内置配色（按曲线序号分配；单曲线仍用图元自己的 lineColor） */
+export const TREND_PALETTE: readonly string[] = [
+  '#22d3ee',
+  '#f59e0b',
+  '#a78bfa',
+  '#34d399',
+  '#f472b6',
+  '#60a5fa',
+  '#fbbf24',
+  '#f87171',
+]
+
+/** 真正绑定了变量的曲线 id（空行不算） */
+export function trendCurveTagIds(
+  props: Record<string, unknown> | undefined | null,
+): string[] {
+  return trendCurves(props)
+    .map((curve) => curve.tagId)
+    .filter((id): id is string => Boolean(id))
+}
+
+export function trendCurveColor(index: number): string {
+  const list = TREND_PALETTE
+  const i = ((Math.trunc(index) % list.length) + list.length) % list.length
+  return list[i] as string
+}
+
+function finiteOrUndefined(v: unknown): number | undefined {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : undefined
+}
+
+/**
+ * 读 props.curves（严格校验 + 去重 + 上限 8）。
+ * 非法项（无 tagId / 重复 tagId / 非对象）直接跳过，不让坏数据进渲染。
+ */
+export function trendCurves(props: Record<string, unknown> | undefined | null): TrendCurve[] {
+  const raw = props?.curves
+  if (!Array.isArray(raw)) return []
+  const out: TrendCurve[] = []
+  const seen = new Set<string>()
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const rec = item as Record<string, unknown>
+    const tagId = typeof rec.tagId === 'string' ? rec.tagId.trim() : ''
+    // 允许"尚未选变量"的空行（面板里刚添加的那一行），按 sentinel 去重；
+    // 渲染 / 订阅 / 进点都会跳过空行，不会画出东西来。
+    const dedupeKey = tagId || '__empty__'
+    if (seen.has(dedupeKey)) continue
+    seen.add(dedupeKey)
+    const label = typeof rec.label === 'string' && rec.label.trim() ? rec.label.trim() : undefined
+    const color = typeof rec.color === 'string' && rec.color ? rec.color : undefined
+    const series = Array.isArray(rec.series)
+      ? rec.series.map((n) => Number(n)).filter((n) => Number.isFinite(n))
+      : undefined
+    out.push({
+      tagId,
+      label,
+      color,
+      series,
+      min: finiteOrUndefined(rec.min),
+      max: finiteOrUndefined(rec.max),
+    })
+    if (out.length >= TREND_MAX_CURVES) break
+  }
+  return out
+}
+
+/**
+ * 曲线的 Y 轴范围。
+ * - 给了合理 min/max（max>min）→ 用它（单曲线沿用图元的 min/max）
+ * - 否则按数据范围；opts.pad=true（多曲线默认）时上下留 8% 边距，避免曲线贴边
+ * - 常值序列退化时给固定跨度，避免 0/0
+ */
+export function resolveTrendRange(
+  series: number[],
+  span?: { min?: unknown; max?: unknown },
+  opts?: { pad?: boolean },
+): { min: number; max: number } {
+  const lo = Number(span?.min)
+  const hi = Number(span?.max)
+  if (Number.isFinite(lo) && Number.isFinite(hi) && hi > lo) return { min: lo, max: hi }
+
+  if (!series.length) return { min: 0, max: 1 }
+  const dataMin = Math.min(...series)
+  const dataMax = Math.max(...series)
+  let min = dataMin
+  let max = dataMax
+  if (opts?.pad) {
+    const pad = (dataMax - dataMin) * 0.08 || Math.abs(dataMax) * 0.05 || 1
+    min = dataMin - pad
+    max = dataMax + pad
+  }
+  if (!(max > min)) max = min + 1
+  return { min, max }
 }
 
 /** 解析列表行（支持 Tab / | 分列） */

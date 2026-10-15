@@ -2,8 +2,11 @@ import type {
   DeviceMeta,
   ProjectDocument,
   PublishPackage,
+  TagAlarmConfig,
   TagMeta,
   TagValue,
+  ActiveAlarm,
+  AlarmEvent,
 } from '@web-scada/core'
 import type { ProjectIndexItem, PublishIndexItem } from '@/shared/storage/projectStorage'
 
@@ -294,6 +297,53 @@ export async function apiListTags(): Promise<{ items: TagMeta[]; values: TagValu
   return request('/tags')
 }
 
+export async function apiListAlarms(tagId?: string): Promise<{ items: TagAlarmConfig[] }> {
+  const q = tagId ? `?tagId=${encodeURIComponent(tagId)}` : ''
+  return request(`/alarms${q}`)
+}
+
+export async function apiAckAlarm(alarmId: string): Promise<{
+  ok: boolean
+  removed: boolean
+  alarm?: ActiveAlarm
+}> {
+  return request(`/alarms/${encodeURIComponent(alarmId)}/ack`, { method: 'POST' })
+}
+
+export async function apiListActiveAlarms(): Promise<{ items: ActiveAlarm[] }> {
+  return request('/alarms/active')
+}
+
+export async function apiListAlarmEvents(query?: {
+  tagId?: string
+  from?: number
+  to?: number
+  limit?: number
+}): Promise<{ items: AlarmEvent[] }> {
+  const params = new URLSearchParams()
+  if (query?.tagId) params.set('tagId', query.tagId)
+  if (query?.from != null) params.set('from', String(query.from))
+  if (query?.to != null) params.set('to', String(query.to))
+  if (query?.limit != null) params.set('limit', String(query.limit))
+  const q = params.toString()
+  return request(`/alarms/events${q ? `?${q}` : ''}`)
+}
+
+export async function apiCreateAlarm(body: TagAlarmConfig): Promise<TagAlarmConfig> {
+  return request('/alarms', { method: 'POST', body: JSON.stringify(body) })
+}
+
+export async function apiUpdateAlarm(alarmId: string, body: TagAlarmConfig): Promise<TagAlarmConfig> {
+  return request(`/alarms/${encodeURIComponent(alarmId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  })
+}
+
+export async function apiDeleteAlarm(alarmId: string): Promise<void> {
+  await request(`/alarms/${encodeURIComponent(alarmId)}`, { method: 'DELETE' })
+}
+
 export async function apiCreateTag(meta: TagMeta): Promise<TagMeta> {
   return request('/tags', { method: 'POST', body: JSON.stringify(meta) })
 }
@@ -343,10 +393,11 @@ export async function apiWriteTag(
 
 export async function apiGetTagHistory(
   tagId: string,
-  opts?: { start?: string; limit?: number },
+  opts?: { start?: string; stop?: string; limit?: number },
 ): Promise<{ tagId: string; points: Array<{ tagId: string; time: string; value: number | string | null; quality: string }> }> {
   const q = new URLSearchParams()
   if (opts?.start) q.set('start', opts.start)
+  if (opts?.stop) q.set('stop', opts.stop)
   if (opts?.limit) q.set('limit', String(opts.limit))
   const suffix = q.toString() ? `?${q}` : ''
   return request(`/tags/${encodeURIComponent(tagId)}/history${suffix}`)

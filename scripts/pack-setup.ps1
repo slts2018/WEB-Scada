@@ -1,15 +1,25 @@
 #Requires -Version 5.1
 <#
-  内嵌 Node + 编译 Inno Setup 安装包
-  用法: pnpm pack:setup
+  打包绿色版 + 编译 Inno Setup 安装包（Setup.exe）
+  Spring Boot + 内嵌 JRE + MariaDB + InfluxDB
 #>
+param()
+
 $ErrorActionPreference = 'Stop'
 $Root = Resolve-Path (Join-Path $PSScriptRoot '..')
 Set-Location $Root
 
-Write-Host '==> pack with embedded Node'
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'pack-windows.ps1') -IncludeNode
+$packScript = Join-Path $PSScriptRoot 'pack-windows.ps1'
+Write-Host '==> pack with Spring Boot + portable JRE + MariaDB + InfluxDB'
+$env:SCADA_BUNDLE_JRE = '1'
+$env:SCADA_BUNDLE_MYSQL = '1'
+$env:SCADA_BUNDLE_INFLUX = '1'
+& powershell -NoProfile -ExecutionPolicy Bypass -File $packScript -IncludeJava
 if ($LASTEXITCODE -ne 0) { throw 'pack-windows failed' }
+$sourceRel = 'release\WebScada-0.1.0-win-x64-java'
+$setupSuffix = ''
+$sourceAbs = Join-Path $Root $sourceRel
+if (-not (Test-Path $sourceAbs)) { throw "pack output missing: $sourceAbs" }
 
 $iscc = Join-Path $Root 'release\tools\InnoSetup\ISCC.exe'
 if (-not (Test-Path $iscc)) {
@@ -26,10 +36,13 @@ if (-not (Test-Path $iscc)) {
 }
 
 $iss = Join-Path $Root 'packaging\web-scada.iss'
-Write-Host "==> compile $iss"
-& $iscc $iss
+# Inno #define paths are relative to the .iss file location (packaging/)
+$sourceForIss = '..\' + ($sourceRel -replace '/', '\')
+Write-Host "==> compile $iss  SourceDir=$sourceForIss"
+& $iscc "/DSourceDir=$sourceForIss" "/DSetupSuffix=$setupSuffix" $iss
 if ($LASTEXITCODE -ne 0) { throw 'ISCC failed' }
 
-$setup = Join-Path $Root 'release\WebScada-Setup-0.1.0.exe'
+$setupName = if ($setupSuffix) { "WebScada-Setup-0.1.0$setupSuffix.exe" } else { 'WebScada-Setup-0.1.0.exe' }
+$setup = Join-Path $Root "release\$setupName"
 Write-Host ''
 Write-Host "OK: $setup"

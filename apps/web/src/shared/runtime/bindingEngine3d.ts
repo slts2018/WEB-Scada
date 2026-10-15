@@ -1,7 +1,78 @@
-import type { AnimationLink, Object3DNode, Page2D, Page3D, TagValue, Transform3D } from '@web-scada/core'
+import type {
+  AnimationLink,
+  AnimationLinkFlow,
+  Object3DNode,
+  Page2D,
+  Page3D,
+  TagValue,
+  Transform3D,
+} from '@web-scada/core'
 import { walkObject3dTree } from '@/shared/project/object3dTree'
 import { clonePlain } from '@/shared/utils/clonePlain'
 import { collectPageTagIds } from '@/shared/runtime/bindingEngine'
+import { resolveLiquidLevelFraction } from '@web-scada/core'
+
+/** 管道流动的运行态参数 */
+export interface ResolvedFlow {
+  /** 速度系数（变量量程映射结果；0 = 停流） */
+  factor: number
+  /** 满速速度（米/秒，带符号） */
+  speed: number
+  stripe?: number
+  color?: string
+  duty?: number
+  axis: 'auto' | 'x' | 'y' | 'z'
+  /** skin（默认）= 贴皮箭头（管壁两侧）；ribbon = 浮空平面；chevron = 发光斜箭；arrow = 锥形；stripe = 条纹 */
+  style: 'skin' | 'ribbon' | 'chevron' | 'arrow' | 'stripe'
+  /** 横向张开 0.3~1（1 = 整圈包裹） */
+  width: number
+  /** 斜箭粗细 0.06~0.5 */
+  thick: number
+  /** 浮空箭头长度（米，缺省自动） */
+  size?: number
+  /** 浮空箭头不透明度（缺省 0.85） */
+  alpha?: number
+  /** 光晕强度 0~1（缺省 0 = 纯色，不要光晕） */
+  glow: number
+}
+
+/** 解析流动连接：变量 → 速度系数（变量缺失/坏质量 = 停流） */
+export function resolveObject3DFlow(
+  object: Pick<Object3DNode, 'animationLinks'>,
+  getTag: (tagId: string) => TagValue | undefined,
+): ResolvedFlow | null {
+  const link = (object.animationLinks ?? []).find(
+    (l): l is AnimationLinkFlow => l.type === 'flow' && l.enabled,
+  )
+  if (!link) return null
+  const tag = getTag(link.tagId)
+  const n = tag ? asNumber(tag.value) : null
+  const bad = !tag || tag.quality === 'Bad' || tag.quality === 'Offline'
+  const factor = n === null || bad ? 0 : mapRange(n, link.inMin, link.inMax, link.outMin, link.outMax)
+  return {
+    factor,
+    speed: Number(link.speed) || 0,
+    stripe: link.stripe,
+    color: link.color,
+    duty: link.duty,
+    axis: link.axis ?? 'auto',
+    style:
+      link.style === 'stripe'
+        ? 'stripe'
+        : link.style === 'arrow'
+          ? 'arrow'
+          : link.style === 'chevron'
+            ? 'chevron'
+            : link.style === 'ribbon'
+              ? 'ribbon'
+              : 'skin',
+    width: Math.min(1, Math.max(0.3, Number(link.width) || 1)),
+    thick: Math.min(0.5, Math.max(0.06, Number(link.thick) || 0.22)),
+    size: link.size,
+    alpha: link.alpha,
+    glow: Math.min(1, Math.max(0, Number(link.glow) || 0)),
+  }
+}
 
 export interface ResolvedObject3D {
   object: Object3DNode
@@ -9,6 +80,10 @@ export interface ResolvedObject3D {
   /** 使能连接结果：false 时禁止运行端点击交互 */
   interactive: boolean
   quality: TagValue['quality'] | 'Good'
+  /** 0~1 液位（液位层专用；null = 变量缺失/质量差 → 隐藏液体） */
+  liquidLevel: number | null
+  /** 管道流动参数（无流动连接 = null） */
+  flow: ResolvedFlow | null
   /**
    * 动画/绑定/质量是否主动改了颜色。
    * GLTF 模型仅在此为 true 时才允许整模染色，否则保留原材质。
@@ -72,6 +147,7 @@ export const OBJECT3D_LINK_TYPES = [
   'digitalIn',
   'textIn',
   'enable',
+  'flow',
 ] as const
 export type Object3DLinkType = (typeof OBJECT3D_LINK_TYPES)[number]
 
@@ -179,6 +255,9 @@ function applyObject3DLink(
     return
   }
 
+  // 流动不改姿态/颜色，由渲染层按变量算速度
+  if (link.type === 'flow') return
+
   if (link.type === 'enable') {
     const truthy = Boolean(tag.value)
     flags.interactive = link.trueEnable ? truthy : !truthy
@@ -190,8 +269,10 @@ export function resolveObject3DVisual(
   source: Object3DNode,
   getTag: (tagId: string) => TagValue | undefined,
 ): ResolvedObject3D {
-  const object = clonePlain(source)
+  const object = clonePlain(source) as Object3DNode
   const flags = { blink: false, interactive: true, colorTinted: false }
+  /** 管道流动：变量 → 速度系数（缺省 1，用于设计端预览） */
+  const resolvedFlow = resolveObject3DFlow(object, getTag)
   let quality: ResolvedObject3D['quality'] = 'Good'
 
   for (const link of object.animationLinks ?? []) {
@@ -301,6 +382,16 @@ export function resolveObject3DVisual(
     }
   }
 
+  // 液位层：解析 0~1 液位；形状模式由裁剪面使用，图元模式用来兜空液位
+  let liquidLevel: number | null = null
+  if (object.liquid) {
+    liquidLevel = resolveLiquidLevelFraction(object.liquid, getTag(object.liquid.tagId))
+    object.liquid = { ...object.liquid, level: liquidLevel }
+    // 液体永远按液体色渲染（模型副本默认不整模刷色，这里显式打开）
+    flags.colorTinted = true
+    if (liquidLevel === null) quality = 'Uncertain'
+  }
+
   if (quality === 'Bad' || quality === 'Offline') {
     object.style = {
       ...object.style,
@@ -315,7 +406,9 @@ export function resolveObject3DVisual(
     blink: flags.blink,
     interactive: flags.interactive,
     quality,
+    liquidLevel,
     colorTinted: flags.colorTinted,
+    flow: resolvedFlow,
   }
 }
 

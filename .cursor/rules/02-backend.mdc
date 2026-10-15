@@ -1,37 +1,38 @@
 ---
-description: Fastify 后端编码规范（apps/server）
-globs: apps/server/**/*
+description: Spring Boot 后端编码规范（apps/server-java）
+globs: apps/server-java/**/*
 alwaysApply: false
 ---
 
-# 02 · 后端（Fastify）
+# 02 · 后端（Spring Boot）
 
 ## 技术事实
 
-- Fastify 5 + TypeScript + `tsx`
-- 持久化：`store.ts` 门面 → MySQL（`mysql2`）或 `store.file` 回退
-- Tag 运行时：`services/tagRuntime.ts`（内存 + 定时 + WS）
-- 配置：`.env` + 可选 `data/db-settings.json`
+- Spring Boot 3 + Java 17，目录 `apps/server-java`
+- HTTP 在 `web/`，业务在 `service/`，文件与 MySQL 在 `store/`、`db/`
+- 持久化：JdbcTemplate + Flyway；MySQL 不可用时文件回退（`MYSQL_FALLBACK_FILE`）
+- Tag 运行时：`TagRuntimeService`（内存 + 定时 + WebSocket）
+- 配置：`application.yml` 环境变量 + 可选 `data/db-settings.json`
 
-禁止擅自引入：Spring、新 ORM、Redis、MQ、换数据库驱动。
+禁止擅自引入：Redis、MQ、JPA/Hibernate、第二套 HTTP 服务。禁止改 `/api` 契约。
 
 ## 路由
 
-- 现状：多数路由在 `src/app.ts`；拆分时应按域放到 `routes/*`，**行为与路径不变**
-- 未经用户要求：禁止改 URL、Method、请求/响应字段、状态码语义、错误体形状
+- 按域放在 `web/*Controller`；**路径、Method、字段与现状一致**
+- 未经用户要求：禁止改 URL、请求/响应字段、状态码语义、错误体形状
 
 ## 错误与日志
 
-- 使用 Fastify `request.log` / `app.log`（pino），禁止生产路径 `console.log`
-- 业务失败：明确 `reply.code` + `{ error: '...' }`；新增错误码保持风格一致
-- 禁止空 catch；历史写入等容错必须保留原因注释，必要时打 warn（勿刷屏）
+- 使用 SLF4J；禁止在生产路径打印密码、Token、完整连接串
+- 业务失败保持现有 `ApiError` / `{ error }` 风格
+- 禁止空 catch；历史写入等容错必须保留原因，必要时打 warn（勿刷屏）
 
 ## 服务与并发
 
-- Tag `Map` + `setInterval` + WS 广播：改动前评估重入、堆积、泄漏
-- 禁止随意加线程池 / 无界 `Promise.all` / 无依据缓存
+- Tag 内存表 + 调度 + WS 广播：改动前评估重入、堆积、泄漏
+- 禁止随意加无界线程池或无依据缓存
 
 ## 资源上传
 
-- `projectId` 白名单、文件名 sanitize 逻辑必须保留
+- `projectId` 白名单、文件名 sanitize 必须保留
 - 勿取消路径安全检查；勿扩大静态目录暴露范围（除非用户要求）

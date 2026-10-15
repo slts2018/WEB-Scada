@@ -84,6 +84,10 @@ export function ensureObject3dPanelStyles() {
   box-sizing: border-box;
   overflow: hidden;
 }
+/* 世界 zoom 放大时尽量用高分位图，避免浏览器二次柔化 */
+.scada-3d-panel__konva canvas {
+  image-rendering: auto;
+}
 .scada-3d-panel__item {
   position: absolute;
   box-sizing: border-box;
@@ -655,6 +659,12 @@ export function buildObject3dPanelElement(
     },
     onDragWrite: (widgetId, axis, tagId, value) => {
       handlers.onDragWrite?.(node.id, widgetId, axis, tagId, value)
+    },
+    onAlarmAck: (alarmId) => {
+      if (handlers.designerMode) return
+      void import('@/stores/tag').then(({ useTagStore }) => {
+        void useTagStore().ackAlarm(alarmId)
+      })
     },
   })
   panelKonvaByHost.set(host, runtime)

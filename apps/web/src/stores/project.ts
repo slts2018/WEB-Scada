@@ -1,11 +1,15 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
+import type { AnimationLinkFlow } from '@web-scada/core'
 import {
   clonePageWithNewIds,
   createDefaultObject3DPanel,
   createEmptyProject,
   createGuideLine,
   createLayer2D,
+  createLiquidLevelNode,
+  LIQUID_DEFAULT_COLOR,
+  PRIMITIVE_SOURCE_SIZE_M,
   createObject3D,
   createPage2D,
   createPage3D,
@@ -17,11 +21,14 @@ import {
   normalizeObject3DPanel,
   normalizeProjectDocument,
   resolvePanelWidgets,
+  syncLiquidLevelNode,
   type BuiltinPrimitive3D,
   type BuiltinWidgetType,
   type DrawToolType,
   type Layer2D,
+  type LiquidLevelOptions,
   type Object3DNode,
+  type Object3DMaterial,
   type Page,
   type Page2D,
   type Page3D,
@@ -73,6 +80,10 @@ export const useProjectStore = defineStore('project', () => {
   /** 打开 Flight 风格「动画连接」对话框 */
   const animationConnectionOpen = ref(false)
   const animationConnectionTab = ref<'default' | 'property' | 'event'>('default')
+  /** 打开 3D「液位」配置对话框 */
+  const liquidConfigOpen = ref(false)
+  /** 打开 3D「管道流动」配置对话框 */
+  const flowConfigOpen = ref(false)
   /** 打开 3D「跟镜头面板」2D 内容弹窗编辑器 */
   const object3dPanelEditorOpen = ref(false)
   /** 面板编辑中的 3D 对象 id */
@@ -932,6 +943,26 @@ export const useProjectStore = defineStore('project', () => {
     animationConnectionOpen.value = false
   }
 
+  /** 打开「液位」配置对话框（选中罐体 = 新建；选中液位层 = 改配置） */
+  function openLiquidConfig() {
+    if (!activePage3d.value || !selectedObject3d.value) return
+    liquidConfigOpen.value = true
+  }
+
+  function closeLiquidConfig() {
+    liquidConfigOpen.value = false
+  }
+
+  /** 打开「管道流动」配置对话框（多选时对全部选中对象批量生效） */
+  function openFlowConfig() {
+    if (!activePage3d.value || !selectedObject3d.value) return
+    flowConfigOpen.value = true
+  }
+
+  function closeFlowConfig() {
+    flowConfigOpen.value = false
+  }
+
   /**
    * 打开跟镜头面板 2D 内容弹窗（真 Canvas2D，带返回/保存）。
    * 返回时还原快照；保存后同步面板宽高并回到原 3D 页。
@@ -956,11 +987,15 @@ export const useProjectStore = defineStore('project', () => {
       syncActiveLayerForPage(host3d.id)
     }
 
+    const target = findObject3dDeep(host3d.objects, id)
+    // 跟镜头面板仅用于纯面板对象（无模型）
+    if (!target?.panel || target.modelResourceId) return
+
     selectedObject3dIds.value = [id]
     const page = ensurePanelPage2d(id)
     if (!page) return
 
-    const objForSnap = findObject3dDeep(host3d.objects, id)
+    const objForSnap = target
     panelEditReturnPageId.value = host3d.id
     panelEditObjectId.value = id
     panelEditPageSnapshot.value = JSON.stringify(clonePlain(page))
@@ -1646,6 +1681,220 @@ export const useProjectStore = defineStore('project', () => {
     touch()
   }
 
+  /**
+   * 液位层：给罐体加一层液体（已有则原地更新），返回液位层节点。
+   * 几何按罐体尺寸自动算，液位由「位移 Y + 缩放 Y」两条连接从罐底往上长。
+   */
+  function addLiquidLevel(tankId: string, opts: LiquidLevelOptions): Object3DNode | null {
+    if (!opts.tagId) return null
+    const page = resolvePage3dForObject(tankId)
+    if (!page) return null
+    const loc = locateObject3d(page.objects, tankId)
+    if (!loc) return null
+    const tank = loc.list[loc.index]
+    pushHistory()
+    const exist = (tank.children ?? []).find((c) => c.liquid)
+    const node = exist
+      ? syncLiquidLevelNode(tank, exist, opts)
+      : createLiquidLevelNode(tank, opts)
+    const children = exist
+      ? (tank.children ?? []).map((c) => (c.id === node.id ? node : c))
+      : [...(tank.children ?? []), node]
+    loc.list[loc.index] = { ...tank, children }
+    selectedObject3dIds.value = [node.id]
+    bumpScene3d()
+    touch()
+    return node
+  }
+
+  /** 改液位层配置（变量 / 量程 / 颜色 / 形状 / 内缩 / 液体不透明度） */
+  function updateLiquidLevel(
+    liquidId: string,
+    opts: Partial<LiquidLevelOptions>,
+  ): Object3DNode | null {
+    const node = findObject3dById(liquidId)
+    if (!node?.liquid) return null
+    const tank = findObject3dById(node.liquid.tankId)
+    if (!tank) return null
+    const merged: LiquidLevelOptions = {
+      tagId: node.liquid.tagId,
+      inMin: node.liquid.inMin,
+      inMax: node.liquid.inMax,
+      color: node.liquid.color,
+      opacity: node.liquid.opacity,
+      shape: node.liquid.shape,
+      inset: node.liquid.inset,
+      ...opts,
+    }
+    if (!merged.tagId) return null
+    const next = syncLiquidLevelNode(tank, node, merged)
+    updateObject3d(liquidId, next)
+    return next
+  }
+
+  /**
+   * 一键生成「透明液位罐」预制件：半透明圆罐 + 液位层（液位层是罐壁子对象，改尺寸自动跟随）。
+   * 纯内置图元组合，不需要任何模型文件；变量可在属性栏「液位」里补选。
+   */
+  function addGlassLiquidTank(opts?: {
+    tagId?: string
+    name?: string
+    diameter?: number
+    height?: number
+  }): Object3DNode | null {
+    const page = activePage3d.value
+    if (!page) return null
+    pushHistory()
+    const dia = Math.max(0.2, Number(opts?.diameter) || 2)
+    const hgt = Math.max(0.2, Number(opts?.height) || 3)
+    const shell = createObject3D({ primitive: 'cylinder', name: opts?.name ?? '液位罐' })
+    shell.sourceSize = [...PRIMITIVE_SOURCE_SIZE_M.cylinder] as [number, number, number]
+    shell.sourceUnit = 'm'
+    shell.transform.scale = [dia / 0.9, hgt / 1.2, dia / 0.9]
+    const hint = spawnHint3d.value
+    const focus = page.camera?.target
+    shell.transform.position = [hint?.x ?? focus?.[0] ?? 0, hgt / 2, hint?.z ?? focus?.[2] ?? 0]
+    // 玻璃罐壁：半透明 + 双面，便于看到内部液位
+    shell.material = {
+      override: true,
+      opacity: 0.25,
+      color: shell.style?.color ?? '#a8c4d8',
+      side: 'double',
+      metalness: 0.05,
+      roughness: 0.25,
+    }
+    const node = createLiquidLevelNode(shell, {
+      tagId: opts?.tagId ?? '',
+      mode: 'primitive',
+      color: LIQUID_DEFAULT_COLOR,
+      opacity: 1,
+      shape: 'cylinder',
+      inset: 0.02,
+    })
+    shell.children = [node]
+    page.objects = [...page.objects, shell]
+    selectedObject3dIds.value = [node.id]
+    bumpScene3d({ frame: true })
+    touch()
+    return node
+  }
+
+  /**
+   * 管道流动：给一批对象加/改/删 flow 连接（可一次选中整张管网批量应用）。
+   * opts = null 表示移除。
+   */
+  function setObject3dFlow(
+    objectIds: string[],
+    opts: {
+      tagId: string
+      inMin: number
+      inMax: number
+      outMin?: number
+      outMax?: number
+      speed: number
+      stripe?: number
+      color?: string
+      duty?: number
+      axis?: 'auto' | 'x' | 'y' | 'z'
+      style?: 'skin' | 'ribbon' | 'chevron' | 'arrow' | 'stripe'
+      width?: number
+      thick?: number
+      size?: number
+      alpha?: number
+      glow?: number
+    } | null,
+  ) {
+    const ids = objectIds.filter(Boolean)
+    if (!ids.length) return
+    pushHistory()
+    for (const id of ids) {
+      const node = findObject3dById(id)
+      if (!node) continue
+      const others = (node.animationLinks ?? []).filter((l) => l.type !== 'flow')
+      if (!opts) {
+        updateObject3d(id, { animationLinks: others }, { recordHistory: false })
+        continue
+      }
+      const prev = (node.animationLinks ?? []).find(
+        (l) => l.type === 'flow',
+      ) as AnimationLinkFlow | undefined
+      const link: AnimationLinkFlow = {
+        id: prev?.id ?? `flow_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        type: 'flow',
+        enabled: true,
+        tagId: opts.tagId,
+        inMin: opts.inMin,
+        inMax: opts.inMax,
+        outMin: opts.outMin ?? 0,
+        outMax: opts.outMax ?? 1,
+        speed: opts.speed,
+        stripe: opts.stripe,
+        color: opts.color,
+        duty: opts.duty,
+        axis: opts.axis ?? 'auto',
+        style:
+          opts.style === 'stripe'
+            ? 'stripe'
+            : opts.style === 'arrow'
+              ? 'arrow'
+              : opts.style === 'chevron'
+                ? 'chevron'
+                : opts.style === 'ribbon'
+                  ? 'ribbon'
+                  : 'skin',
+        width: opts.width,
+        thick: opts.thick,
+        size: opts.size,
+        alpha: opts.alpha,
+        glow: opts.glow,
+      }
+      updateObject3d(id, { animationLinks: [...others, link] }, { recordHistory: false })
+    }
+    bumpScene3d()
+    touch()
+  }
+
+  /** 选中本页所有"用同一模型"的对象（一键选中整张管网） */
+  function selectObject3dsByModel(resourceId: string): number {
+    const page = activePage3d.value
+    if (!page || !resourceId) return 0
+    const ids: string[] = []
+    walkObject3dTree(page.objects, (obj) => {
+      if (obj.modelResourceId === resourceId) ids.push(obj.id)
+    })
+    if (!ids.length) return 0
+    selectedObject3dIds.value = ids
+    bumpScene3d()
+    return ids.length
+  }
+
+  /** 删除液位层 */
+  function removeLiquidLevel(liquidId: string) {
+    const node = findObject3dById(liquidId)
+    if (!node?.liquid) return
+    removeObject3d(liquidId)
+  }
+
+  /**
+   * 罐壁不透明度 0.05~1：做液位时通常调到 0.35 左右才看得见罐内液体。
+   * 只补 opacity 等字段，保留用户已有的材质改动与贴图。
+   */
+  function setObject3dShellOpacity(tankId: string, opacity: number) {
+    const tank = findObject3dById(tankId)
+    if (!tank) return
+    const prev = tank.material
+    const next: Object3DMaterial = {
+      ...(prev ?? {}),
+      override: true,
+      opacity: Math.min(1, Math.max(0.05, Number(opacity) || 1)),
+      color: prev?.color ?? tank.style?.color ?? '#94a3b8',
+      side: prev?.side ?? 'double',
+      metalness: prev?.metalness ?? 0.1,
+      roughness: prev?.roughness ?? 0.6,
+    }
+    updateObject3d(tankId, { material: next })
+  }
+
   /** 删除所有 3D 页中引用指定模型资源的对象 */
   function removeObjectsUsingModelResource(
     resourceId: string,
@@ -2328,7 +2577,7 @@ log('script ready · ' + (context.trigger || 'try'))
 
   /**
    * 导出网站部署包（Runtime + 工程发布快照 + 资源）。
-   * 需服务端且本机已有 win-x64 模板（pnpm pack:win:node 或 SCADA_SITE_TEMPLATE）。
+   * 需服务端且本机已有 win-x64-java 模板（pnpm pack:win 或 SCADA_SITE_TEMPLATE）。
    */
   async function exportSitePackage(): Promise<{ fileName: string }> {
     await probeStorage()
@@ -2472,6 +2721,8 @@ log('script ready · ' + (context.trigger || 'try'))
     gridVisible,
     animationConnectionOpen,
     animationConnectionTab,
+    liquidConfigOpen,
+    flowConfigOpen,
     object3dPanelEditorOpen,
     object3dModelEditorOpen,
     drawTool,
@@ -2521,6 +2772,10 @@ log('script ready · ' + (context.trigger || 'try'))
     setSelectedFlags,
     openAnimationConnection,
     closeAnimationConnection,
+    openLiquidConfig,
+    closeLiquidConfig,
+    openFlowConfig,
+    closeFlowConfig,
     openObject3dPanelEditor,
     closeObject3dPanelEditor,
     saveObject3dPanelEditor,
@@ -2566,6 +2821,14 @@ log('script ready · ' + (context.trigger || 'try'))
     updateObject3d,
     removeObject3d,
     removeObject3ds,
+    addLiquidLevel,
+    updateLiquidLevel,
+    removeLiquidLevel,
+    setObject3dShellOpacity,
+    addGlassLiquidTank,
+    setObject3dFlow,
+    selectObject3dsByModel,
+    findObject3dById,
     removeObjectsUsingModelResource,
     deleteModelResource,
     copySelectedObject3ds,

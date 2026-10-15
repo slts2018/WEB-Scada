@@ -5,8 +5,16 @@ defineProps<{
 </script>
 
 <template>
-  <el-tooltip :content="content" placement="top" :show-after="200">
-    <span class="help-tip" aria-label="说明" @click.stop>
+  <el-tooltip
+    v-if="content"
+    :content="content"
+    placement="top"
+    :show-after="150"
+    :hide-after="0"
+    effect="dark"
+    popper-class="scada-help-tip-popper"
+  >
+    <span class="help-tip" aria-label="说明" tabindex="0" @click.stop.prevent>
       <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
         <circle cx="8" cy="8" r="7" fill="none" stroke="currentColor" stroke-width="1.4" />
         <path
@@ -29,13 +37,16 @@ defineProps<{
   justify-content: center;
   width: 16px;
   height: 16px;
-  color: var(--el-text-color-secondary);
+  margin-left: 2px;
+  color: var(--scada-muted, var(--el-text-color-secondary));
   cursor: help;
   flex-shrink: 0;
   vertical-align: middle;
   border-radius: 50%;
 }
-.help-tip:hover {
-  color: var(--el-color-primary);
+.help-tip:hover,
+.help-tip:focus-visible {
+  color: var(--scada-accent, var(--el-color-primary));
+  outline: none;
 }
 </style>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { scadaPrompt } from '@/shared/ui/scadaMessageBox'
 import { useProjectStore } from '@/stores/project'
 
 const project = useProjectStore()
@@ -22,10 +23,8 @@ async function onAdd() {
 
 async function onRename(id: string, current: string) {
   try {
-    const { value } = await ElMessageBox.prompt('图层名称', '重命名图层', {
+    const { value } = await scadaPrompt('图层名称', '重命名图层', {
       inputValue: current,
-      confirmButtonText: '确定',
-      cancelButtonText: '取消',
     })
     const name = String(value ?? '').trim()
     if (name) project.renameLayer(id, name)

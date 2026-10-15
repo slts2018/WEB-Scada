@@ -155,6 +155,41 @@ export interface Object3DMaterial {
   }
 }
 
+/**
+ * 3D 对象的「液位层」配置（挂在液位层节点自身）。
+ * 节点是一块液体图元；几何与两条动画连接（位移 Y + 缩放 Y）由 factory/object3dLiquid 生成。
+ */
+export interface Object3DLiquidLevel {
+  /** 所属罐体对象 id */
+  tankId: string
+  /**
+   * 液体生成方式：
+   * - shape：复制罐体本身几何（可带模型），按世界水平面裁剪出液面 → **任意罐形自动贴合，零几何调参**（推荐）
+   * - primitive：内置圆柱/长方体图元，用「位移 Y + 缩放 Y」两条连接从罐底往上长（轻量，适合规则罐）
+   * 缺省按 primitive 处理（兼容早期数据）。
+   */
+  mode?: 'shape' | 'primitive'
+  /**
+   * 运行态解析出的液位（0~1），由 bindingEngine 每帧写入，仅内存、不落盘；
+   * null = 变量缺失/质量差 → 隐藏液体。
+   */
+  level?: number | null
+  /** 液位变量 */
+  tagId: string
+  /** 变量量程下限 → 0% */
+  inMin: number
+  /** 变量量程上限 → 100% */
+  inMax: number
+  /** 液体色 */
+  color: string
+  /** 液体不透明度 0~1 */
+  opacity: number
+  /** 液面形状：圆柱（圆罐）/ 长方体（方罐） */
+  shape: 'cylinder' | 'box'
+  /** 相对罐体内壁的内缩比例 0~0.25 */
+  inset: number
+}
+
 /** 3D 场景对象 */
 export interface Object3DNode {
   id: string
@@ -167,6 +202,11 @@ export interface Object3DNode {
    * 跟镜头 HTML 面板。可与图元/模型并存；仅面板时仍用小盒子作选中锚点。
    */
   panel?: Object3DPanel
+  /**
+   * 液位层（由「添加液位」生成；普通对象不设置）。
+   * 液位由两条动画连接（位移 Y + 缩放 Y）从罐底往上长，运行时沿用现有能力。
+   */
+  liquid?: Object3DLiquidLevel
   /**
    * 几何在 transform.scale=[1,1,1] 时的包围盒尺寸（sourceUnit 单位）。
    * 上传模型与内置图元默认均为米；可选 mm（少见）。

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { scadaConfirm } from '@/shared/ui/scadaMessageBox'
 import type {
   AnimationLinkInput,
   AnimationLinkRange,
@@ -29,6 +30,7 @@ import { useProjectStore } from '@/stores/project'
 import { useOutputLogStore } from '@/stores/outputLog'
 import WriteTagDialog from '@/components/dialogs/WriteTagDialog.vue'
 import { runPageScripts, runScriptSource, startPageScriptSchedules } from '@/shared/runtime/scriptEngine'
+import { createClickDblclickGate } from '@/shared/runtime/clickDblclickGate'
 
 const props = withDefaults(
   defineProps<{
@@ -62,6 +64,8 @@ const log = useOutputLogStore()
 let bundle: Scene3DBundle | null = null
 let removeListener: (() => void) | null = null
 let stopSchedules: (() => void) | null = null
+/** 同对象既有单击又有双击时，延时单击以免双击误触 */
+const clickDblGate = createClickDblclickGate()
 /** 闪烁中的对象最近一次解析结果 */
 const blinkVisuals = new Map<string, Object3DNode>()
 /** 闪烁对象是否允许整模染色（与 colorTinted 同步） */
@@ -478,16 +482,18 @@ function isObjectClickable(objectId: string): boolean {
   return objectHasClickAction(obj)
 }
 
+function objectExpectsDblclick(objectId: string): boolean {
+  const obj = resolveEventTarget(objectId)
+  if (!obj) return false
+  return (obj.events ?? []).some((e) => e.trigger === 'dblclick')
+}
+
 async function confirmWrite(tagId: string, value: string | number | boolean): Promise<boolean> {
   try {
     pushDiag(`弹写值确认框：${tagId} = ${String(value)}`)
-    await ElMessageBox.confirm(`确认写入「${tagId}」= ${String(value)}？`, '写值确认', {
-      type: 'warning',
+    await scadaConfirm(`确认写入「${tagId}」= ${String(value)}？`, '写值确认', {
       confirmButtonText: '确认写入',
-      cancelButtonText: '取消',
-      appendTo: document.body,
-      customClass: 'scada-runtime-write-confirm',
-      closeOnClickModal: false,
+      topLayer: true,
     })
     pushDiag(`确认框结果：用户确认 ${tagId} = ${String(value)}`)
     return true
@@ -611,10 +617,18 @@ onMounted(async () => {
     canInteract
       ? {
           onObjectClick: (id) => {
-            void handleObjectTrigger(id, 'click')
+            clickDblGate.scheduleClick(
+              id,
+              () => {
+                void handleObjectTrigger(id, 'click')
+              },
+              objectExpectsDblclick(id),
+            )
           },
           onObjectDblClick: (id) => {
-            void handleObjectTrigger(id, 'dblclick')
+            clickDblGate.triggerDblclick(id, () => {
+              void handleObjectTrigger(id, 'dblclick')
+            })
           },
           isObjectClickable,
           onRuntimeInteract: (info) => {
@@ -689,6 +703,7 @@ watch(
 onUnmounted(() => {
   writeResolver?.(null)
   writeResolver = null
+  clickDblGate.dispose()
   removeListener?.()
   removeListener = null
   stopSchedules?.()
@@ -789,16 +804,5 @@ onUnmounted(() => {
   font-size: 12px;
   color: var(--scada-muted);
   pointer-events: none;
-}
-</style>
-
-<style>
-/* MessageBox 挂到 body，提高运行弹窗内层级 */
-.scada-runtime-write-confirm {
-  z-index: 50000 !important;
-}
-.scada-runtime-write-confirm + .el-overlay,
-.el-overlay:has(.scada-runtime-write-confirm) {
-  z-index: 49999 !important;
 }
 </style>

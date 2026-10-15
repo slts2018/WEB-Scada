@@ -15,15 +15,20 @@ echo.
 >>"%OUT%" echo --- dir listing ---
 dir /b >>"%OUT%" 2>&1
 >>"%OUT%" echo.
->>"%OUT%" echo --- node ---
-if exist "runtime\node\node.exe" (
-  >>"%OUT%" echo portable node exists
-  "runtime\node\node.exe" -v >>"%OUT%" 2>&1
+>>"%OUT%" echo --- java ---
+if exist "server.jar" (
+  >>"%OUT%" echo server.jar exists
 ) else (
-  >>"%OUT%" echo no portable node
+  >>"%OUT%" echo server.jar missing
 )
-where node >>"%OUT%" 2>&1
-node -v >>"%OUT%" 2>&1
+if exist "jre\bin\java.exe" (
+  >>"%OUT%" echo portable jre exists
+  "jre\bin\java.exe" -version >>"%OUT%" 2>&1
+) else (
+  >>"%OUT%" echo no portable jre
+)
+where java >>"%OUT%" 2>&1
+java -version >>"%OUT%" 2>&1
 >>"%OUT%" echo.
 >>"%OUT%" echo --- port 8787 ---
 netstat -ano | findstr ":8787" >>"%OUT%" 2>&1

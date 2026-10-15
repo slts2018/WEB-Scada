@@ -1,6 +1,6 @@
 ---
 description: 性能约束（画布、实时、历史）
-globs: apps/web/**/*,apps/server/**/*
+globs: apps/web/**/*,apps/server-java/**/*
 alwaysApply: false
 ---
 
@@ -27,5 +27,5 @@ alwaysApply: false
 
 ## 禁止
 
-- 无界缓存、无界并发、同步阻塞事件循环的重活  
+- 无界缓存、无界并发、在请求线程上做重活  
 - 擅自加 Redis/本地缓存层“加速”

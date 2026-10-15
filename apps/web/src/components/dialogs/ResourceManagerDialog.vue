@@ -91,7 +91,7 @@ async function onReplaceFile(ev: Event) {
       <el-button size="small" :disabled="!orphanCount" @click="onCleanup">清理未引用</el-button>
     </div>
 
-    <el-table :data="project.document.resources" stripe height="380" size="small">
+    <el-table :data="project.document.resources" height="380" size="small">
       <el-table-column label="预览" width="72">
         <template #default="{ row }">
           <img

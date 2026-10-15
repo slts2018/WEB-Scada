@@ -22,6 +22,7 @@ import { useTagStore } from '@/stores/tag'
 import { createAnimationLink, createBinding } from '@/shared/runtime/bindingEngine'
 import { isObject3DLinkType } from '@/shared/runtime/bindingEngine3d'
 import { formatTagOptionLabel } from '@/shared/runtime/tagLabel'
+import HelpTip from '@/components/designer/HelpTip.vue'
 
 const project = useProjectStore()
 const tags = useTagStore()
@@ -58,6 +59,24 @@ const activeRangeLink = computed(() => {
 const linkTree = computed(() => (is3d.value ? OBJECT3D_LINK_TREE : ANIMATION_LINK_TREE))
 
 const linkLabelMode = computed(() => (is3d.value ? '3d' : '2d') as '2d' | '3d')
+
+/** 当前动画类型的备注（标题旁 ?） */
+const activeLinkTip = computed(() => {
+  const t = activeLink.value?.type
+  if (!t) return ''
+  if (t === 'dragH' || t === 'dragV' || t === 'dragZ') {
+    return is3d.value
+      ? '运行端拖拽对象写变量（多轴时：默认 X，Shift=Y，Alt=Z）；建议同时配置同向位移以便回显。'
+      : '运行端拖拽图元，按像素偏移写入变量；建议同时配置同向「水平/垂直移动」以便回显。'
+  }
+  if (t === 'valueIn' || t === 'digitalIn' || t === 'textIn') {
+    return '运行端点击图元写入绑定变量（模拟量/字符串弹出输入框）。'
+  }
+  if (t === 'enable') {
+    return '按变量控制图元是否可点击/拖拽（禁止使能）。'
+  }
+  return ''
+})
 
 /** 量程表单：输出步长（3D 位移/缩放 0.01，旋转按度 1） */
 const rangeStep = computed(() => {
@@ -597,7 +616,10 @@ function outLabel(type: AnimationLinkType): string {
 
         <template v-else-if="activeLink">
           <div class="form-head">
-            <span>{{ animationLinkTypeLabel(activeLink.type, linkLabelMode) }}</span>
+            <span class="cfg-label">
+              {{ animationLinkTypeLabel(activeLink.type, linkLabelMode) }}
+              <HelpTip :content="activeLinkTip" />
+            </span>
             <div class="head-actions">
               <el-checkbox
                 :model-value="activeLink.enabled"
@@ -640,20 +662,6 @@ function outLabel(type: AnimationLinkType): string {
           </template>
 
           <template v-else-if="activeRangeLink">
-            <p
-              v-if="
-                activeRangeLink.type === 'dragH' ||
-                activeRangeLink.type === 'dragV' ||
-                activeRangeLink.type === 'dragZ'
-              "
-              class="tip"
-            >
-              {{
-                is3d
-                  ? '运行端拖拽对象写变量（多轴时：默认 X，Shift=Y，Alt=Z）；建议同时配置同向位移以便回显。'
-                  : '运行端拖拽图元，按像素偏移写入变量；建议同时配置同向「水平/垂直移动」以便回显。'
-              }}
-            </p>
             <div class="field-row">
               <label class="field">
                 <span>变量最小值</span>
@@ -815,7 +823,6 @@ function outLabel(type: AnimationLinkType): string {
               activeLink.type === 'textIn'
             "
           >
-            <p class="tip">运行端点击图元写入绑定变量（模拟量/字符串弹出输入框）。</p>
             <label class="field">
               <el-checkbox
                 :model-value="activeLink.confirm !== false"
@@ -842,7 +849,6 @@ function outLabel(type: AnimationLinkType): string {
           </template>
 
           <template v-else-if="activeLink.type === 'enable'">
-            <p class="tip">按变量控制图元是否可点击/拖拽（禁止使能）。</p>
             <label class="field">
               <el-checkbox
                 :model-value="activeLink.trueEnable"
@@ -1013,11 +1019,11 @@ function outLabel(type: AnimationLinkType): string {
   padding: 24px;
 }
 
-.tip {
-  margin: 0;
-  font-size: 12px;
-  color: var(--scada-muted);
-  line-height: 1.5;
+.cfg-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  line-height: 1;
 }
 
 :deep(.el-input-number) {
@@ -1025,116 +1031,3 @@ function outLabel(type: AnimationLinkType): string {
 }
 </style>
 
-<style>
-/* 整窗深色：避免 Element Plus 默认白底 + 内容区黑底混用 */
-.anim-connection-dialog.el-dialog {
-  --el-dialog-bg-color: var(--scada-panel);
-  --el-bg-color: var(--scada-panel);
-  --el-bg-color-overlay: var(--scada-panel);
-  --el-fill-color-blank: var(--scada-bg);
-  --el-fill-color-light: #1e2430;
-  --el-text-color-primary: var(--scada-text);
-  --el-text-color-regular: var(--scada-text);
-  --el-text-color-secondary: var(--scada-muted);
-  --el-text-color-placeholder: #6b7280;
-  --el-border-color: var(--scada-border);
-  --el-border-color-light: var(--scada-border);
-  --el-border-color-lighter: var(--scada-border);
-  --el-color-primary: var(--scada-accent);
-  --el-disabled-bg-color: #1a1f29;
-  --el-disabled-border-color: var(--scada-border);
-  --el-disabled-text-color: #6b7280;
-  background: var(--scada-panel) !important;
-  border: 1px solid var(--scada-border);
-  border-radius: 10px;
-  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.45);
-}
-
-.anim-connection-dialog .el-dialog__header {
-  margin: 0;
-  padding: 14px 16px 10px;
-  border-bottom: 1px solid var(--scada-border);
-  background: var(--scada-panel);
-}
-
-.anim-connection-dialog .el-dialog__title {
-  color: var(--scada-text);
-  font-weight: 600;
-}
-
-.anim-connection-dialog .el-dialog__headerbtn .el-dialog__close {
-  color: var(--scada-muted);
-}
-
-.anim-connection-dialog .el-dialog__headerbtn:hover .el-dialog__close {
-  color: var(--scada-text);
-}
-
-.anim-connection-dialog .el-dialog__body {
-  padding: 12px 16px;
-  background: var(--scada-panel);
-  color: var(--scada-text);
-}
-
-.anim-connection-dialog .el-dialog__footer {
-  padding: 10px 16px 14px;
-  border-top: 1px solid var(--scada-border);
-  background: var(--scada-panel);
-}
-
-.anim-connection-dialog .el-checkbox__label,
-.anim-connection-dialog .el-radio-button__inner {
-  color: var(--scada-text);
-}
-
-.anim-connection-dialog .el-input__wrapper,
-.anim-connection-dialog .el-textarea__inner,
-.anim-connection-dialog .el-select__wrapper,
-.anim-connection-dialog .el-input-number .el-input__wrapper {
-  background-color: var(--scada-bg) !important;
-  box-shadow: 0 0 0 1px var(--scada-border) inset !important;
-}
-
-.anim-connection-select-dropdown.el-popper,
-.anim-connection-select-dropdown .el-select-dropdown {
-  background: var(--scada-panel, #171a21) !important;
-  border: 1px solid var(--scada-border, #2a2f3a) !important;
-  color: var(--scada-text, #e8eaed) !important;
-}
-
-.anim-connection-select-dropdown .el-select-dropdown__item {
-  color: var(--scada-text, #e8eaed);
-}
-
-.anim-connection-select-dropdown .el-select-dropdown__item.is-hovering,
-.anim-connection-select-dropdown .el-select-dropdown__item:hover {
-  background: rgba(61, 139, 253, 0.18);
-}
-
-.anim-connection-select-dropdown .el-select-dropdown__item.is-selected {
-  color: #93c5fd;
-  font-weight: 600;
-}
-
-.anim-connection-dialog .el-radio-button__inner {
-  background: var(--scada-bg);
-  border-color: var(--scada-border);
-  color: var(--scada-text);
-}
-
-.anim-connection-dialog .el-radio-button__original-radio:checked + .el-radio-button__inner {
-  background: rgba(61, 139, 253, 0.25);
-  border-color: var(--scada-accent);
-  color: #93c5fd;
-  box-shadow: none;
-}
-
-.anim-connection-dialog .el-button:not(.el-button--primary):not(.el-button--danger) {
-  --el-button-bg-color: var(--scada-bg);
-  --el-button-border-color: var(--scada-border);
-  --el-button-text-color: var(--scada-text);
-  --el-button-hover-bg-color: #1e2430;
-  --el-button-hover-border-color: var(--scada-accent);
-  --el-button-hover-text-color: #93c5fd;
-}
-</style>

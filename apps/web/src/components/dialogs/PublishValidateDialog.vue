@@ -45,7 +45,7 @@ function ok() {
         <span>警告 {{ result.warnings.length }}</span>
       </div>
 
-      <el-table v-if="result.issues.length" :data="result.issues" size="small" max-height="360" stripe>
+      <el-table v-if="result.issues.length" :data="result.issues" size="small" max-height="360">
         <el-table-column label="级别" width="80">
           <template #default="{ row }">
             <el-tag size="small" :type="row.level === 'error' ? 'danger' : 'warning'">

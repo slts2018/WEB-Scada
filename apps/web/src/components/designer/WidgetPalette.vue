@@ -366,9 +366,20 @@ async function onFileChange(e: Event) {
     inset 14px -5px 0 -2px #22d3ee, inset 22px -12px 0 -2px #22d3ee;
 }
 
+.icon[data-type='trendHistory'] {
+  background: #0b1220;
+  box-shadow: inset 0 -2px 0 #f59e0b, inset 6px -8px 0 -2px #f59e0b,
+    inset 14px -12px 0 -2px #f59e0b, inset 22px -4px 0 -2px #f59e0b;
+}
+
 .icon[data-type='alarm'] {
   background: linear-gradient(180deg, #7f1d1d 0 30%, #140f0f 30% 100%);
   border: 1px solid #991b1b;
+}
+
+.icon[data-type='alarmHistory'] {
+  background: linear-gradient(180deg, #1e3a5f 0 30%, #0c121b 30% 100%);
+  border: 1px solid #334155;
 }
 
 .icon[data-type='gauge'] {

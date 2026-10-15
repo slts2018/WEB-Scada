@@ -18,13 +18,16 @@ import {
   ConeGeometry,
   CylinderGeometry,
   DirectionalLight,
+  DoubleSide,
   Euler,
   GridHelper,
   Group,
   MathUtils,
+  Matrix3,
   Mesh,
   MeshStandardMaterial,
   MOUSE,
+  Plane,
   PerspectiveCamera,
   PlaneGeometry,
   Raycaster,
@@ -44,7 +47,14 @@ import { TransformControls } from 'three/examples/jsm/controls/TransformControls
 import { SelectionBox } from 'three/examples/jsm/interactive/SelectionBox.js'
 import { CSS2DObject, CSS2DRenderer } from 'three/examples/jsm/renderers/CSS2DRenderer.js'
 import type { Object3DNode, Page3D, Page3DPresentation, Transform3D } from '@web-scada/core'
-import { resolvePage3DPresentation } from '@web-scada/core'
+import {
+  resolveFlowAxisLocal,
+  resolveFlowRibbon,
+  resolveFlowSideBasis,
+  resolveFlowStripe,
+  resolvePage3DPresentation,
+  resolveSourceSize,
+} from '@web-scada/core'
 import { isAdditivePointer, installPointerModifierTracker } from '@/shared/designer/designerHotkeys'
 import { fitCameraToBox, unionObjectBoxes } from '@/shared/three/modelFit'
 import { classifyRuntimeTap } from '@/shared/three/runtimeTapGate'
@@ -53,6 +63,7 @@ import { applyScenePresentation } from '@/shared/three/scenePresentation'
 import {
   buildObject3dPanelElement,
   disposePanelKonvaRuntime,
+  getPanelKonvaRuntime,
   panelRuntimeIsInteractive,
   ensureObject3dPanelStyles,
   refreshPanelKonvaVisuals,
@@ -64,7 +75,26 @@ import {
   applyObject3DMaterial,
   clearObject3DMaterialMaps,
 } from '@/shared/three/object3dMaterialApply'
-import type { EventBinding, EventTrigger, Page2D, TagValue, Widget2D } from '@web-scada/core'
+import type {
+  AnimationLinkFlow,
+  EventBinding,
+  EventTrigger,
+  Page2D,
+  TagValue,
+  Widget2D,
+} from '@web-scada/core'
+import {
+  ensureFlowOnObject,
+  FLOW_DEFAULT_COLOR,
+  FLOW_DEFAULT_DUTY,
+  type FlowHandle,
+} from '@/shared/three/flowMaterial'
+import {
+  ensureFlowRibbon,
+  hideFlowRibbon,
+  updateFlowRibbon,
+} from '@/shared/three/flowRibbon'
+import type { ResolvedFlow } from '@/shared/runtime/bindingEngine3d'
 
 export type TransformGizmoMode = 'translate' | 'rotate' | 'scale'
 
@@ -456,6 +486,8 @@ export function createScene3D(
   camera.position.set(6, 5, 8)
 
   const renderer = new WebGLRenderer({ antialias: true })
+  // 液位层用材质级裁剪面（世界水平面）切液面，必须开局部裁剪
+  renderer.localClippingEnabled = true
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
   renderer.setSize(width, height, false)
   container.style.position = 'relative'
@@ -493,6 +525,36 @@ export function createScene3D(
   let resolveResourceUrlFn: ((resourceId: string) => string | undefined) | undefined
   /** 材质贴图异步加载取消 */
   const materialApplyCancel = new Map<string, () => void>()
+
+  /** 管道流动：按物体 id 记录材质句柄，tick 里推进时间并保持出帧 */
+  const flowObjects = new Map<string, FlowHandle>()
+  /** 算"管壁朝向相机那一面"的绕管角用的临时量（每帧复用，避免 GC） */
+  const flowFaceDir = new Vector3()
+  const flowFacePerp = new Vector3()
+  /**
+   * 贴皮箭头贴在"管壁朝向相机的那一点"上。
+   * 这一圈角度是每帧随相机变的，所以必须放在 tick 里算：
+   * 固定在某个角度上时，只要相机转到那个角的侧面，箭头就会跑到管子轮廓线上，
+   * 正面看只剩一条亮线（用户反馈的"箭头是贴皮，看着却是一条线 / 有光晕"）。
+   */
+  const updateFlowFaceAngles = () => {
+    for (const [id, handle] of flowObjects) {
+      const obj = objectMap.get(id)
+      if (!obj) continue
+      const u = handle.uniforms
+      if (u.uFlowEnabled.value <= 0.5) continue
+      flowFaceDir.subVectors(camera.position, u.uFlowCenter.value)
+      const along = flowFaceDir.dot(u.uFlowAxis.value)
+      flowFacePerp.copy(flowFaceDir).addScaledVector(u.uFlowAxis.value, -along)
+      if (flowFacePerp.lengthSq() < 1e-8) {
+        // 相机基本落在管子轴线上：这一帧没有"看得见的一面"，保持上一帧的角
+        continue
+      }
+      u.uFlowFaceAng.value =
+        Math.atan2(flowFacePerp.dot(u.uFlowB2.value), flowFacePerp.dot(u.uFlowB1.value)) /
+        Math.PI
+    }
+  }
 
   const controls = new OrbitControls(camera, renderer.domElement)
   // 组态操作要跟手：松手即停，不要惯性滑动
@@ -876,14 +938,20 @@ export function createScene3D(
     for (const h of selectionHelpers) h.update()
   }
 
-  const syncSelectionHelpers = (ids: string[]) => {
+  /** 超过这个数量就不逐个画选中框（管网批量常见 100+） */
+const SELECTION_BOX_LIMIT = 24
+
+const syncSelectionHelpers = (ids: string[]) => {
     clearSelectionHelpers()
     // 运行端无选中框：仅设计端（selectionHighlight）显示黄框
     if (!selectionHighlight || !ids.length) {
       invalidate()
       return
     }
-    for (const id of ids) {
+    // 多选很多时不铺一屋子黄框：管网批量会选中 100+ 根管子，逐个画黄框会糊成一大片，
+    // 看上去像"模型外壳突然变大"。这种情况下只框主选对象，数量看状态栏 / 属性栏。
+    const drawIds = ids.length > SELECTION_BOX_LIMIT ? ids.slice(0, 1) : ids
+    for (const id of drawIds) {
       const obj = objectMap.get(id)
       if (!obj) continue
       const h = new BoxHelper(obj, 0xffcc33)
@@ -1027,6 +1095,8 @@ export function createScene3D(
         wrap.style.zoom = String(s)
         wrap.style.transform = ''
       }
+      // Konva 画布不会随 zoom 重绘；提高 pixelRatio 抵消放大糊边
+      getPanelKonvaRuntime(pan.element as HTMLElement)?.setWorldScale(s)
     }
   }
 
@@ -1049,7 +1119,8 @@ export function createScene3D(
 
   const attachPanel = (node: Object3DNode, obj: Object3D) => {
     removePanel(node.id)
-    if (!node.panel || node.visible === false) return
+    // 跟镜头面板仅挂在纯面板对象上，不挂在带模型的图元上
+    if (!node.panel || node.modelResourceId || node.visible === false) return
     try {
       const el = buildObject3dPanelElement(node, panelDomHandlers())
       applyRuntimePanelPassthrough(el)
@@ -1358,6 +1429,10 @@ export function createScene3D(
       setMeshColor(obj, node.style.color, node.style.opacity ?? 1)
     }
     attachPanel(node, obj)
+    // 液位层：挂载时先按设计态半满预览出一版，避免「只有壳没有液」（实时预览会在之后覆盖真实液位）
+    if (node.liquid) applyLiquidVisual(obj, node)
+    // 流动：挂载时先按满速预览出一版（有实时预览/运行时会按变量速度覆盖）
+    if (flowFromRawNode(node)) applyFlowVisual(obj, node)
     // 按需渲染：挂上对象后必须刷一帧，否则要等拖拽/滚轮才看得见（远程慢加载时像黑屏）
     invalidate()
     for (const child of node.children ?? []) {
@@ -1569,6 +1644,224 @@ export function createScene3D(
     handlers.onSelect?.(objectId)
   }
 
+  /** 液位层裁剪用的世界水平面（保留 y <= 液面 的一侧） */
+  const LIQUID_PLANE_KEY = 'scadaLiquidPlane'
+  const LIQUID_MAT_KEY = 'scadaLiquidMatReady'
+  /**
+   * 液面法线：three 的裁剪保留 `法线·点 + 常数 >= 0` 的一侧，
+   * 液位保留「液面以下」，所以法线朝下（-Y），常数 = 液面世界高度。
+   */
+  const LIQUID_DOWN = new Vector3(0, -1, 0)
+  /**
+   * 液位层外观：
+   * - primitive：普通图元（位置/高度已由「位移 Y + 缩放 Y」两条连接算好）
+   * - shape：几何是罐体副本，用世界水平裁剪面切出液面 → **任意罐形自动贴合，无需逐罐调尺寸**
+   */
+  const applyLiquidVisual = (obj: Object3D, visual: Object3DNode) => {
+    const liquid = visual.liquid
+    if (!liquid) return
+    const color = visual.style?.color ?? '#38bdf8'
+    const opacity = Math.min(1, Math.max(0.05, visual.style?.opacity ?? 1))
+    /**
+     * level 三种情况：
+     * - number：运行态/实时预览解析出的液位
+     * - null  ：已解析但变量缺失/质量差 → 隐藏液体（不能拿假液位骗人）
+     * - undefined：未走解析（设计端关掉「实时预览」）→ 用半满做设计态预览
+     */
+    const DESIGN_PREVIEW_LEVEL = 0.5
+    const level =
+      typeof liquid.level === 'number'
+        ? Math.min(1, Math.max(0, liquid.level))
+        : liquid.level === null
+          ? null
+          : DESIGN_PREVIEW_LEVEL
+    const visible = visual.visible !== false
+
+    if ((liquid.mode ?? 'primitive') !== 'shape') {
+      obj.visible = visible
+      applyNodeShadowFlags(obj, visual)
+      setMeshColor(obj, color, opacity)
+    } else if (level === null) {
+      // 变量缺失/质量差：整层隐藏，避免留下上一帧的液面
+      obj.visible = false
+      setMeshEmissive(obj, null)
+      return
+    } else {
+      obj.visible = visible
+      // 父级刚改过变换时矩阵可能还没刷新，先保证世界矩阵是最新的再算世界包围盒
+      obj.updateWorldMatrix(true, false)
+      const box = new Box3().setFromObject(obj)
+      if (box.isEmpty()) return
+      const planeY = box.min.y + (box.max.y - box.min.y) * level
+      let plane = obj.userData[LIQUID_PLANE_KEY] as Plane | undefined
+      if (!plane) {
+        plane = new Plane()
+        obj.userData[LIQUID_PLANE_KEY] = plane
+      }
+      // 保留 y <= 液面（法线朝下 → -y + planeY >= 0）
+      plane.set(LIQUID_DOWN, planeY)
+      const firstSetup = obj.userData[LIQUID_MAT_KEY] !== true
+      obj.traverse((child) => {
+        const mesh = child as Mesh
+        if (!mesh.isMesh) return
+        // 裁剪后的几何与实际体积不符，投影会露馅 → 液体不投影
+        mesh.castShadow = false
+        mesh.receiveShadow = true
+        const list = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+        for (const mat of list) {
+          const std = mat as MeshStandardMaterial
+          if (!std || !std.isMeshStandardMaterial) continue
+          std.clippingPlanes = [plane!]
+          std.clipIntersection = false
+          std.side = DoubleSide
+          std.color = new Color(color)
+          std.opacity = opacity
+          std.transparent = opacity < 1
+          std.depthWrite = true
+          if (firstSetup) std.needsUpdate = true
+        }
+      })
+      obj.userData[LIQUID_MAT_KEY] = true
+    }
+
+    if (!selectionHighlight || !selectedIds.includes(visual.id)) {
+      setMeshEmissive(obj, visual.style?.emissive ?? null)
+    } else {
+      highlight(selectedIds)
+    }
+  }
+
+  /** 从原始节点（设计端未走解析/尚未刷 Tag）读流动参数：按满速预览 */
+  const flowFromRawNode = (visual: Object3DNode): ResolvedFlow | null => {
+    const resolved = (visual as Object3DNode & { flow?: ResolvedFlow | null }).flow
+    if (resolved !== undefined) return resolved
+    const link = (visual.animationLinks ?? []).find(
+      (l): l is AnimationLinkFlow => l.type === 'flow' && l.enabled,
+    )
+    if (!link) return null
+    return {
+      factor: 1,
+      speed: Number(link.speed) || 0,
+      stripe: link.stripe,
+      color: link.color,
+      duty: link.duty,
+      axis: link.axis ?? 'auto',
+      style:
+        link.style === 'stripe'
+          ? 'stripe'
+          : link.style === 'arrow'
+            ? 'arrow'
+            : link.style === 'chevron'
+              ? 'chevron'
+              : link.style === 'ribbon'
+                ? 'ribbon'
+                : 'skin',
+      width: Math.min(1, Math.max(0.3, Number(link.width) || 1)),
+      thick: Math.min(0.5, Math.max(0.06, Number(link.thick) || 0.22)),
+      size: link.size,
+      alpha: link.alpha,
+      glow: Math.min(1, Math.max(0, Number(link.glow) || 0)),
+    }
+  }
+
+  /**
+   * 管道流动：条纹沿「流向轴」按米间隔滚动。
+   * - 缺 UV 也能用：世界坐标 × 世界流向轴做伪 UV（同轴多段管相位连续）
+   * - 速度 = 基准速度 × 变量映射出的系数；系数 0 → 停流并隐藏条纹
+   */
+  const applyFlowVisual = (obj: Object3D, visual: Object3DNode) => {
+    const flow = flowFromRawNode(visual)
+    if (!flow) {
+      const stale = flowObjects.get(visual.id)
+      if (stale) {
+        stale.uniforms.uFlowEnabled.value = 0
+        flowObjects.delete(visual.id)
+      }
+      hideFlowRibbon(obj)
+      return
+    }
+    const handle = ensureFlowOnObject(obj)
+    flowObjects.set(visual.id, handle)
+    const size = resolveSourceSize(visual)
+    const localAxis = resolveFlowAxisLocal(flow.axis, size)
+    obj.updateWorldMatrix(true, false)
+    handle.uniforms.uFlowAxis.value
+      .set(localAxis[0], localAxis[1], localAxis[2])
+      .applyMatrix3(new Matrix3().setFromMatrix4(obj.matrixWorld))
+      .normalize()
+    // 绕轴基：箭头样式用"绕管一圈的角度"包裹整圈，任何视角都能看到
+    const axisWorld = handle.uniforms.uFlowAxis.value
+    const basis = resolveFlowSideBasis([axisWorld.x, axisWorld.y, axisWorld.z])
+    handle.uniforms.uFlowB1.value.set(basis.b1[0], basis.b1[1], basis.b1[2])
+    handle.uniforms.uFlowB2.value.set(basis.b2[0], basis.b2[1], basis.b2[2])
+    obj.getWorldPosition(handle.uniforms.uFlowCenter.value)
+    // 浮空平面箭头（ribbon）：管子表面不画，改在管子上方浮一块平面
+    if (flow.style === 'ribbon') {
+      handle.uniforms.uFlowEnabled.value = 0
+      const placement = resolveFlowRibbon(size, { stripe: flow.stripe, size: flow.size })
+      const axisScaled = new Vector3(localAxis[0], localAxis[1], localAxis[2]).applyMatrix3(
+        new Matrix3().setFromMatrix4(obj.matrixWorld),
+      )
+      const maxLocalDim = Math.max(size[0], size[1], size[2])
+      ensureFlowRibbon(obj, handle.uniforms.uFlowTime)
+      updateFlowRibbon(obj, {
+        center: obj.getWorldPosition(new Vector3()),
+        axisWorld: handle.uniforms.uFlowAxis.value.clone().normalize(),
+        worldLength: Math.max(0.05, maxLocalDim * axisScaled.length()),
+        width: placement.width,
+        lift: placement.lift,
+        sideOffset: placement.sideOffset,
+        headRatio: placement.headRatio,
+        period: placement.period,
+        color: new Color(flow.color ?? FLOW_DEFAULT_COLOR),
+        alpha: Math.min(1, Math.max(0.15, flow.alpha ?? 0.85)),
+        glow: Math.min(1, Math.max(0, flow.glow)),
+        phaseSpeed: (flow.speed * flow.factor) / placement.period,
+      })
+      schedule()
+      return
+    }
+    // 其余样式画在管子表面：先收掉浮空箭头
+    hideFlowRibbon(obj)
+    // 0 = 贴皮箭头，1 = 发光斜箭，2 = 锥形箭头，3 = 条纹
+    const isSkin =
+      flow.style !== 'stripe' && flow.style !== 'arrow' && flow.style !== 'chevron'
+    handle.uniforms.uFlowStyle.value =
+      flow.style === 'stripe'
+        ? 3
+        : flow.style === 'arrow'
+          ? 2
+          : flow.style === 'chevron'
+            ? 1
+            : 0
+    // 贴皮模式的"宽度"是两侧贴皮占管壁的角度半宽（0.1~0.5），其余样式是整圈包裹比例
+    handle.uniforms.uFlowWidth.value = isSkin
+      ? flow.width >= 0.9
+        ? 0.45
+        : Math.min(0.5, Math.max(0.12, flow.width))
+      : Math.min(1, Math.max(0.3, flow.width))
+    // 贴皮箭头：长度/间隔按"米"给（默认长箭头 + 稀疏），和浮空箭头同一套算法
+    handle.uniforms.uFlowThick.value = Math.min(0.5, Math.max(0.06, flow.thick))
+    // 光晕默认 0（纯色箭头）；调大才有亮芯 + 外圈柔光
+    handle.uniforms.uFlowGlow.value = Math.min(1, Math.max(0, flow.glow))
+    handle.uniforms.uFlowFreq.value = 1 / resolveFlowStripe(size, flow.stripe)
+    handle.uniforms.uFlowSpeed.value = flow.speed * flow.factor
+    handle.uniforms.uFlowDuty.value = Math.min(0.9, Math.max(0.05, flow.duty ?? FLOW_DEFAULT_DUTY))
+    // 贴皮箭头：长度/间隔按"米"给（默认长箭头 + 稀疏）—— 必须放在通用赋值之后，否则会被覆盖
+    if (isSkin) {
+      const skinPlace = resolveFlowRibbon(size, { stripe: flow.stripe, size: flow.size })
+      handle.uniforms.uFlowFreq.value = 1 / skinPlace.period
+      handle.uniforms.uFlowDuty.value = Math.min(
+        0.9,
+        Math.max(0.08, skinPlace.length / skinPlace.period),
+      )
+    }
+    handle.uniforms.uFlowColor.value.set(flow.color ?? FLOW_DEFAULT_COLOR)
+    handle.uniforms.uFlowIntensity.value = Math.abs(flow.factor) > 0.02 ? 1 : 0
+    handle.uniforms.uFlowEnabled.value = 1
+    schedule()
+  }
+
   const applyVisual = (
     objectId: string,
     visual: Object3DNode,
@@ -1602,6 +1895,13 @@ export function createScene3D(
     const isModel = Boolean(visual.modelResourceId)
     const opacity = visual.style?.opacity
     applyNodeShadowFlags(obj, visual)
+
+    // 液位层单独处理（形状模式要改材质裁剪面，不能走通用染色分支）
+    if (visual.liquid) {
+      applyLiquidVisual(obj, visual)
+      invalidate()
+      return
+    }
 
     if (visual.material?.override) {
       const cancel = applyObject3DMaterial(
@@ -1653,6 +1953,8 @@ export function createScene3D(
     } else if (pan) {
       removePanel(objectId)
     }
+    // 管道流动（加性效果，放在通用材质逻辑之后）
+    applyFlowVisual(obj, visual)
     invalidate()
   }
 
@@ -2467,10 +2769,22 @@ export function createScene3D(
       controls.enableDamping = restoreDampingAfterSuppress
       restoreDampingAfterSuppress = false
     }
+    // 管道流动：推进条纹相位；有流动在跑就必须持续出帧（按需渲染）
+    if (flowObjects.size) {
+      const seconds = now / 1000
+      for (const [id, handle] of flowObjects) {
+        if (!objectMap.has(id)) {
+          flowObjects.delete(id)
+          continue
+        }
+        handle.uniforms.uFlowTime.value = seconds
+      }
+      updateFlowFaceAngles()
+    }
     const canTickUpdate =
       !orbitPointer && !gizmoDragging && !runtimeDrag && !suppressing
     const damped = canTickUpdate ? controls.update() : false
-    const moving = continuousRender || damped
+    const moving = continuousRender || damped || flowObjects.size > 0
     if (lodDirty || damped || continuousRender) {
       for (const lod of lodList) lod.update(camera)
       lodDirty = false

@@ -147,6 +147,7 @@ function commitSelectionTransforms() {
   }
   bundle.transformer.forceUpdate()
   bundle.widgetLayer.batchDraw()
+  syncTrendCharts()
 }
 
 function bindWidgetEvents(group: Konva.Group) {
@@ -223,6 +224,7 @@ function bindWidgetEvents(group: Konva.Group) {
       }
     }
     bundle.transformer.forceUpdate()
+    syncTrendCharts(true)
   })
 
   group.on('dragend', () => {
@@ -234,6 +236,11 @@ function bindWidgetEvents(group: Konva.Group) {
   group.on('transformstart', () => {
     if (syncingFromModel) return
     dragHistoryPushed = false
+  })
+
+  group.on('transform', () => {
+    if (syncingFromModel) return
+    syncTrendCharts()
   })
 
   group.on('transformend', () => {
@@ -259,6 +266,11 @@ function renderAllWidgets() {
   if (boxRect) boxRect.moveToTop()
   bundle.widgetLayer.batchDraw()
   syncingFromModel = false
+  syncTrendCharts()
+}
+
+function syncTrendCharts(layoutOnly = false) {
+  bundle?.syncTrendOverlays(project.getActiveWidgets(), false, layoutOnly)
 }
 
 function ensureBoxRect() {
@@ -432,6 +444,7 @@ defineExpose({
 
 <style scoped>
 .panel-konva-board {
+  position: relative;
   width: 100%;
   height: 100%;
   min-height: 240px;

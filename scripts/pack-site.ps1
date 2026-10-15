@@ -4,12 +4,11 @@
   Usage:
     pnpm pack:site
     pnpm pack:site -- -ProjectId prj_xxx
-    pnpm pack:site -- -SkipPack -ProjectId prj_xxx   # reuse existing win-x64 folder
+    pnpm pack:site -- -SkipPack -ProjectId prj_xxx   # reuse existing win-x64-java folder
 #>
 param(
   [string]$ProjectId = '',
-  [switch]$SkipPack,
-  [switch]$IncludeNode = $true
+  [switch]$SkipPack
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,7 +16,7 @@ $Root = Resolve-Path (Join-Path $PSScriptRoot '..')
 Set-Location $Root
 
 $Version = '0.1.0'
-$BaseName = "WebScada-$Version-win-x64"
+$BaseName = "WebScada-$Version-win-x64-java"
 $SiteName = "WebScada-Site-$Version-win-x64"
 $ReleaseRoot = Join-Path $Root 'release'
 $BaseDir = Join-Path $ReleaseRoot $BaseName
@@ -26,15 +25,13 @@ $Tpl = Join-Path $Root 'packaging\templates'
 $DataRoot = Join-Path $Root 'apps\data'
 
 if (-not $SkipPack) {
-  Write-Host '==> pack base with portable Node'
-  $packArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'pack-windows.ps1'))
-  if ($IncludeNode) { $packArgs += '-IncludeNode' }
-  & powershell @packArgs
+  Write-Host '==> pack base (Spring Boot)'
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'pack-windows.ps1')
   if ($LASTEXITCODE -ne 0) { throw 'pack-windows failed' }
 }
 
-if (-not (Test-Path (Join-Path $BaseDir 'server.mjs'))) {
-  throw "Base pack missing: $BaseDir (run without -SkipPack, or pnpm pack:win:node first)"
+if (-not (Test-Path (Join-Path $BaseDir 'server.jar'))) {
+  throw "Base pack missing: $BaseDir (run without -SkipPack, or pnpm pack:win first)"
 }
 
 Write-Host "==> prepare site dir $OutDir"

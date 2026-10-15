@@ -1,7 +1,7 @@
 WebScada Site Package (Runtime website)
 
 What this is
-- A runnable Windows folder: Node server + web UI + one published project + resources.
+- A runnable Windows folder: Spring Boot server + web UI + one published project + resources.
 - NOT a single HTML file. Others open it in a browser over the network.
 
 On the server
@@ -28,6 +28,6 @@ Logs
 - diagnose.bat
 
 Rebuild site zip from repo
-- pnpm pack:win:node
+- pnpm pack:win
 - pnpm pack:site -- -ProjectId prj_xxx
   or Designer: File -> Export website package

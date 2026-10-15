@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { scadaConfirm } from '@/shared/ui/scadaMessageBox'
 import WorkbenchShell from '@/layouts/WorkbenchShell.vue'
 import Canvas2DBoard from '@/components/designer/Canvas2DBoard.vue'
 import Canvas3DBoard from '@/components/designer/Canvas3DBoard.vue'
@@ -29,6 +30,8 @@ import PublishValidateDialog from '@/components/dialogs/PublishValidateDialog.vu
 import AnimationConnectionDialog from '@/components/designer/AnimationConnectionDialog.vue'
 import Object3DModelEditorDialog from '@/components/designer/Object3DModelEditorDialog.vue'
 import Object3DPanelPageEditorDialog from '@/components/designer/Object3DPanelPageEditorDialog.vue'
+import Object3DLiquidDialog from '@/components/designer/Object3DLiquidDialog.vue'
+import Object3DFlowDialog from '@/components/designer/Object3DFlowDialog.vue'
 import { useProjectStore } from '@/stores/project'
 import { useOutputLogStore } from '@/stores/outputLog'
 import { useTagStore } from '@/stores/tag'
@@ -185,7 +188,7 @@ async function onExportSite() {
       if (body.error === 'site_template_missing') {
         ElMessage.warning(
           body.message ||
-            '缺少网站模板：请先在仓库执行 pnpm pack:win:node，或设置 SCADA_SITE_TEMPLATE',
+            '缺少网站模板：请先在仓库执行 pnpm pack:win，或设置 SCADA_SITE_TEMPLATE',
         )
         log.warn('导出网站失败：site_template_missing', '设计端')
       } else {
@@ -328,7 +331,7 @@ async function onOpenRuntime() {
   if (previewBusy.value) return
   let showGrid = false
   try {
-    await ElMessageBox.confirm('运行时是否显示地面网格？', '进入运行', {
+    await scadaConfirm('运行时是否显示地面网格？', '进入运行', {
       confirmButtonText: '显示网格',
       cancelButtonText: '不显示',
       distinguishCancelAndClose: true,
@@ -926,6 +929,8 @@ onUnmounted(() => {
   <AnimationConnectionDialog />
   <Object3DModelEditorDialog />
   <Object3DPanelPageEditorDialog />
+  <Object3DLiquidDialog />
+  <Object3DFlowDialog />
 
   <el-dialog
     v-model="scriptVisible"

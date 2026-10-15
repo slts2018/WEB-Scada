@@ -3,18 +3,28 @@ import { computed, ref } from 'vue'
 import {
   MOCK_TAG_METAS,
   createInitialMockValues,
+  effectiveTagSimulation,
+  simulationFollowsClock,
+  simulationSlot,
+  stepSimulatedValue,
+  type ActiveAlarm,
   type QualityCode,
   type TagMeta,
   type TagValue,
 } from '@web-scada/core'
+import { useDeviceStore } from './device'
 import {
   apiCreateTag,
   apiDeleteTag,
+  apiListActiveAlarms,
+  apiAckAlarm,
   apiListTags,
   apiUpdateTag,
   apiWriteTag,
   tagsWebSocketUrl,
 } from '@/shared/api/client'
+import { onAlarmHistoryLoaded, reloadAlarmHistoryQueries } from '@/shared/runtime/alarmHistoryQuery'
+import { onTrendHistoryLoaded, reloadTrendHistoryQueries } from '@/shared/runtime/trendHistoryQuery'
 
 type TagListener = (changedTagIds: string[]) => void
 
@@ -29,13 +39,18 @@ export const useTagStore = defineStore('tag', () => {
   const subscribed = ref<Set<string>>(new Set())
   const connected = ref(false)
   const mode = ref<'live' | 'mock'>('mock')
+  const activeAlarms = ref<ActiveAlarm[]>([])
   const listeners = new Set<TagListener>()
 
   let ws: WebSocket | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let mockTimer: ReturnType<typeof setInterval> | null = null
   let qualityTimer: ReturnType<typeof setInterval> | null = null
+  let historyTimer: ReturnType<typeof setInterval> | null = null
+  let historySoon: ReturnType<typeof setTimeout> | null = null
   let wantLive = false
+  const simSlots = new Map<string, number>()
+  const scanSlots = new Map<string, number>()
 
   const list = computed(() =>
     metas.value.map((meta) => ({
@@ -48,6 +63,9 @@ export const useTagStore = defineStore('tag', () => {
     if (!changed.length) return
     for (const listener of listeners) listener(changed)
   }
+
+  onAlarmHistoryLoaded(() => notify(['__alarm_history__']))
+  onTrendHistoryLoaded(() => notify(['__trend_history__']))
 
   function applyValues(list: TagValue[], silent = false) {
     const changed: string[] = []
@@ -78,6 +96,12 @@ export const useTagStore = defineStore('tag', () => {
       metas.value = res.items
       applyValues(res.values, true)
       mode.value = 'live'
+      try {
+        const alarms = await apiListActiveAlarms()
+        activeAlarms.value = alarms.items ?? []
+      } catch {
+        activeAlarms.value = []
+      }
       return true
     } catch {
       mode.value = 'mock'
@@ -159,36 +183,77 @@ export const useTagStore = defineStore('tag', () => {
     if (mockTimer) return
     mode.value = 'mock'
     mockTimer = setInterval(() => {
+      const devices = useDeviceStore()
+      const mockIds = new Set(
+        devices.items.filter((d) => d.enabled && d.protocol === 'mock').map((d) => d.deviceId),
+      )
       const changed: string[] = []
-      const maybe = (tagId: string, next: TagValue['value']) => {
-        if (subscribed.value.size && !subscribed.value.has(tagId)) return
-        values.value[tagId] = {
-          tagId,
+      const nowMs = Date.now()
+      for (const meta of metas.value) {
+        if (!meta.deviceId || !mockIds.has(meta.deviceId)) continue
+        if (subscribed.value.size && !subscribed.value.has(meta.tagId)) continue
+        const scan = Math.max(200, meta.scanPeriodMs ?? 1000)
+        const scanSlot = Math.floor(nowMs / scan)
+        if (scanSlots.get(meta.tagId) === scanSlot) continue
+        scanSlots.set(meta.tagId, scanSlot)
+        const sim = effectiveTagSimulation(meta)
+        if (!sim.enabled) continue
+        const slot = simulationFollowsClock(sim.mode) ? Math.floor(nowMs / 1000) : simulationSlot(nowMs, sim.periodSec)
+        if (simSlots.get(meta.tagId) === slot) continue
+        simSlots.set(meta.tagId, slot)
+        const cur = values.value[meta.tagId]
+        if (!cur) continue
+        const next = stepSimulatedValue(meta, cur.value, Math.random(), nowMs)
+        if (Object.is(next, cur.value)) continue
+        values.value[meta.tagId] = {
+          tagId: meta.tagId,
           value: next,
           quality: 'Good',
-          timestamp: Date.now(),
+          timestamp: nowMs,
         }
-        changed.push(tagId)
-      }
-      const temp = values.value['demo.temp']
-      if (temp && typeof temp.value === 'number') {
-        maybe('demo.temp', +(temp.value + (Math.random() - 0.5) * 0.8).toFixed(1))
-      }
-      const level = values.value['demo.level']
-      if (level && typeof level.value === 'number') {
-        const next = Math.min(100, Math.max(0, level.value + (Math.random() - 0.5) * 2))
-        maybe('demo.level', +next.toFixed(1))
-      }
-      const pressure = values.value['demo.pressure']
-      if (pressure && typeof pressure.value === 'number') {
-        maybe('demo.pressure', +(pressure.value + (Math.random() - 0.5) * 0.4).toFixed(1))
+        changed.push(meta.tagId)
       }
       if (changed.length) notify(changed)
-    }, 1000)
+    }, 200)
+  }
+
+  async function refreshAlarmHistory() {
+    if (mode.value !== 'live') return
+    try {
+      await Promise.all([reloadAlarmHistoryQueries(), reloadTrendHistoryQueries()])
+    } catch {
+      // 单个控件的失败已在查询里保留上一份
+    }
+  }
+
+  function scheduleHistoryRefresh() {
+    if (historySoon) return
+    historySoon = setTimeout(() => {
+      historySoon = null
+      void refreshAlarmHistory()
+    }, 400)
+  }
+
+  function startHistoryPoll() {
+    void refreshAlarmHistory()
+    if (historyTimer) return
+    historyTimer = setInterval(() => void refreshAlarmHistory(), 10000)
+  }
+
+  function stopHistoryPoll() {
+    if (historyTimer) {
+      clearInterval(historyTimer)
+      historyTimer = null
+    }
+    if (historySoon) {
+      clearTimeout(historySoon)
+      historySoon = null
+    }
   }
 
   function disconnectWs() {
     wantLive = false
+    stopHistoryPoll()
     if (reconnectTimer) {
       clearTimeout(reconnectTimer)
       reconnectTimer = null
@@ -205,14 +270,17 @@ export const useTagStore = defineStore('tag', () => {
     wantLive = true
     stopMockStream()
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+      startHistoryPoll()
       return
     }
 
     void hydrateFromServer().then((ok) => {
       if (!ok) {
+        stopHistoryPoll()
         startMockStream()
         return
       }
+      startHistoryPoll()
       try {
         ws = new WebSocket(tagsWebSocketUrl())
       } catch {
@@ -234,6 +302,10 @@ export const useTagStore = defineStore('tag', () => {
             type: string
             metas?: TagMeta[]
             values?: TagValue[]
+            active?: ActiveAlarm[]
+            raised?: ActiveAlarm[]
+            updated?: ActiveAlarm[]
+            cleared?: string[]
           }
           if (msg.type === 'tag.snapshot') {
             if (msg.metas?.length) metas.value = msg.metas
@@ -241,6 +313,21 @@ export const useTagStore = defineStore('tag', () => {
             notify(msg.values?.map((v) => v.tagId) ?? [])
           } else if (msg.type === 'tag.delta' && msg.values) {
             applyValues(msg.values)
+          } else if (msg.type === 'alarm.snapshot') {
+            activeAlarms.value = msg.active ?? []
+            notify(['__alarm__'])
+            scheduleHistoryRefresh()
+          } else if (msg.type === 'alarm.delta') {
+            const cleared = new Set(msg.cleared ?? [])
+            const next = activeAlarms.value.filter((a) => !cleared.has(a.alarmId))
+            for (const alarm of [...(msg.raised ?? []), ...(msg.updated ?? [])]) {
+              const idx = next.findIndex((a) => a.alarmId === alarm.alarmId)
+              if (idx >= 0) next[idx] = alarm
+              else next.push(alarm)
+            }
+            activeAlarms.value = next
+            notify(['__alarm__'])
+            scheduleHistoryRefresh()
           }
         } catch {
           // ignore
@@ -267,16 +354,39 @@ export const useTagStore = defineStore('tag', () => {
     connectRealtime()
   }
 
+  async function ackAlarm(alarmId: string): Promise<{ ok: boolean; message: string }> {
+    if (mode.value !== 'live') return { ok: false, message: '未连接服务，不能确认' }
+    try {
+      const res = await apiAckAlarm(alarmId)
+      if (res.removed) {
+        activeAlarms.value = activeAlarms.value.filter((a) => a.alarmId !== alarmId)
+      } else if (res.alarm) {
+        const next = activeAlarms.value.slice()
+        const idx = next.findIndex((a) => a.alarmId === alarmId)
+        if (idx >= 0) next[idx] = res.alarm
+        else next.push(res.alarm)
+        activeAlarms.value = next
+      }
+      notify(['__alarm__'])
+      scheduleHistoryRefresh()
+      return { ok: true, message: '已确认' }
+    } catch {
+      return { ok: false, message: '确认失败' }
+    }
+  }
+
   return {
     metas,
     values,
     list,
+    activeAlarms,
     subscribed,
     connected,
     mode,
     getValue,
     setValue,
     writeValue,
+    ackAlarm,
     setPageSubscription,
     clearPageSubscription,
     addListener,

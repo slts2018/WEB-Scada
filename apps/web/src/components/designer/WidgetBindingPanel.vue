@@ -22,14 +22,6 @@ const links = computed(() => widget.value?.animationLinks ?? [])
       </div>
     </div>
     <p v-else class="hint">也可在画布上右键 → 动画连接</p>
-    <div class="quick">
-      <el-button size="small" plain @click="project.openAnimationConnection('property')">
-        属性绑定
-      </el-button>
-      <el-button size="small" plain @click="project.openAnimationConnection('event')">
-        事件绑定
-      </el-button>
-    </div>
   </div>
 </template>
 
@@ -62,10 +54,5 @@ const links = computed(() => widget.value?.animationLinks ?? [])
   margin: 0;
   font-size: 12px;
   color: var(--scada-muted);
-}
-
-.quick {
-  display: flex;
-  gap: 6px;
 }
 </style>

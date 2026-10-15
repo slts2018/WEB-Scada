@@ -1,0 +1,2 @@
+ALTER TABLE tag_alarms
+  ADD COLUMN color VARCHAR(16) NULL;

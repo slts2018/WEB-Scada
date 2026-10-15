@@ -7,7 +7,7 @@ export function isTypingTarget(el: EventTarget | null): boolean {
   const tag = el.tagName
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
   if (el.isContentEditable) return true
-  if (el.closest('.el-input, .el-textarea, .el-select, .el-input-number')) return true
+  if (el.closest('.el-input, .el-textarea, .el-select, .el-input-number, .el-date-editor, .el-picker-panel, .history-search')) return true
   return false
 }
 

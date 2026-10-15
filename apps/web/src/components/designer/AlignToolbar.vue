@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { useProjectStore } from '@/stores/project'
 import type { AlignMode } from '@/shared/designer/geometry'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
+import { scadaPrompt } from '@/shared/ui/scadaMessageBox'
 import {
   ArrowDownBold,
   ArrowLeftBold,
@@ -51,10 +52,9 @@ async function saveSymbol() {
       project.selectedWidgetIds.length > 1
         ? '组合符号'
         : project.selectedWidget?.name || '符号'
-    const { value } = await ElMessageBox.prompt('符号名称（多选将先自动组合）', '存为符号', {
+    const { value } = await scadaPrompt('符号名称（多选将先自动组合）', '存为符号', {
       inputValue: def,
       confirmButtonText: '保存',
-      cancelButtonText: '取消',
     })
     const name = String(value ?? '').trim()
     if (!name) return

@@ -9,21 +9,22 @@ alwaysApply: true
 
 ```text
 apps/web          Vue3 + Vite + Pinia + Konva/Three  （Designer / Runtime）
-apps/server       Fastify + mysql2 + Influx client   （API / WS / 资源）
+apps/server-java  Spring Boot 3（唯一后端 · `pnpm dev`）
 packages/core     共享契约（工程模型、Tag、动画连接、发布包）
 ```
 
-- 包管理：pnpm workspace；Node >= 20  
-- **不是** Java/Spring；禁止擅自改成 Spring/微服务  
+- 包管理：pnpm workspace；前端构建 Node >= 20；后端 JDK 17+  
+- **后端只有 Spring Boot**。禁止再引入第二套 HTTP 服务，禁止改 `/api` 契约  
+- 安装包：`pnpm pack:win`（与 `pack:win:java` 相同，产物 `server.jar`）
 
 ## 依赖方向
 
 ```text
 core ← web
-core ← server
+server-java 与 core 的 JSON / Tag / 发布包契约对齐（Java 不编译依赖 TS 包）
 ```
 
-禁止 `core` 依赖 web/server。业务类型优先放 `packages/core`。
+禁止 `core` 依赖 web 或 server-java。业务类型优先放 `packages/core`。
 
 ## 前后端边界
 
@@ -32,14 +33,13 @@ core ← server
 | web views/components | UI、交互 | 直连 DB、绕过 api client 拼底层 URL 混乱 |
 | web stores | 编辑态/运行态状态 | 复制一份与 core 冲突的工程模型 |
 | web shared/runtime | 绑定/动画解析 | 擅自改执行语义 |
-| server app/routes | HTTP/WS 入口 | 路由里堆复杂业务（逐步拆到 services） |
-| server services/db/store | 持久化、Tag 运行时、资源 | 改写契约字段含义 |
+| server-java web | HTTP/WS 入口 | 控制器里堆复杂业务（放到 service） |
+| server-java service/db/store | 持久化、Tag 运行时、资源 | 改写契约字段含义 |
 
 ## God 文件（已知，勿一次性重写）
 
 - `apps/web/src/stores/project.ts`
 - `apps/web/src/components/designer/Canvas2DBoard.vue`
-- `apps/server/src/app.ts`
 
 拆分必须：划界 → 抽最安全部分 → typecheck → 再继续。
 
