@@ -20,7 +20,11 @@ import { clonePlain } from '@/shared/utils/clonePlain'
 import { useTagStore } from '@/stores/tag'
 import { formatActiveAlarmItems, formatAlarmHistoryItems } from '@/shared/runtime/alarmText'
 import { alarmHistoryEvents, alarmHistoryQuery, requestAlarmHistory } from '@/shared/runtime/alarmHistoryQuery'
-import { requestTrendHistory, trendHistorySeries } from '@/shared/runtime/trendHistoryQuery'
+import {
+  appendTrendHistoryLivePoint,
+  requestTrendHistory,
+  trendHistorySeries,
+} from '@/shared/runtime/trendHistoryQuery'
 import { pushCurveSample, pushLiveSeries, retainCurveTimeWindow } from '@/shared/runtime/trendSeries'
 
 export interface ResolvedVisual {
@@ -245,8 +249,24 @@ function applyTrendLiveSample(widget: Widget2D, tag: TagValue): boolean {
   return true
 }
 
+/**
+ * 历史曲线末端接实时值：窗口还在"跟随最新"时，把当前实时点接到曲线末端。
+ * 否则曲线末尾会比页面上的实时值旧几秒（历史写入 + 轮询刷新都有延迟）。
+ */
+function feedHistoryLiveTail(
+  widgetId: string,
+  tagIds: string[],
+  tags: { getValue: (tagId: string) => TagValue | undefined },
+): void {
+  for (const tagId of tagIds) {
+    const tag = tags.getValue(tagId)
+    if (!tag || !Number.isFinite(tag.timestamp)) continue
+    appendTrendHistoryLivePoint(widgetId, tagId, tag.timestamp, asNumber(tag.value), tag.quality ?? null)
+  }
+}
+
 /** 历史趋势的旧路径：单曲线（props.series） */
-function liveTrendHistory(widget: Widget2D): number[] | null {
+function liveTrendHistory(widget: Widget2D): Array<number | null> | null {
   try {
     const tags = useTagStore()
     if (tags.mode !== 'live') return null
@@ -254,7 +274,8 @@ function liveTrendHistory(widget: Widget2D): number[] | null {
     if (!tagId) return null
     const start = String(widget.props.range ?? '-1h')
     const limit = Math.max(10, Math.min(2000, Number(widget.props.maxPoints) || 240))
-    requestTrendHistory(widget.id, tagId, start, limit)
+    requestTrendHistory(widget.id, tagId, start, limit, String(widget.props.historyInterval ?? 'auto'))
+    feedHistoryLiveTail(widget.id, [tagId], tags)
     return trendHistorySeries(widget.id, tagId) ?? null
   } catch {
     return null
@@ -268,14 +289,17 @@ function liveTrendHistoryCurves(widget: Widget2D, curves: TrendCurve[]): TrendCu
     if (tags.mode !== 'live') return null
     const start = String(widget.props.range ?? '-1h')
     const limit = Math.max(10, Math.min(2000, Number(widget.props.maxPoints) || 240))
+    const interval = String(widget.props.historyInterval ?? 'auto')
     let loaded = false
     const next = curves.map((curve) => {
-      requestTrendHistory(widget.id, curve.tagId, start, limit)
+      requestTrendHistory(widget.id, curve.tagId, start, limit, interval)
       const series = trendHistorySeries(widget.id, curve.tagId)
       if (!series) return curve
       loaded = true
-      return { ...curve, series }
+      // props.curves[].series 的契约是数字数组（缺口只在运行时数据层），这里过滤掉 null
+      return { ...curve, series: series.filter((v): v is number => typeof v === 'number') }
     })
+    if (loaded) feedHistoryLiveTail(widget.id, curves.map((curve) => curve.tagId), tags)
     return loaded ? next : null
   } catch {
     return null
@@ -632,7 +656,8 @@ export function resolveWidgetVisual(
     } else {
       const series = liveTrendHistory(widget)
       if (series != null) {
-        widget.props = { ...widget.props, series: series.join(',') }
+        // props.series 是逗号分隔的数字串，缺口（null）不能进字符串
+        widget.props = { ...widget.props, series: series.filter((v) => typeof v === 'number').join(',') }
       }
     }
   }

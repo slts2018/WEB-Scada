@@ -3,6 +3,7 @@ import { trendCurves, type Page2D, type Widget2D } from '@web-scada/core'
 import { attachTrendChartInteraction } from '@/shared/konva/trendChartInteraction'
 import { setTrendZoom } from '@/shared/konva/trendChart'
 import { createTrendLiveOverlay } from '@/shared/konva/trendChartLive'
+import { createTrendHistoryZoomBridge } from '@/shared/konva/trendHistoryZoom'
 import { syncNativeTrendCharts } from '@/shared/konva/trendNativeCharts'
 import { setHiddenCurves, syncWidgetNode } from '@/shared/konva/widgetNodes'
 
@@ -162,7 +163,14 @@ export function createKonvaStage(
     },
     onZoom: (widgetId, zoom) => {
       setTrendZoom(widgetId, { start: zoom.start, end: zoom.end })
+      historyZoom.handleZoom(widgetId, zoom)
     },
+    onReset: (widgetId) => historyZoom.handleReset(widgetId),
+  })
+
+  const historyZoom = createTrendHistoryZoomBridge({
+    resolveWidget: (id) => options.resolveWidget?.(id),
+    repaint: () => flushTrend(false),
   })
 
   let trendWidgets: Widget2D[] = []
@@ -365,6 +373,7 @@ export function createKonvaStage(
       y: stage.y(),
     }),
     dispose: () => {
+      historyZoom.dispose()
       trendLiveOverlay.dispose()
       ro.disconnect()
       window.removeEventListener('keydown', onKeyDown)

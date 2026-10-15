@@ -9,6 +9,7 @@ import {
 } from '@/shared/konva/widgetNodes'
 import { setTrendZoom } from '@/shared/konva/trendChart'
 import { createTrendLiveOverlay } from '@/shared/konva/trendChartLive'
+import { createTrendHistoryZoomBridge } from '@/shared/konva/trendHistoryZoom'
 import { syncNativeTrendCharts } from '@/shared/konva/trendNativeCharts'
 import { attachTrendChartInteraction } from '@/shared/konva/trendChartInteraction'
 import {
@@ -144,7 +145,15 @@ export function createRuntimeStage(
     },
     onZoom: (widgetId, zoom) => {
       setTrendZoom(widgetId, { start: zoom.start, end: zoom.end })
+      // 历史趋势：缩放/框选结束后按新窗口重查（否则放大后点数不够）
+      historyZoom.handleZoom(widgetId, zoom)
     },
+    onReset: (widgetId) => historyZoom.handleReset(widgetId),
+  })
+
+  const historyZoom = createTrendHistoryZoomBridge({
+    resolveWidget: (id) => sourceWidgetOf(id),
+    repaint: () => syncTrendOverlays(),
   })
 
   /** 同步原生 ECharts：位置、数据，以及位图是否还要画 */
@@ -602,6 +611,7 @@ export function createRuntimeStage(
     },
     setChartInteraction: (on: boolean) => trendInteraction.setEnabled(on),
     dispose: () => {
+      historyZoom.dispose()
       trendLiveOverlay.dispose()
       clearAllBlink()
       clearInterval(alarmBlinkTimer)

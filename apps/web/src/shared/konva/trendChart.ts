@@ -42,6 +42,12 @@ export interface TrendChartSpec {
   height: number
   title?: string
   rangeLabel?: string
+  /** 顶部要给 HTML 工具栏留出的高度（图表 CSS 像素；0/缺省 = 不留） */
+  chromeTop?: number
+  /** 底部数据区域缩放滑块（仅历史趋势 + 原生叠层） */
+  slider?: boolean
+  /** 工具箱里的“框选放大” */
+  selectZoom?: boolean
   /** 单曲线的固定量程；多曲线传 undefined = 每条曲线按自身数据自动缩放 */
   min?: number
   max?: number
@@ -90,6 +96,8 @@ export interface TrendChartLayout {
   titleFont: number
   tickFont: number
   grid: { left: number; right: number; top: number; bottom: number; width: number; height: number }
+  /** 底部滑块占的高度（0 = 没有） */
+  sliderHeight: number
 }
 
 
@@ -125,19 +133,24 @@ export function trendChartLayout(spec: TrendChartSpec): TrendChartLayout {
   // 原生模式还要给 ECharts 自带图例留出**实际行数**（它会自动换行）
   const legendRowHeight = Math.round(tickFont * 1.5)
   const legendRows = spec.native ? estimateLegendRows(spec, tickFont, width - 16 * S) : 0
-  const top = titleTop + Math.round(tickFont * 0.65) + legendRows * legendRowHeight
+  // 顶部还要给 HTML 工具栏（区间/跟随/导出）让位
+  const chromeTop = Math.max(0, Math.round(Number(spec.chromeTop) || 0))
+  const top = titleTop + Math.round(tickFont * 0.65) + legendRows * legendRowHeight + chromeTop
   const left = Math.max(30 * S, Math.round(F * 2.4))
   // 右侧留出半个时间标签的宽度，否则最后一个刻度会被裁掉
   const right = Math.max(12 * S, Math.round(F * 2))
   // 横轴刻度要够放：不然最左边的 y 轴刻度会和时间标签叠在一起
   const axisH = Math.max(18 * S, Math.round(F * 1.7))
-  // 底部只留横轴刻度：不再放数据区域缩放滑块（绘图区高度全给曲线）
-  const bottom = axisH
+  // 底部默认只留横轴刻度（绘图区高度全给曲线）；
+  // 历史趋势另外给底部滑块留一条（spec.slider），否则滑块会压掉时间轴
+  const sliderHeight = spec.slider ? Math.max(22 * S, Math.round(F * 1.6)) : 0
+  const bottom = axisH + sliderHeight
 
   return {
     fontSize: F,
     titleFont,
     tickFont,
+    sliderHeight,
     grid: {
       left,
       right,
@@ -368,8 +381,26 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
     // 原生模式：dataZoom（滚轮 + 底部滑块）与 toolbox（保存图片）都是 ECharts 自带，鼠标直接可用
     dataZoom: spec.native
       ? [
-          // 只保留绘图区内的滚轮/拖拽缩放，不要再放底部那条数据区域缩放滑块
+          // 绘图区内：滚轮缩放 + 拖拽平移（实时趋势从头到尾只有这一条）
           { type: 'inside', xAxisIndex: 0, filterMode: 'none', minValueSpan: 3000 },
+          // 历史趋势再加底部滑块：拖两端缩放、拖中间平移（现场查数据最常用）
+          ...(spec.slider
+            ? [
+                {
+                  type: 'slider',
+                  xAxisIndex: 0,
+                  filterMode: 'none',
+                  bottom: 2,
+                  height: Math.max(12, Math.round(layout.sliderHeight - 8)),
+                  borderColor: axisColor,
+                  textStyle: { color: axisColor, fontSize: tickFont },
+                  fillerColor: 'rgba(61,139,253,0.16)',
+                  handleStyle: { color: axisColor },
+                  moveHandleSize: 4,
+                  brushSelect: false,
+                },
+              ]
+            : []),
         ]
       : undefined,
     toolbox: spec.native
@@ -381,6 +412,15 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
           emphasis: { iconStyle: { borderColor: '#e2e8f0' } },
           feature: {
             saveAsImage: { title: '导出图片', name: '', pixelRatio: 2, backgroundColor: 'transparent' },
+            // 历史趋势：框选放大（选中一段直接缩放）
+            ...(spec.selectZoom
+              ? {
+                  dataZoom: {
+                    yAxisIndex: 'none',
+                    title: { zoom: '框选放大', back: '取消框选' },
+                  },
+                }
+              : {}),
           },
         }
       : undefined,

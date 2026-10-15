@@ -11,6 +11,7 @@ import {
   chartFontSize,
   setTrendChartRendered,
 } from '@/shared/konva/widgetNodes'
+import { TREND_TOOLBAR_H } from '@/shared/runtime/trendHistoryQuery'
 
 /** 旋转或自带点击事件的图元仍走位图：叠层会挡拖拽 / 业务点击。 */
 export function widgetUsesNativeTrend(widget: Widget2D): boolean {
@@ -52,10 +53,13 @@ export function syncNativeTrendCharts(opts: {
       Math.max(20, widget.transform.width),
       Math.max(20, widget.transform.height),
     )
+    // 历史趋势的 HTML 工具栏挂在图元顶部：图表要把这一条空出来，否则会被工具栏盖住
+    const showToolbar = widget.type === 'trendHistory' && widget.props.showToolbar !== false
     const spec = buildTrendLiveSpec(widget, {
       width: rect.width,
       height: rect.height,
       fontSize: Math.max(10, pageFont * scale),
+      chromeTop: showToolbar ? Math.round(TREND_TOOLBAR_H * scale) : 0,
     })
     spec.zoom = trendZoomOf(widget.id) ?? undefined
     slots.push({

@@ -9,6 +9,7 @@ import type {
   Page3D,
   Widget2D,
 } from '@web-scada/core'
+import { trendCurves } from '@web-scada/core'
 import { createRuntimeStage, type RuntimeStageBundle } from '@/shared/konva/createRuntimeStage'
 import {
   collectPageTagIds,
@@ -24,7 +25,9 @@ import WriteTagDialog from '@/components/dialogs/WriteTagDialog.vue'
 import Canvas3DRuntime from '@/components/runtime/Canvas3DRuntime.vue'
 import { object3dTreeSignature } from '@/shared/project/object3dTree'
 import { historyPagerClientRect, historySearchClientRect } from '@/shared/runtime/alarmHistoryQuery'
+import { trendToolbarClientRect } from '@/shared/runtime/trendHistoryQuery'
 import AlarmHistorySearchBar from '@/components/runtime/AlarmHistorySearchBar.vue'
+import TrendHistoryToolbar from '@/components/runtime/TrendHistoryToolbar.vue'
 import AlarmHistoryPager from '@/components/runtime/AlarmHistoryPager.vue'
 
 const props = defineProps<{
@@ -117,6 +120,42 @@ function syncHistoryBars() {
   historyBars.value = next
 }
 
+/** 历史趋势工具栏：按图元矩形定位（与"历史报警"的搜索条同一套做法） */
+type TrendBar = { id: string; preset: string; tagIds: string[]; x: number; y: number; w: number; h: number }
+const trendBars = ref<TrendBar[]>([])
+
+function syncTrendBars() {
+  if (!bundle || !host.value) {
+    trendBars.value = []
+    return
+  }
+  const board = host.value.parentElement
+  const hostBox = host.value.getBoundingClientRect()
+  const boardBox = board?.getBoundingClientRect()
+  const origin = {
+    x: boardBox ? hostBox.left - boardBox.left : 0,
+    y: boardBox ? hostBox.top - boardBox.top : 0,
+  }
+  const next: TrendBar[] = []
+  for (const layer of props.page.layers) {
+    if (!layer.visible) continue
+    for (const widget of layer.widgets) {
+      if (widget.type !== 'trendHistory' || widget.visible === false) continue
+      if (widget.props.showToolbar === false) continue
+      const node = bundle.stage.findOne(`#${widget.id}`)
+      if (!node) continue
+      const rect = trendToolbarClientRect((p) => node.getAbsoluteTransform().point(p), widget, origin)
+      next.push({
+        id: widget.id,
+        preset: String(widget.props.range ?? '-1h'),
+        tagIds: trendCurves(widget.props).map((curve) => curve.tagId).filter(Boolean),
+        ...rect,
+      })
+    }
+  }
+  trendBars.value = next
+}
+
 function onHistorySearch() {
   refreshAllVisuals()
 }
@@ -203,6 +242,7 @@ function refreshAllVisuals() {
   emit('quality', { good, bad, uncertain, offline })
   syncScene3dOverlays()
   syncHistoryBars()
+  syncTrendBars()
 }
 
 function firePageTrigger(trigger: 'load' | 'unload') {
@@ -444,6 +484,7 @@ onMounted(() => {
   bundle.setViewChangeListener(() => {
     syncScene3dOverlays()
     syncHistoryBars()
+  syncTrendBars()
   })
   setupSubscription(props.page)
   if (!props.embedded) tags.connectRealtime()
@@ -502,6 +543,16 @@ onUnmounted(() => {
       :key="bar.id"
       class="history-search"
       :widget-id="bar.id"
+      :style="{ left: bar.x + 'px', top: bar.y + 'px', width: bar.w + 'px', height: bar.h + 'px' }"
+      @change="onHistorySearch"
+    />
+    <TrendHistoryToolbar
+      v-for="bar in trendBars"
+      :key="bar.id + ':toolbar'"
+      class="history-search"
+      :widget-id="bar.id"
+      :preset="bar.preset"
+      :tag-ids="bar.tagIds"
       :style="{ left: bar.x + 'px', top: bar.y + 'px', width: bar.w + 'px', height: bar.h + 'px' }"
       @change="onHistorySearch"
     />

@@ -9,6 +9,7 @@ import com.influxdb.client.write.Point;
 import com.influxdb.query.FluxRecord;
 import com.influxdb.query.FluxTable;
 import com.webscada.server.config.ScadaProperties;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -228,6 +229,179 @@ public class InfluxHolder {
       }
     }
     return rows;
+  }
+
+  /**
+   * 多变量批量历史查询：一条 Flux 查完所有 tagId，避免 N 次串行请求。
+   *
+   * <p>agg 为 none 时返回原始点（每条曲线取最近 maxPoints 个）；否则按
+   * 跨度自动选聚合窗口（mean/max/min/last/first/sum）。
+   *
+   * <p>注意两个现实约束：
+   * ① 只有数值字段 _field == "value" 能聚合，"value_str" 只能原样返回；
+   * ② 质量 quality 是 Influx 的 tag，进入 series key，聚合时会把同一变量拆成多表
+   * （质量好坏各一张），所以聚合前先 group(只按 tagId) －— 代价是聚合后不再带 quality。
+   */
+  public BatchHistory queryHistoryBatch(
+      List<String> tagIds,
+      String start,
+      String stop,
+      int maxPoints,
+      String windowOverride,
+      String agg) {
+    if (!ready || queryApi == null) {
+      throw new IllegalStateException(lastError != null ? lastError : "InfluxDB is not ready");
+    }
+    if (tagIds == null || tagIds.isEmpty()) {
+      throw new IllegalArgumentException("tagIds is empty");
+    }
+    int lim = Math.min(Math.max(maxPoints, 10), 5000);
+    Instant to = resolveInstant(stop, Instant.now());
+    Instant from = resolveInstant(start, to.minus(Duration.ofHours(1)));
+    if (!from.isBefore(to)) from = to.minus(Duration.ofHours(1));
+    String mode = agg == null || agg.isBlank() ? "auto" : agg.trim().toLowerCase();
+    boolean raw = "none".equals(mode) || "raw".equals(mode);
+
+    StringBuilder tagFilter = new StringBuilder();
+    for (int i = 0; i < tagIds.size(); i++) {
+      if (i > 0) tagFilter.append(" or ");
+      tagFilter.append("r.tagId == \"").append(tagIds.get(i).replace("\"", "\\\"")).append("\"");
+    }
+
+    // 调用方显式指定间隔（如 30s）时用它，否则按跨度自动选一个整齐的窗口。
+    // 只接受 <数字><s|m|h|d>：窗口会直接拼进 Flux，不能让外部传任意字符串进来。
+    String safeWindow =
+        windowOverride != null && windowOverride.matches("^\\d+[smhd]$") ? windowOverride : null;
+    String window = safeWindow != null ? safeWindow : niceWindow(Duration.between(from, to), lim);
+    String flux;
+    if (raw) {
+      flux =
+          """
+          from(bucket: "%s")
+            |> range(start: %s, stop: %s)
+            |> filter(fn: (r) => r._measurement == "%s")
+            |> filter(fn: (r) => %s)
+            |> filter(fn: (r) => r._field == "value" or r._field == "value_str")
+            |> sort(columns: ["_time"], desc: true)
+            |> limit(n: %d)
+            |> sort(columns: ["_time"], desc: false)
+          """
+              .formatted(
+                  props.getInflux().getBucket(),
+                  from.toString(),
+                  to.toString(),
+                  props.getInflux().getMeasurement(),
+                  tagFilter,
+                  lim);
+    } else {
+      String fn = fluxFn(mode);
+      flux =
+          """
+          from(bucket: "%s")
+            |> range(start: %s, stop: %s)
+            |> filter(fn: (r) => r._measurement == "%s")
+            |> filter(fn: (r) => %s)
+            |> filter(fn: (r) => r._field == "value")
+            |> group(columns: ["tagId"])
+            |> aggregateWindow(every: %s, fn: %s, createEmpty: false)
+            |> sort(columns: ["_time"], desc: false)
+          """
+              .formatted(
+                  props.getInflux().getBucket(),
+                  from.toString(),
+                  to.toString(),
+                  props.getInflux().getMeasurement(),
+                  tagFilter,
+                  window,
+                  fn);
+    }
+
+    Map<String, List<Map<String, Object>>> byTag = new LinkedHashMap<>();
+    for (String id : tagIds) byTag.put(id, new ArrayList<>());
+    for (FluxTable table : queryApi.query(flux)) {
+      for (FluxRecord rec : table.getRecords()) {
+        Object tagValue = rec.getValueByKey("tagId");
+        String id = tagValue != null ? String.valueOf(tagValue) : null;
+        if (id == null) continue;
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("tagId", id);
+        Instant t = rec.getTime();
+        row.put("time", t != null ? t.toString() : "");
+        row.put("value", rec.getValue());
+        Object q = rec.getValueByKey("quality");
+        row.put("quality", q != null ? String.valueOf(q) : (raw ? "Uncertain" : null));
+        byTag.computeIfAbsent(id, k -> new ArrayList<>()).add(row);
+      }
+    }
+    List<BatchSeries> series = new ArrayList<>();
+    for (Map.Entry<String, List<Map<String, Object>>> e : byTag.entrySet()) {
+      series.add(new BatchSeries(e.getKey(), e.getValue()));
+    }
+    return new BatchHistory(
+        from.toString(), to.toString(), raw ? null : window, raw ? "none" : mode, series);
+  }
+
+  /** 每条曲线（每个 tagId）的历史点 */
+  public record BatchSeries(String tagId, List<Map<String, Object>> points) {}
+
+  /** 批量历史查询的结果：实际窗口 + 聚合方式 + 各曲线 */
+  public record BatchHistory(
+      String from, String to, String window, String agg, List<BatchSeries> series) {}
+
+  private static String fluxFn(String mode) {
+    return switch (mode) {
+      case "max" -> "max";
+      case "min" -> "min";
+      case "last" -> "last";
+      case "first" -> "first";
+      case "sum" -> "sum";
+      default -> "mean";
+    };
+  }
+
+  /** 相对时间（-15m/-1h/-8h/-24h/-7d/-1w）或 RFC3339 → Instant */
+  private static Instant resolveInstant(String expr, Instant fallback) {
+    if (expr == null || expr.isBlank() || "now()".equals(expr)) return fallback;
+    String s = expr.trim();
+    if (s.startsWith("-")) {
+      java.util.regex.Matcher m =
+          java.util.regex.Pattern.compile("^-(\\d+)([smhdw])$").matcher(s);
+      if (m.matches()) {
+        long n = Long.parseLong(m.group(1));
+        return switch (m.group(2)) {
+          case "s" -> fallback.minusSeconds(n);
+          case "m" -> fallback.minus(Duration.ofMinutes(n));
+          case "h" -> fallback.minus(Duration.ofHours(n));
+          case "d" -> fallback.minus(Duration.ofDays(n));
+          default -> fallback.minus(Duration.ofDays(n * 7));
+        };
+      }
+      return fallback;
+    }
+    try {
+      return Instant.parse(s);
+    } catch (Exception e) {
+      try {
+        return java.time.OffsetDateTime.parse(s).toInstant();
+      } catch (Exception ignored) {
+        return fallback;
+      }
+    }
+  }
+
+  /** 按“点数不超过 maxPoints”选一个整齐的聚合窗口 */
+  private static String niceWindow(Duration span, int maxPoints) {
+    long seconds = Math.max(1, span.getSeconds());
+    long want = Math.max(1, seconds / Math.max(1, maxPoints));
+    long[] steps = {1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400};
+    long pick = steps[steps.length - 1];
+    for (long st : steps) {
+      if (st >= want) {
+        pick = st;
+        break;
+      }
+    }
+    return pick + "s";
   }
 
   /** 相对时间（-1h）和 RFC3339 都不加引号；Flux 把引号里的内容当成字符串，range 不认。 */

@@ -403,6 +403,47 @@ export async function apiGetTagHistory(
   return request(`/tags/${encodeURIComponent(tagId)}/history${suffix}`)
 }
 
+export interface TagHistoryPoint {
+  tagId: string
+  time: string
+  value: number | string | null
+  quality?: string | null
+}
+
+export interface TagHistoryBatchResult {
+  from: string
+  to: string
+  /** 服务端实陀使用的聚合窗口（如 "30s"）；原始点时为 null */
+  window: string | null
+  agg: string
+  series: Array<{ tagId: string; points: TagHistoryPoint[] }>
+}
+
+/**
+ * 多变量批量历史查询（历史趋势图元用）。
+ *
+ * 超时 / 取消由调用方传 signal（公共 `request()` 不设默认超时，
+ * 避免影响其它接口）。
+ */
+export async function apiQueryTagHistory(opts: {
+  tagIds: string[]
+  start?: string
+  stop?: string
+  maxPoints?: number
+  window?: string | null
+  agg?: string
+  signal?: AbortSignal
+}): Promise<TagHistoryBatchResult> {
+  const q = new URLSearchParams()
+  q.set('tagIds', opts.tagIds.join(','))
+  if (opts.start) q.set('start', opts.start)
+  if (opts.stop) q.set('stop', opts.stop)
+  if (opts.maxPoints) q.set('maxPoints', String(opts.maxPoints))
+  if (opts.window) q.set('window', opts.window)
+  if (opts.agg) q.set('agg', opts.agg)
+  return request(`/tags/history/batch?${q.toString()}`, { method: 'GET', signal: opts.signal })
+}
+
 export function tagsWebSocketUrl(): string {
   const base = import.meta.env.VITE_API_BASE || '/api'
   const tokenQ = API_TOKEN ? `?token=${encodeURIComponent(API_TOKEN)}` : ''

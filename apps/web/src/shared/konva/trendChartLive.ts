@@ -56,6 +56,8 @@ export function createTrendLiveOverlay(opts: {
   onLegendSelect?: (widgetId: string, hidden: string[]) => void
   /** 底部滑块 / 滚轮缩放 → 记下时间窗，下次 setOption 不会把窗口弹回去 */
   onZoom?: (widgetId: string, zoom: { start: number; end: number }) => void
+  /** 双击图内 = 还原缩放（图标路径由 trendChartInteraction 处理，这里只管原生叠层） */
+  onReset?: (widgetId: string) => void
 }): TrendLiveOverlay {
   const host = document.createElement('div')
   host.style.cssText = 'position:absolute;inset:0;pointer-events:none;overflow:hidden;'
@@ -112,6 +114,8 @@ export function createTrendLiveOverlay(opts: {
       const chart = init(el, undefined, { renderer: 'canvas' })
       item = { el, chart }
       live.set(slot.widgetId, item)
+      // 双击 = 还原显示缩放（历史趋势还会因此跳回“当前查询窗口”）
+      chart.getZr().on('dblclick', () => opts.onReset?.(slot.widgetId))
       // 图例点选：写回"被点掉的曲线"，这样每 tick 重画不会把它弹回来
       chart.on('legendselectchanged', (params: unknown) => {
         const selected = (params as { selected?: Record<string, boolean> }).selected ?? {}

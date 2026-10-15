@@ -197,6 +197,51 @@ public class TagController {
     return ResponseEntity.ok(Map.of("tagId", tagId, "points", points));
   }
 
+  /**
+   * 多变量批量历史查询（历史趋势图元用）。
+   *
+   * <p>与已有的 POST /api/tags/history（写入历史样本）和
+   * GET /api/tags/{tagId}/history（单变量）互不影响，路径不重叠。
+   */
+  @GetMapping("/api/tags/history/batch")
+  public ResponseEntity<?> historyBatch(
+      @RequestParam(required = false) String tagIds,
+      @RequestParam(required = false) String start,
+      @RequestParam(required = false) String stop,
+      @RequestParam(required = false) Integer maxPoints,
+      @RequestParam(required = false) String window,
+      @RequestParam(required = false) String agg) {
+    if (!influx.isReady()) {
+      return ResponseEntity.status(503)
+          .body(new ApiError("influx_unavailable", influx.getLastError(), null, null));
+    }
+    java.util.List<String> ids = new java.util.ArrayList<>();
+    if (tagIds != null) {
+      for (String raw : tagIds.split(",")) {
+        String id = raw.trim();
+        if (!id.isEmpty() && !ids.contains(id)) ids.add(id);
+      }
+    }
+    if (ids.isEmpty()) return ResponseEntity.badRequest().body(ApiError.of("invalid_tag_ids"));
+    if (ids.size() > 8) ids = ids.subList(0, 8);
+    int limit = maxPoints == null ? 800 : Math.min(Math.max(maxPoints, 10), 5000);
+    try {
+      InfluxHolder.BatchHistory res = influx.queryHistoryBatch(ids, start, stop, limit, window, agg);
+      Map<String, Object> body = new LinkedHashMap<>();
+      body.put("from", res.from());
+      body.put("to", res.to());
+      body.put("window", res.window());
+      body.put("agg", res.agg());
+      body.put("series", res.series());
+      return ResponseEntity.ok(body);
+    } catch (IllegalArgumentException e) {
+      return ResponseEntity.badRequest().body(ApiError.of("invalid_query"));
+    } catch (Exception e) {
+      return ResponseEntity.status(503)
+          .body(new ApiError("influx_unavailable", e.getMessage(), null, null));
+    }
+  }
+
   private String requireDevice(String deviceId) throws Exception {
     if (deviceId == null || deviceId.isBlank()) return null;
     return devices.get(deviceId.trim()) == null ? null : deviceId.trim();

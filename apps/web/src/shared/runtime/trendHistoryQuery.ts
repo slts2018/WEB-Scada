@@ -1,6 +1,37 @@
-import { apiGetTagHistory } from '@/shared/api/client'
+import { apiQueryTagHistory } from '@/shared/api/client'
 
-/** 历史趋势的查询窗口，写入图元 props.range。 */
+/**
+ * 历史趋势的数据层：**每个图元一次批量查询**（不再每条曲线各发一次）。
+ *
+ * 为什么改成批量：一张 8 曲线的历史图原来要发 8 次 HTTP，而且各曲线的
+ * start/stop 各自算，容易对不齐；现在一条 `GET /api/tags/history/batch` 查完，
+ * 服务端顺手按跨度做聚合（见 §4.1 方案），前端只负责窗口、缓存与状态。
+ *
+ * 为什么窗口状态放这里而不写工程 JSON：运行端改区间/缩放属于"看数据的方式"，
+ * 和工程配置无关（同 trendSeries / trendZoomOf 的做法）。
+ */
+
+/** 历史趋势图元顶部工具栏的高度（页面坐标，与 trendChartLayout 预留的空位一致） */
+export const TREND_TOOLBAR_H = 26
+
+/** 工具栏在图元内的位置，换算到定位父元素的像素坐标（与 historySearchClientRect 同一套做法） */
+export function trendToolbarClientRect(
+  point: (p: { x: number; y: number }) => { x: number; y: number },
+  widget: { transform: { width: number; height: number } },
+  origin = { x: 0, y: 0 },
+) {
+  const top = 2
+  const p1 = point({ x: 6, y: top })
+  const p2 = point({ x: Math.max(12, widget.transform.width - 6), y: top + TREND_TOOLBAR_H - 4 })
+  return {
+    x: origin.x + Math.min(p1.x, p2.x),
+    y: origin.y + Math.min(p1.y, p2.y),
+    w: Math.max(60, Math.abs(p2.x - p1.x)),
+    h: Math.max(16, Math.abs(p2.y - p1.y)),
+  }
+}
+
+/** 设计端预设区间（props.range） */
 export const TREND_RANGES = [
   { id: '-15m', label: '最近15分钟' },
   { id: '-1h', label: '最近1小时' },
@@ -9,172 +40,540 @@ export const TREND_RANGES = [
   { id: '-7d', label: '最近7天' },
 ] as const
 
+const PRESET_MS: Record<string, number> = {
+  '-15m': 15 * 60 * 1000,
+  '-1h': 60 * 60 * 1000,
+  '-8h': 8 * 60 * 60 * 1000,
+  '-24h': 24 * 60 * 60 * 1000,
+  '-7d': 7 * 24 * 60 * 60 * 1000,
+}
+
 export function trendRangeLabel(id: string): string {
   return TREND_RANGES.find((item) => item.id === id)?.label ?? '最近1小时'
 }
 
-interface TrendHistoryQuery {
-  tagId: string
-  start: string
-  /** 绝对结束时间（RFC3339）。空着表示查到现在 */
-  stop?: string
-  limit: number
+export function trendPresetSpanMs(id: string): number {
+  return PRESET_MS[id] ?? PRESET_MS['-1h']
 }
 
-/** 图元上一次「按时间搜索」的绝对区间。有它时覆盖属性里的预设范围。 */
-const customRange = new Map<string, { from: number; to: number }>()
+/** 采样间隔（运行端/设计端可选）：auto = 按跨度自动聚合；raw = 原始点 */
+export const TREND_INTERVALS = [
+  { id: 'auto', label: '自动' },
+  { id: 'raw', label: '原始点' },
+  { id: '1s', label: '1 秒' },
+  { id: '5s', label: '5 秒' },
+  { id: '30s', label: '30 秒' },
+  { id: '1m', label: '1 分钟' },
+  { id: '5m', label: '5 分钟' },
+  { id: '1h', label: '1 小时' },
+] as const
 
-export function trendHistorySearchOf(widgetId: string): { from: number; to: number } | undefined {
-  return customRange.get(widgetId)
+export function trendIntervalLabel(id: string): string {
+  return TREND_INTERVALS.find((item) => item.id === id)?.label ?? '自动'
 }
 
-/** 标题栏上的时间说明：搜过就显示起止时间，否则用预设范围的名字 */
-export function trendHistoryRangeText(widgetId: string, preset: string): string {
-  const custom = customRange.get(widgetId)
-  if (!custom) return trendRangeLabel(preset)
-  const fmt = (ms: number) => {
-    const d = new Date(ms)
-    const p = (n: number) => String(n).padStart(2, '0')
-    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
-  }
-  return `${fmt(custom.from)} ~ ${fmt(custom.to)}`
+export type TrendHistoryState = 'idle' | 'loading' | 'ready' | 'empty' | 'error'
+
+export interface TrendHistoryWindow {
+  from: number
+  to: number
 }
 
-export function setTrendHistorySearch(widgetId: string, from: number, to: number): void {
-  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return
-  customRange.set(widgetId, { from, to })
-  const start = new Date(from).toISOString()
-  const stop = new Date(to).toISOString()
-  const prefix = `${widgetId}|`
-  for (const [key, query] of queries) {
-    if (!key.startsWith(prefix)) continue
-    queries.set(key, { ...query, start, stop })
-    void loadTrendHistory(key, true)
-  }
+export interface TrendHistoryStatus {
+  state: TrendHistoryState
+  /** 'influx_unavailable' 等错误码 / 文本；无错时为 null */
+  error: string | null
+  window: TrendHistoryWindow | null
+  preset: string
+  /** 实际生效的采样间隔（auto/raw 或 1s/5s/...） */
+  interval: string
+  /** 服务端实际使用的聚合窗口（如 "30s"），raw 时为 null */
+  aggWindow: string | null
+  follow: boolean
+  queryMs: number
+  updatedAt: number
+  /** 已开过历史保存、但区间内没有点 */
+  emptyTags: string[]
 }
 
-/**
- * 缓存键 = `widgetId|tagId`。
- * 一个历史趋势图元可以绑多条曲线，每条曲线各自查一次 /api/tags/{tagId}/history，
- * 各自缓存、各自去重；轮询刷新时逐条刷新。
- */
-function cacheKey(widgetId: string, tagId: string): string {
-  return `${widgetId}|${tagId}`
+interface CurveHistory {
+  t: number[]
+  v: Array<number | null>
+  q: Array<string | null>
+  /** 末端实时点：窗口跟随时用它把曲线接到"现在" */
+  live: { t: number; v: number | null; q: string | null } | null
 }
 
-const queries = new Map<string, TrendHistoryQuery>()
-const seriesByKey = new Map<string, number[]>()
-/** 同一条曲线的采样时间戳（ms），历史趋势用时间轴绘制时需要 */
-const timesByKey = new Map<string, number[]>()
-const loadedKey = new Map<string, string>()
-const pendingKey = new Map<string, string>()
-const generation = new Map<string, number>()
+interface WidgetHistory {
+  widgetId: string
+  tagIds: string[]
+  preset: string
+  propInterval: string
+  /** 运行端选的间隔（优先于 props） */
+  runtimeInterval: string | null
+  /** 手动搜索 / 缩放后的绝对窗口；有它时覆盖 preset */
+  custom: TrendHistoryWindow | null
+  follow: boolean
+  maxPoints: number
+  series: Map<string, CurveHistory>
+  status: TrendHistoryStatus
+  generation: number
+  loading: boolean
+  loadedKey: string
+  dirty: boolean
+  customRange: TrendHistoryWindow | null
+}
+
+const widgets = new Map<string, WidgetHistory>()
 const loadedListeners = new Set<() => void>()
 
-function queryKey(query: TrendHistoryQuery): string {
-  return `${query.tagId}|${query.start}|${query.stop ?? ''}|${query.limit}`
-}
-
-function emitLoaded() {
+function emitLoaded(): void {
   for (const listener of loadedListeners) listener()
 }
 
-/** 某控件的历史曲线加载完成后通知画面重绘。 */
+/** 某控件的历史曲线加载/状态变化后通知画面重绘（工具栏也靠它刷新状态） */
 export function onTrendHistoryLoaded(listener: () => void): () => void {
   loadedListeners.add(listener)
   return () => loadedListeners.delete(listener)
 }
 
-/** 已加载的历史点。还没返回过时为 undefined，调用方继续显示示例曲线。 */
-export function trendHistorySeries(widgetId: string, tagId: string): number[] | undefined {
-  return seriesByKey.get(cacheKey(widgetId, tagId))
-}
-
-/** 同一条曲线的时间戳（epoch ms）；用于历史趋势的时间轴 */
-export function trendHistoryTimes(widgetId: string, tagId: string): number[] | undefined {
-  const list = timesByKey.get(cacheKey(widgetId, tagId))
-  return list && list.length ? list : undefined
-}
-
-/**
- * 旧路径（单曲线，没有 props.curves）用：取该图元第一条已注册查询的时间戳。
- * 单曲线模式下每个图元只会有一条查询。
- */
-export function trendHistoryTimesForFirstQuery(widgetId: string): number[] | undefined {
-  const prefix = `${widgetId}|`
-  for (const [key, times] of timesByKey) {
-    if (key.startsWith(prefix) && times.length) return times
+function ensureWidget(widgetId: string, preset = '-1h'): WidgetHistory {
+  let w = widgets.get(widgetId)
+  if (!w) {
+    w = {
+      widgetId,
+      tagIds: [],
+      preset,
+      propInterval: 'auto',
+      runtimeInterval: null,
+      custom: null,
+      follow: true,
+      maxPoints: 240,
+      series: new Map(),
+      status: {
+        state: 'idle',
+        error: null,
+        window: null,
+        preset,
+        interval: 'auto',
+        aggWindow: null,
+        follow: true,
+        queryMs: 0,
+        updatedAt: 0,
+        emptyTags: [],
+      },
+      generation: 0,
+      loading: false,
+      loadedKey: '',
+      dirty: false,
+      customRange: null,
+    }
+    widgets.set(widgetId, w)
   }
-  return undefined
+  return w
 }
 
-async function loadTrendHistory(key: string, force: boolean): Promise<void> {
-  const query = queries.get(key)
-  if (!query) return
-  const qk = queryKey(query)
-  if (!force && loadedKey.get(key) === qk) return
-  if (!force && pendingKey.get(key) === qk) return
-  const gen = (generation.get(key) ?? 0) + 1
-  generation.set(key, gen)
-  pendingKey.set(key, qk)
+function effectiveInterval(w: WidgetHistory): string {
+  const id = w.runtimeInterval ?? w.propInterval ?? 'auto'
+  return TREND_INTERVAL_IDS.has(id) ? id : 'auto'
+}
+
+const TREND_INTERVAL_IDS = new Set<string>([...TREND_INTERVALS.map((i) => i.id)])
+
+/** 当前窗口：自定义（搜索/缩放）优先，否则按预设相对"现在" */
+export function effectiveTrendWindow(w: WidgetHistory): TrendHistoryWindow {
+  if (w.custom) return w.custom
+  const to = Date.now()
+  return { from: to - trendPresetSpanMs(w.preset), to }
+}
+
+function intervalToQuery(interval: string): { agg: string; window: string | null } {
+  if (interval === 'raw') return { agg: 'none', window: null }
+  if (interval === 'auto') return { agg: 'auto', window: null }
+  return { agg: 'mean', window: interval }
+}
+
+function queryKey(w: WidgetHistory): string {
+  const { agg, window } = intervalToQuery(effectiveInterval(w))
+  const tags = w.tagIds.slice().sort().join(',')
+  const rangeKey = w.custom
+    ? `${Math.round(w.custom.from)}-${Math.round(w.custom.to)}`
+    : `rel:${w.preset}`
+  return `${tags}|${rangeKey}|${w.maxPoints}|${agg}|${window ?? ''}`
+}
+
+/** 一次渲染里会对同一图元调用多次 requestTrendHistory：微任务里合并成一次请求 */
+let flushScheduled = false
+function scheduleFlush(): void {
+  if (flushScheduled) return
+  flushScheduled = true
+  queueMicrotask(() => {
+    flushScheduled = false
+    for (const w of [...widgets.values()]) {
+      if (w.dirty) void loadWidget(w, false)
+    }
+  })
+}
+
+async function loadWidget(w: WidgetHistory, force: boolean): Promise<void> {
+  if (!w.tagIds.length) return
+  w.dirty = false
+  const key = queryKey(w)
+  if (!force && w.loadedKey === key) return
+  if (!force && w.loading) return
+  const win = effectiveTrendWindow(w)
+  const { agg, window } = intervalToQuery(effectiveInterval(w))
+  const gen = ++w.generation
+  w.loading = true
+  w.status = {
+    ...w.status,
+    state: w.series.size ? w.status.state : 'loading',
+    error: null,
+    window: win,
+    preset: w.preset,
+    interval: effectiveInterval(w),
+    follow: w.follow,
+  }
+  emitLoaded()
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(new DOMException('trend history timeout', 'TimeoutError')), 25_000)
+  const started = Date.now()
   try {
-    const res = await apiGetTagHistory(query.tagId, {
-      start: query.start,
-      stop: query.stop,
-      limit: query.limit,
+    const res = await apiQueryTagHistory({
+      tagIds: w.tagIds,
+      start: new Date(win.from).toISOString(),
+      stop: new Date(win.to).toISOString(),
+      maxPoints: w.maxPoints,
+      agg,
+      window,
+      signal: ctrl.signal,
     })
-    if (generation.get(key) !== gen) return
-    const points = res.points ?? []
-    const series = points
-      .map((point) => (typeof point.value === 'number' ? point.value : Number(point.value)))
-      .filter((value) => Number.isFinite(value))
-    const times = points
-      .map((point) => Date.parse(String(point.time)))
-      .filter((t) => Number.isFinite(t))
-    seriesByKey.set(key, series)
-    // 时间戳与值一一对应才用来画时间轴，否则退回按序号
-    if (times.length === series.length && times.length) timesByKey.set(key, times)
-    else timesByKey.delete(key)
-    loadedKey.set(key, qk)
-    emitLoaded()
-  } catch {
-    // 查询失败时保留上一份曲线。Influx 未启动时每次轮询都会失败，这里刻意不打日志，避免刷屏。
+    if (w.generation !== gen) return
+    const emptyTags: string[] = []
+    const next = new Map<string, CurveHistory>()
+    for (const tagId of w.tagIds) next.set(tagId, { t: [], v: [], q: [], live: w.series.get(tagId)?.live ?? null })
+    for (const item of res.series ?? []) {
+      const bucket = next.get(item.tagId)
+      if (!bucket) continue
+      const seen = new Set<number>()
+      const rows: Array<{ t: number; v: number | null; q: string | null }> = []
+      for (const point of item.points ?? []) {
+        const t = Date.parse(String(point.time))
+        if (!Number.isFinite(t) || seen.has(t)) continue
+        seen.add(t)
+        const raw = point.value
+        const num = typeof raw === 'number' ? raw : raw == null || raw === '' ? null : Number(raw)
+        rows.push({ t, v: num != null && Number.isFinite(num) ? num : null, q: point.quality ?? null })
+      }
+      // 同一时刻可能有多条（写值 / 质量变化各一条）：按时间去重、保留最后一条
+      rows.sort((a, b) => a.t - b.t)
+      for (const row of rows) {
+        bucket.t.push(row.t)
+        bucket.v.push(row.v)
+        bucket.q.push(row.q)
+      }
+      if (!bucket.t.length) emptyTags.push(item.tagId)
+    }
+    w.series = next
+    w.loadedKey = key
+    w.status = {
+      ...w.status,
+      state: next.size && [...next.values()].some((c) => c.t.length) ? 'ready' : 'empty',
+      error: null,
+      window: { from: Date.parse(res.from) || win.from, to: Date.parse(res.to) || win.to },
+      aggWindow: res.window ?? null,
+      interval: res.agg === 'none' ? 'raw' : effectiveInterval(w),
+      queryMs: Date.now() - started,
+      updatedAt: Date.now(),
+      emptyTags,
+    }
+  } catch (err) {
+    if (w.generation !== gen) return
+    const aborted = err instanceof DOMException && err.name === 'AbortError'
+    if (!aborted) {
+      const message =
+        err && typeof err === 'object' && 'status' in err && 'body' in err
+          ? String((err as { body?: { error?: string } }).body?.error ?? (err as { status?: number }).status)
+          : String((err as Error)?.message ?? err)
+      w.status = { ...w.status, state: w.series.size ? w.status.state : 'error', error: message, updatedAt: Date.now() }
+    }
   } finally {
-    if (generation.get(key) === gen) pendingKey.delete(key)
+    clearTimeout(timer)
+    if (w.generation === gen) w.loading = false
+    emitLoaded()
   }
 }
 
-/** 实时预览或运行时按当前变量和时间范围取历史。范围没变则不重复请求。 */
+/** 图元在渲染时声明"我要这条曲线的历史"（每次求值都会调，必须幂等且廉价） */
 export function requestTrendHistory(
   widgetId: string,
   tagId: string,
   start: string,
   limit: number,
+  interval?: string,
 ): void {
-  const key = cacheKey(widgetId, tagId)
-  const custom = customRange.get(widgetId)
-  queries.set(key, {
-    tagId,
-    start: custom ? new Date(custom.from).toISOString() : start,
-    stop: custom ? new Date(custom.to).toISOString() : undefined,
-    limit,
-  })
-  void loadTrendHistory(key, false)
+  const w = ensureWidget(widgetId, start || '-1h')
+  const nextLimit = Math.max(10, Math.min(5000, limit || 240))
+  let changed = false
+  if (w.preset !== (start || '-1h')) {
+    w.preset = start || '-1h'
+    changed = true
+  }
+  if (w.maxPoints !== nextLimit) {
+    w.maxPoints = nextLimit
+    changed = true
+  }
+  if (interval && w.propInterval !== interval) {
+    w.propInterval = interval
+    changed = true
+  }
+  if (!w.tagIds.includes(tagId)) {
+    w.tagIds.push(tagId)
+    changed = true
+  }
+  if (changed) {
+    w.dirty = true
+    scheduleFlush()
+  }
 }
 
-/** 曲线被删除 / 变量被换掉时释放缓存，避免继续无意义轮询。 */
+/**
+ * 已加载的历史点（还没返回过时 undefined，调用方继续显示示例曲线）。
+ * null = 该时刻没有有效值（质量坏），折线会在那里断开 —— 与实时趋势语义一致。
+ */
+export function trendHistorySeries(widgetId: string, tagId: string): Array<number | null> | undefined {
+  const curve = widgets.get(widgetId)?.series.get(tagId)
+  if (!curve || !curve.t.length) return undefined
+  const values = curve.v.slice()
+  if (curve.live && curve.live.t > (curve.t[curve.t.length - 1] ?? 0)) values.push(curve.live.v)
+  return values
+}
+
+/** 同一条曲线的时间戳（epoch ms），历史趋势画时间轴用 */
+export function trendHistoryTimes(widgetId: string, tagId: string): number[] | undefined {
+  const curve = widgets.get(widgetId)?.series.get(tagId)
+  if (!curve || !curve.t.length) return undefined
+  const times = curve.t.slice()
+  if (curve.live && curve.live.t > (curve.t[curve.t.length - 1] ?? 0)) times.push(curve.live.t)
+  return times
+}
+
+/** 旧路径（单曲线）用：取该图元第一条有数据的曲线时间戳 */
+export function trendHistoryTimesForFirstQuery(widgetId: string): number[] | undefined {
+  const w = widgets.get(widgetId)
+  if (!w) return undefined
+  for (const tagId of w.tagIds) {
+    const times = trendHistoryTimes(widgetId, tagId)
+    if (times?.length) return times
+  }
+  return undefined
+}
+
+/** 曲线质量（与 times 一一对应），缺省 null = 未知 */
+export function trendHistoryQualities(widgetId: string, tagId: string): Array<string | null> | undefined {
+  const curve = widgets.get(widgetId)?.series.get(tagId)
+  if (!curve || !curve.t.length) return undefined
+  const out = curve.q.slice()
+  if (curve.live && curve.live.t > (curve.t[curve.t.length - 1] ?? 0)) out.push(curve.live.q)
+  return out
+}
+
+/** 末端接实时值：窗口跟随时把当前实时点接到曲线末端（下一次查询会覆盖它） */
+export function appendTrendHistoryLivePoint(
+  widgetId: string,
+  tagId: string,
+  t: number,
+  v: number | null,
+  quality: string | null,
+): void {
+  const w = widgets.get(widgetId)
+  const curve = w?.series.get(tagId)
+  if (!w || !curve || !curve.t.length || !Number.isFinite(t)) return
+  if (w.custom && Date.now() - w.custom.to > 5000) return
+  curve.live = { t, v, q: quality }
+}
+
+export function trendHistoryStatusOf(widgetId: string): TrendHistoryStatus | null {
+  const w = widgets.get(widgetId)
+  return w ? w.status : null
+}
+
+export function trendHistoryWindowOf(widgetId: string): TrendHistoryWindow | null {
+  const w = widgets.get(widgetId)
+  return w ? effectiveTrendWindow(w) : null
+}
+
+export function trendHistorySearchOf(widgetId: string): TrendHistoryWindow | undefined {
+  return widgets.get(widgetId)?.customRange ?? undefined
+}
+
+function fmt(ms: number): string {
+  const d = new Date(ms)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+/** 标题栏上的时间说明：搜过/缩放过显示起止，否则用预设名；聚合时补一句"按 Xs 平均" */
+export function trendHistoryRangeText(widgetId: string, preset: string): string {
+  const w = widgets.get(widgetId)
+  const win = effectiveTrendWindow(w ?? ensureWidget(widgetId, preset))
+  const base = w?.custom ? `${fmt(win.from)} ~ ${fmt(win.to)}` : trendRangeLabel(preset)
+  const status = w?.status
+  if (status?.aggWindow) return `${base} · 按 ${status.aggWindow} 平均`
+  if (status?.interval === 'raw') return `${base} · 原始点`
+  return base
+}
+
+/** 查询失败/空数据时给图元用的提示（null = 一切正常） */
+export function trendHistoryNoticeOf(widgetId: string): { kind: 'error' | 'empty'; text: string } | null {
+  const status = trendHistoryStatusOf(widgetId)
+  if (!status) return null
+  if (status.error === 'influx_unavailable') {
+    return { kind: 'error', text: '历史库（InfluxDB）未启用或未连接，历史曲线不可用' }
+  }
+  if (status.error) return { kind: 'error', text: `历史查询失败：${status.error}` }
+  if (status.state === 'empty') return { kind: 'empty', text: '该区间没有历史数据（检查变量是否开启"历史保存"）' }
+  return null
+}
+
+/** 设置绝对窗口（工具栏自定义区间 / 缩放后重查都用它） */
+export function setTrendHistoryWindow(widgetId: string, from: number, to: number): void {
+  if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return
+  const w = ensureWidget(widgetId)
+  if (w.custom && w.custom.from === from && w.custom.to === to) return
+  w.custom = { from, to }
+  w.customRange = { from, to }
+  w.dirty = true
+  emitLoaded()
+  scheduleFlush()
+}
+
+/** 兼容旧名字：手动"时间搜索"= 设为绝对窗口 */
+export function setTrendHistorySearch(widgetId: string, from: number, to: number): void {
+  setTrendHistoryWindow(widgetId, from, to)
+}
+
+/** 切回预设区间（跟随最新） */
+export function setTrendHistoryPreset(widgetId: string, preset: string): void {
+  const w = ensureWidget(widgetId, preset)
+  w.preset = preset
+  w.custom = null
+  w.customRange = null
+  w.follow = true
+  w.dirty = true
+  emitLoaded()
+  scheduleFlush()
+}
+
+/** 前后翻页：按当前窗口跨度整体平移（自动变成绝对窗口） */
+export function shiftTrendHistoryWindow(widgetId: string, direction: -1 | 1): void {
+  const w = ensureWidget(widgetId)
+  const win = effectiveTrendWindow(w)
+  const span = Math.max(1000, win.to - win.from)
+  setTrendHistoryWindow(widgetId, win.from + direction * span, win.to + direction * span)
+}
+
+/** 以某点为基准缩放窗口（figure>1 放大时间范围 = 看更长） */
+export function zoomTrendHistoryWindow(widgetId: string, factor: number, centerMs?: number): void {
+  const w = ensureWidget(widgetId)
+  const win = effectiveTrendWindow(w)
+  const span = Math.max(1000, win.to - win.from)
+  const center = Number.isFinite(centerMs) ? (centerMs as number) : (win.from + win.to) / 2
+  const half = Math.max(500, (span * factor) / 2)
+  setTrendHistoryWindow(widgetId, Math.round(center - half), Math.round(center + half))
+}
+
+export function setTrendHistoryInterval(widgetId: string, interval: string): void {
+  const w = ensureWidget(widgetId)
+  const next = TREND_INTERVAL_IDS.has(interval) ? interval : 'auto'
+  if (w.runtimeInterval === next) return
+  w.runtimeInterval = next
+  w.dirty = true
+  emitLoaded()
+  scheduleFlush()
+}
+
+export function trendHistoryIntervalOf(widgetId: string): string {
+  const w = widgets.get(widgetId)
+  return w ? effectiveInterval(w) : 'auto'
+}
+
+/** 跟随最新：开 = 回到预设相对区间并按轮询刷新；关 = 冻结当前窗口 */
+export function setTrendHistoryFollow(widgetId: string, follow: boolean): void {
+  const w = ensureWidget(widgetId)
+  if (follow) {
+    w.follow = true
+    w.custom = null
+    w.customRange = null
+  } else {
+    w.follow = false
+    w.custom = effectiveTrendWindow(w)
+    w.customRange = w.custom
+  }
+  w.dirty = true
+  emitLoaded()
+  scheduleFlush()
+}
+
+export function trendHistoryFollowOf(widgetId: string): boolean {
+  return widgets.get(widgetId)?.follow ?? true
+}
+
+/** 手动刷新（不影响窗口） */
+export function refreshTrendHistory(widgetId: string, force = true): void {
+  const w = widgets.get(widgetId)
+  if (!w) return
+  w.dirty = true
+  if (force) w.loadedKey = ''
+  scheduleFlush()
+}
+
+/** 曲线被删除 / 变量被换掉时释放缓存 */
 export function releaseTrendHistory(widgetId: string, tagId: string): void {
-  const key = cacheKey(widgetId, tagId)
-  queries.delete(key)
-  seriesByKey.delete(key)
-  timesByKey.delete(key)
-  loadedKey.delete(key)
-  pendingKey.delete(key)
-  generation.delete(key)
+  const w = widgets.get(widgetId)
+  if (!w) return
+  w.tagIds = w.tagIds.filter((id) => id !== tagId)
+  w.series.delete(tagId)
+  w.loadedKey = ''
+  w.dirty = true
+  if (!w.tagIds.length) widgets.delete(widgetId)
+  else scheduleFlush()
 }
 
-/** 轮询时刷新已经打开过的历史趋势控件（多条曲线各自刷新）。 */
+/** 轮询刷新：只刷"跟随最新"的控件（冻结的窗口不动，避免读数被打断） */
 export async function reloadTrendHistoryQueries(): Promise<void> {
-  const keys = [...queries.keys()]
-  await Promise.all(keys.map((key) => loadTrendHistory(key, true)))
+  const jobs: Array<Promise<void>> = []
+  for (const w of widgets.values()) {
+    if (!w.follow || w.custom) continue
+    if (!w.tagIds.length) continue
+    jobs.push(loadWidget(w, true))
+  }
+  await Promise.all(jobs)
+}
+
+/** 导出用：某个图元当前窗口的点表（时间 + 各曲线值） */
+export function trendHistoryExportRows(
+  widgetId: string,
+): { tagIds: string[]; times: number[]; values: Array<Array<number | null>> } | null {
+  const w = widgets.get(widgetId)
+  if (!w || !w.tagIds.length) return null
+  const times = new Set<number>()
+  for (const tagId of w.tagIds) {
+    const list = trendHistoryTimes(widgetId, tagId)
+    if (list) for (const t of list) times.add(t)
+  }
+  const sorted = [...times].sort((a, b) => a - b)
+  if (!sorted.length) return null
+  const values = w.tagIds.map((tagId) => {
+    const list = trendHistorySeries(widgetId, tagId)
+    const tl = trendHistoryTimes(widgetId, tagId)
+    if (!list || !tl) return sorted.map(() => null)
+    const byTime = new Map<number, number>()
+    tl.forEach((t, i) => {
+      const v = list[i]
+      if (typeof v === 'number') byTime.set(t, v)
+    })
+    return sorted.map((t) => byTime.get(t) ?? null)
+  })
+  return { tagIds: w.tagIds.slice(), times: sorted, values }
 }

@@ -339,6 +339,8 @@ export function buildTrendSpec(opts: {
   style: Record<string, unknown>
   /** 画的只是 props.series 的示例占位（没有绑定任何变量）→ 标题栏标注"示例数据" */
   demoData?: boolean
+  /** 顶部给 HTML 工具栏留的高度（CSS px，仅历史趋势 + 原生路径） */
+  chromeTop?: number
   /** 超采样倍数（图片路径用；原生叠层传 1） */
   scale?: number
   /** 原生模式：用 ECharts 自带的图例/dataZoom/toolbox */
@@ -416,6 +418,10 @@ export function buildTrendSpec(opts: {
     height,
     title,
     rangeLabel: rangeLabel || undefined,
+    chromeTop: opts.chromeTop,
+    // 历史趋势才需要底部滑块与框选缩放，且只有原生叠层能真正拖得动
+    slider: isHistory && native === true,
+    selectZoom: isHistory && native === true,
     min: Number.isFinite(min) ? min : undefined,
     max: Number.isFinite(max) ? max : undefined,
     stacked: widget.props.chartStack === true,
@@ -442,7 +448,7 @@ export function buildTrendSpec(opts: {
  */
 export function buildTrendLiveSpec(
   widget: Widget2D,
-  opts: { width: number; height: number; fontSize: number },
+  opts: { width: number; height: number; fontSize: number; chromeTop?: number },
 ): TrendChartSpec {
   const isHistory = widget.type === 'trendHistory'
   const livePoints = liveSeriesOf(widget.id) ?? []
@@ -459,6 +465,7 @@ export function buildTrendLiveSpec(
     fontSize: opts.fontSize,
     style: widget.style,
     demoData: isDemoTrendData(widget, livePoints.length),
+    chromeTop: opts.chromeTop,
     scale: 1,
     native: true,
   })
