@@ -423,9 +423,14 @@ export function buildTrendSpec(opts: {
         },
       ]
 
-  // 时间轴范围 = 各曲线时间范围的并集（最新数据为准）；缩放区间交给图表自己应用
-  // （图表里要按同一份数据画底部滑块把手，两边用同一份 base 窗口才不会错位）
-  const window = alignSeriesTimeWindow(series)
+  // 时间轴范围：**历史趋势用它自己的查询窗口（= 工具条上的开始~结束）**，
+  // 数据没覆盖到的部分就空着 —— 用户设了"09:00~10:00"就该看到这一段，
+  // 不能因为那段历史缺数据就把轴缩成数据自己的范围（那会让人以为窗口没生效）。
+  // 实时趋势 / 没有窗口时仍按数据范围（缩放区间交给图表自己应用，两边用同一份 base 窗口才不会错位）。
+  const historyWindow = isHistory ? trendHistoryWindowOf(widget.id) : null
+  const window = historyWindow
+    ? { min: historyWindow.from, max: historyWindow.to }
+    : alignSeriesTimeWindow(series)
   const zoom = trendZoomOf(widget.id)
 
   // 单曲线自动用图元量程；多曲线默认自动缩放，
@@ -527,6 +532,7 @@ function trendChartCanvas(opts: Parameters<typeof buildTrendSpec>[0]): HTMLCanva
       )
       .join('|'),
     `min=${spec.min ?? 'auto'},max=${spec.max ?? 'auto'},f=${spec.theme.fontSize},stack=${spec.stacked ? 1 : 0}`,
+    `t=${spec.timeMin ?? 'auto'}-${spec.timeMax ?? 'auto'}`,
     spec.zoom ? `z=${spec.zoom.start.toFixed(4)}-${spec.zoom.end.toFixed(4)}` : 'z=full',
   ].join('#')
   return renderTrendChart(key, spec, trendHoverOf(opts.widget.id) ?? null)

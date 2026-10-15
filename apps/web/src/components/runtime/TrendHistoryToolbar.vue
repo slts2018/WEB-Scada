@@ -61,7 +61,9 @@ import {
   trendHistoryExportRows,
   trendHistoryFollowOf,
   trendHistoryIntervalOf,
+  trendHistoryIsManualWindow,
   trendHistoryNoticeOf,
+  trendHistoryPresetOf,
   trendHistoryStatusOf,
   trendHistoryWindowOf,
   zoomTrendHistoryWindow,
@@ -112,8 +114,13 @@ const notice = ref<{ kind: 'error' | 'empty'; text: string } | null>(null)
  */
 const fromAt = ref<Date | null>(null)
 const toAt = ref<Date | null>(null)
-/** 正在编辑起止时间时不要被后台刷新回来的窗口盖掉 */
-const editingRange = ref(false)
+/**
+ * 正在编辑哪一个字段（null = 没在编辑）。
+ * 规则：只有"正在敲的那个框"不许被覆盖，另一个框始终跟着真实窗口走 ——
+ * 否则会出现"开始框还是上一段区间的旧值，结束框是新选的"，
+ * 一点下去就把窗口拼成一个莫名其妙的区间（比如开始停在昨天、结束是今天）。
+ */
+const editingField = ref<'from' | 'to' | null>(null)
 /**
  * 「时刻」：手动选/输**一个时间点**（秒精度），游标跳过去。
  * 它跟着游标走：图内点一下 / ◀▶ 微调也会同步显示，但改成别的时刻就等于"我要看这一刻"。
@@ -123,6 +130,12 @@ const showHelp = ref(false)
 const showMore = ref(false)
 /** 「⋯」面板表头显示当前区间（sync 时刷新；模块里的窗口状态不是响应式的） */
 const rangeText = ref('')
+/** 区间下拉里的"自定义区间"：窗口被手动改过（起止/缩放/平移/报警跳转）时选它，别装作还在按预设 */
+const CUSTOM_PRESET = 'custom'
+const presetOptions = computed(() => [
+  ...TREND_RANGES.map((item) => ({ id: item.id as string, label: item.label as string })),
+  { id: CUSTOM_PRESET, label: '自定义区间' },
+])
 
 /* ---------- 曲线显示格式（单位 / 小数位） ---------- */
 
@@ -275,6 +288,37 @@ const cursorAt = ref<number | null>(null)
 const cursorRows = ref<CursorRow[]>([])
 const cursorTimeText = ref('')
 
+/**
+ * 起止时间框 ↔ 真实窗口：面板表头、"自定义区间"标记、两个输入框都按当前窗口刷新。
+ * 正在编辑的那个框除外（别打断手输），编辑一结束（失焦）就回到真实值。
+ */
+function syncRangeFields(): void {
+  const win = trendHistoryWindowOf(props.widgetId)
+  if (!win) return
+  rangeText.value = `${fmtStamp(win.from)} ~ ${fmtStamp(win.to)}`
+  // 下拉要反映"实际在用的区间"：运行端改过预设就以改过的为准；窗口是手动指定的就显示"自定义区间"
+  const manual = trendHistoryIsManualWindow(props.widgetId)
+  const runtimePreset = trendHistoryPresetOf(props.widgetId) || props.preset || '-1h'
+  const nextPreset = manual ? CUSTOM_PRESET : runtimePreset
+  if (preset.value !== nextPreset) preset.value = nextPreset
+  if (editingField.value !== 'from' && fromAt.value?.getTime() !== win.from) {
+    fromAt.value = new Date(win.from)
+  }
+  if (editingField.value !== 'to' && toAt.value?.getTime() !== win.to) {
+    toAt.value = new Date(win.to)
+  }
+}
+
+function beginEditField(which: 'from' | 'to'): void {
+  editingField.value = which
+}
+
+function endEditField(): void {
+  editingField.value = null
+  // 手输/选了但没成交（或成交后窗口又变了）时，把框拉回真实窗口
+  syncRangeFields()
+}
+
 /** 面板表头用的完整时间戳（月-日 时:分:秒） */
 function fmtStamp(ms: number): string {
   const d = new Date(ms)
@@ -356,14 +400,7 @@ function sync(): void {
   follow.value = trendHistoryFollowOf(props.widgetId)
   notice.value = trendHistoryNoticeOf(props.widgetId)
   aggWindow.value = trendHistoryStatusOf(props.widgetId)?.aggWindow ?? null
-  const win = trendHistoryWindowOf(props.widgetId)
-  if (win) {
-    rangeText.value = `${fmtStamp(win.from)} ~ ${fmtStamp(win.to)}`
-    if (!editingRange.value) {
-      if (fromAt.value?.getTime() !== win.from) fromAt.value = new Date(win.from)
-      if (toAt.value?.getTime() !== win.to) toAt.value = new Date(win.to)
-    }
-  }
+  syncRangeFields()
   syncCursor()
   syncAlarms()
 }
@@ -459,11 +496,18 @@ watch(
   () => syncCursor(),
 )
 
+/** 打开「⋯」面板时先把起止时间对齐成真实窗口，避免拿旧值去拼新的区间 */
+watch(showMore, (open) => {
+  if (open) syncRangeFields()
+})
+
 function after(): void {
   emit('change')
 }
 
 function applyPreset(): void {
+  // 选到"自定义区间"（当前就是这个状态）时什么都不做：窗口保持用户自己定的那一段
+  if (preset.value === CUSTOM_PRESET) return
   setTrendHistoryPreset(props.widgetId, preset.value)
   after()
 }
@@ -477,7 +521,7 @@ function applyRange(search = false): void {
   const f = fromAt.value?.getTime()
   const t = toAt.value?.getTime()
   if (!Number.isFinite(f) || !Number.isFinite(t) || (t as number) <= (f as number)) {
-    if (search) ElMessage.warning('开始时间要早于结束时间')
+    ElMessage.warning('开始时间要早于结束时间')
     return
   }
   setTrendHistoryFollow(props.widgetId, false)
@@ -570,7 +614,7 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
         :disabled="!canEdit()"
         @change="applyPreset"
       >
-        <el-option v-for="item in TREND_RANGES" :key="item.id" :label="item.label" :value="item.id" />
+        <el-option v-for="item in presetOptions" :key="item.id" :label="item.label" :value="item.id" />
       </el-select>
 
       <!-- ② 时间：起止时间 + 搜索（宽图元常驻，窄图元并进「⋯」） -->
@@ -587,8 +631,8 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
           :clearable="false"
           :teleported="false"
           :disabled="!canEdit()"
-          @focus="editingRange = true"
-          @blur="editingRange = false"
+          @focus="beginEditField('from')"
+          @blur="endEditField"
           @change="applyRange()"
         />
         <span class="time-label">结束</span>
@@ -602,8 +646,8 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
           :clearable="false"
           :teleported="false"
           :disabled="!canEdit()"
-          @focus="editingRange = true"
-          @blur="editingRange = false"
+          @focus="beginEditField('to')"
+          @blur="endEditField"
           @change="applyRange()"
         />
         <el-button
@@ -688,8 +732,8 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
                 :clearable="false"
                 :teleported="false"
                 :disabled="!canEdit()"
-                @focus="editingRange = true"
-                @blur="editingRange = false"
+                @focus="beginEditField('from')"
+                @blur="endEditField"
                 @change="applyRange()"
               />
             </label>
@@ -705,8 +749,8 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
                 :clearable="false"
                 :teleported="false"
                 :disabled="!canEdit()"
-                @focus="editingRange = true"
-                @blur="editingRange = false"
+                @focus="beginEditField('to')"
+                @blur="endEditField"
                 @change="applyRange()"
               />
             </label>

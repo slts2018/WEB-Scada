@@ -423,6 +423,21 @@ export function trendHistoryWindowOf(widgetId: string): TrendHistoryWindow | nul
   return w ? effectiveTrendWindow(w) : null
 }
 
+/** 当前生效的预设区间 id（运行端在工具条上改过就以改过的为准，不再是设计端的 props.range） */
+export function trendHistoryPresetOf(widgetId: string): string {
+  return widgets.get(widgetId)?.preset ?? ''
+}
+
+/**
+ * 当前窗口是不是"用户自己指定的绝对区间"（起止时间 / 缩放 / 平移 / 报警跳转）。
+ * 是的话工具条上的区间下拉要显示"自定义区间"，否则会让人以为还在按预设（比如"最近1小时"）取数，
+ * 而实际窗口是另一段绝对时间。
+ */
+export function trendHistoryIsManualWindow(widgetId: string): boolean {
+  const w = widgets.get(widgetId)
+  return Boolean(w?.custom && !w.autoFrozen)
+}
+
 export function trendHistorySearchOf(widgetId: string): TrendHistoryWindow | undefined {
   return widgets.get(widgetId)?.customRange ?? undefined
 }
