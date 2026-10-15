@@ -121,7 +121,16 @@ function syncHistoryBars() {
 }
 
 /** 历史趋势工具栏：按图元矩形定位（与"历史报警"的搜索条同一套做法） */
-type TrendBar = { id: string; preset: string; tagIds: string[]; x: number; y: number; w: number; h: number }
+type TrendBar = {
+  id: string
+  preset: string
+  tagIds: string[]
+  allowEdit: boolean
+  x: number
+  y: number
+  w: number
+  h: number
+}
 const trendBars = ref<TrendBar[]>([])
 
 function syncTrendBars() {
@@ -149,6 +158,7 @@ function syncTrendBars() {
         id: widget.id,
         preset: String(widget.props.range ?? '-1h'),
         tagIds: trendCurves(widget.props).map((curve) => curve.tagId).filter(Boolean),
+        allowEdit: widget.props.allowTimeEdit !== false,
         ...rect,
       })
     }
@@ -553,6 +563,7 @@ onUnmounted(() => {
       :widget-id="bar.id"
       :preset="bar.preset"
       :tag-ids="bar.tagIds"
+      :allow-edit="bar.allowEdit"
       :style="{ left: bar.x + 'px', top: bar.y + 'px', width: bar.w + 'px', height: bar.h + 'px' }"
       @change="onHistorySearch"
     />

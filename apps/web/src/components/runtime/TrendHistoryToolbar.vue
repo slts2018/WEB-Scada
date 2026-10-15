@@ -27,7 +27,15 @@ import {
   zoomTrendHistoryWindow,
 } from '@/shared/runtime/trendHistoryQuery'
 
-const props = defineProps<{ widgetId: string; preset: string; tagIds: string[] }>()
+const props = defineProps<{
+  widgetId: string
+  preset: string
+  tagIds: string[]
+  /** 运行端是否允许改时间区间/缩放/采样间隔（发布端可锁死） */
+  allowEdit?: boolean
+}>()
+
+const canEdit = () => props.allowEdit !== false
 const emit = defineEmits<{ change: [] }>()
 
 const preset = ref(props.preset || '-1h')
@@ -134,6 +142,7 @@ function exportCsv(): void {
       size="small"
       class="w-preset"
       :teleported="false"
+      :disabled="!canEdit()"
       @change="applyPreset"
     >
       <el-option v-for="item in TREND_RANGES" :key="item.id" :label="item.label" :value="item.id" />
@@ -147,24 +156,31 @@ function exportCsv(): void {
       range-separator="~"
       :clearable="false"
       :teleported="false"
+      :disabled="!canEdit()"
     />
-    <el-button size="small" type="primary" @click="applyRange">查</el-button>
+    <el-button size="small" type="primary" :disabled="!canEdit()" @click="applyRange">查</el-button>
     <el-button-group>
-      <el-button size="small" @click="shift(-1)">◀</el-button>
-      <el-button size="small" @click="shift(1)">▶</el-button>
-      <el-button size="small" @click="zoom(2)">－</el-button>
-      <el-button size="small" @click="zoom(0.5)">＋</el-button>
+      <el-button size="small" :disabled="!canEdit()" @click="shift(-1)">◀</el-button>
+      <el-button size="small" :disabled="!canEdit()" @click="shift(1)">▶</el-button>
+      <el-button size="small" :disabled="!canEdit()" @click="zoom(2)">－</el-button>
+      <el-button size="small" :disabled="!canEdit()" @click="zoom(0.5)">＋</el-button>
     </el-button-group>
     <el-select
       v-model="interval"
       size="small"
       class="w-interval"
       :teleported="false"
+      :disabled="!canEdit()"
       @change="applyInterval"
     >
       <el-option v-for="item in TREND_INTERVALS" :key="item.id" :label="item.label" :value="item.id" />
     </el-select>
-    <el-checkbox :model-value="follow" size="small" @update:model-value="toggleFollow">跟随</el-checkbox>
+    <el-checkbox
+      :model-value="follow"
+      size="small"
+      :disabled="!canEdit()"
+      @update:model-value="toggleFollow"
+    >跟随</el-checkbox>
     <el-button size="small" @click="refresh">刷新</el-button>
     <el-button size="small" @click="exportCsv">CSV</el-button>
     <span v-if="aggWindow && interval === 'auto'" class="hint">按 {{ aggWindow }} 平均</span>

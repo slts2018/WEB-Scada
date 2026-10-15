@@ -87,6 +87,40 @@ function addTrendCurve() {
   writeTrendCurves([...list, { tagId: '', color: trendCurveColor(list.length) }])
 }
 
+/** 已在曲线列表里的变量（批量选择时置灰） */
+const trendCurveTagIds = computed(() => new Set(trendCurveList.value.map((curve) => curve.tagId)))
+const trendAddSelection = ref<string[]>([])
+
+/**
+ * 批量添加变量：一次勾选好几个变量直接变曲线（这是历史/实时趋势最常用的入口）。
+ * 去重 + 上限都在这里控制，避免写进去一个重复的变量。
+ */
+function addTrendCurves(tagIds: string[]) {
+  if (!widget.value || !tagIds.length) return
+  const list = trendCurveList.value.slice()
+  const used = new Set(list.map((curve) => curve.tagId))
+  let added = 0
+  let skipped = 0
+  for (const tagId of tagIds) {
+    if (!tagId || used.has(tagId) || list.length >= TREND_MAX_CURVES) {
+      skipped += 1
+      continue
+    }
+    used.add(tagId)
+    list.push({ tagId, color: trendCurveColor(list.length) })
+    added += 1
+  }
+  trendAddSelection.value = []
+  if (!added) {
+    ElMessage.warning(
+      list.length >= TREND_MAX_CURVES ? `最多 ${TREND_MAX_CURVES} 条曲线` : '这些变量已经在曲线列表里',
+    )
+    return
+  }
+  writeTrendCurves(list)
+  if (skipped) ElMessage.info(`已添加 ${added} 条；${skipped} 条未加入（重复或超出 ${TREND_MAX_CURVES} 条上限）`)
+}
+
 function setTrendCurve(tagId: string, patch: Partial<TrendCurve>) {
   writeTrendCurves(
     trendCurveList.value.map((curve) => (curve.tagId === tagId ? { ...curve, ...patch } : curve)),
@@ -545,12 +579,32 @@ async function replaceImage(e: Event) {
                 删除
               </el-button>
             </div>
+            <el-select
+              v-model="trendAddSelection"
+              multiple
+              filterable
+              collapse-tags
+              collapse-tags-tooltip
+              size="small"
+              class="curve-add"
+              placeholder="批量添加变量（可搜索 / 多选）"
+              :disabled="trendCurveList.length >= TREND_MAX_CURVES"
+              @change="(v: string[]) => addTrendCurves(v)"
+            >
+              <el-option
+                v-for="item in tags.list"
+                :key="item.meta.tagId"
+                :label="formatTagOptionLabel(item.meta, item.value?.quality)"
+                :value="item.meta.tagId"
+                :disabled="trendCurveTagIds.has(item.meta.tagId)"
+              />
+            </el-select>
             <el-button
               size="small"
               :disabled="trendCurveList.length >= TREND_MAX_CURVES"
               @click="addTrendCurve"
             >
-              添加变量
+              加一行空变量
             </el-button>
             <el-button size="small" @click="exportTrendPng">导出图片</el-button>
           </div>
@@ -627,6 +681,13 @@ async function replaceImage(e: Event) {
           @update:model-value="(v: boolean | string | number) => updateProp('showToolbar', Boolean(v))"
         >
           显示图内工具栏（区间 / 缩放 / 跟随 / 导出）
+        </el-checkbox>
+        <el-checkbox
+          v-if="widget.type === 'trendHistory'"
+          :model-value="widget.props.allowTimeEdit !== false"
+          @update:model-value="(v: boolean | string | number) => updateProp('allowTimeEdit', Boolean(v))"
+        >
+          允许运行端改时间区间（取消 = 发布端只能看，能刷新/导出）
         </el-checkbox>
         <label v-if="widget.type !== 'trendHistory'">
           <span>类型</span>
@@ -877,6 +938,10 @@ async function replaceImage(e: Event) {
 
 .curve-row :deep(.el-select),
 .curve-row :deep(.el-input) {
+  width: 100%;
+}
+
+.curve-add {
   width: 100%;
 }
 
