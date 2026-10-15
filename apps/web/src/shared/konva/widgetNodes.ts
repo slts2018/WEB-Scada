@@ -8,6 +8,7 @@ import {
 import { useProjectStore } from '@/stores/project'
 import { useTagStore } from '@/stores/tag'
 import {
+  trendHistoryQualities,
   trendHistorySeries,
   trendHistoryTimes,
   trendHistoryTimesForFirstQuery,
@@ -406,6 +407,11 @@ export function buildTrendSpec(opts: {
         ).slice(),
         times: isHistory ? trendHistoryTimes(widget.id, curve.tagId) : curveTimes(widget.id, curve.tagId),
         step: seriesStepOf(curve.tagId),
+        // 每曲线显示格式（属性面板配的"单位 / 小数位"）
+        unit: curve.unit,
+        decimals: curve.decimals,
+        // 坏质量（Bad/Offline）区间标红：只有历史查询带质量
+        qualities: isHistory ? trendHistoryQualities(widget.id, curve.tagId) : undefined,
       }))
     : [
         {
@@ -494,6 +500,18 @@ export function buildTrendLiveSpec(
   })
 }
 
+/** 坏质量点数量：只用来做位图缓存的 key（质量变了要重画） */
+function badQualityCount(series: { qualities?: Array<string | null> }): number {
+  const q = series.qualities
+  if (!q || !q.length) return 0
+  let n = 0
+  for (const item of q) {
+    const text = String(item ?? '').toLowerCase()
+    if (text === 'bad' || text === 'offline' || text === 'uncertain' || text === 'stale') n += 1
+  }
+  return n
+}
+
 /**
  * 图片路径：把规格渲染成一张位图（缓存 key = 尺寸 + 数据末值 + 配置）。
  */
@@ -505,7 +523,7 @@ function trendChartCanvas(opts: Parameters<typeof buildTrendSpec>[0]): HTMLCanva
     spec.series
       .map(
         (item) =>
-          `${item.name}:${item.points.length}:${item.points[item.points.length - 1] ?? ''}:${item.color}`,
+          `${item.name}:${item.points.length}:${item.points[item.points.length - 1] ?? ''}:${item.color}:${item.unit ?? ''}:${item.decimals ?? ''}:${badQualityCount(item)}`,
       )
       .join('|'),
     `min=${spec.min ?? 'auto'},max=${spec.max ?? 'auto'},f=${spec.theme.fontSize},stack=${spec.stacked ? 1 : 0}`,
@@ -746,7 +764,10 @@ function trendShapeKey(widget: Widget2D): string {
     widget.type,
     `${Math.round(width)}x${Math.round(height)}`,
     trendCurves(widget.props)
-      .map((curve) => `${curve.tagId}|${curve.label ?? ''}|${curve.color ?? ''}`)
+      .map(
+        (curve) =>
+          `${curve.tagId}|${curve.label ?? ''}|${curve.color ?? ''}|${curve.unit ?? ''}|${curve.decimals ?? ''}`,
+      )
       .join(','),
     [...hiddenCurveIds(widget)].sort().join(','),
     String(widget.props.title ?? ''),
@@ -788,7 +809,7 @@ function refreshTrendShape(shape: Konva.Group, widget: Widget2D): boolean {
       const index = Number(text.getAttr('legendIndex') ?? -1)
       const curve = curves[index]
       if (!curve) return
-      const next = formatLegendValue(values(curve))
+      const next = formatLegendValue(values(curve), { unit: curve.unit, decimals: curve.decimals })
       if (text.text() !== next) {
         text.text(next)
         dirty = true
@@ -1291,6 +1312,12 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
         const src = pageStart + i
         const ids = Array.isArray(widget.props.alarmRowIds) ? widget.props.alarmRowIds : []
         const alarmId = ids[src] == null ? '' : String(ids[src])
+        // 历史报警行的"事件时刻"（运行端写入 props）；有它这一行就可点（反查历史趋势）
+        const rowTimes = Array.isArray(widget.props.alarmRowTimes) ? widget.props.alarmRowTimes : []
+        const rowAtRaw = Number(rowTimes[src])
+        const rowAt = Number.isFinite(rowAtRaw) ? rowAtRaw : null
+        const rowTags = Array.isArray(widget.props.alarmRowTags) ? widget.props.alarmRowTags : []
+        const rowTag = rowTags[src] == null ? '' : String(rowTags[src])
         const statusList = Array.isArray(widget.props.alarmRowStatus) ? widget.props.alarmRowStatus : null
         const levelList = Array.isArray(widget.props.alarmRowLevel) ? widget.props.alarmRowLevel : null
         const status =
@@ -1300,7 +1327,7 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
               ? String(cols[2] ?? '').trim()
               : ''
         const unacked = !isHistory && (status === '未确认' || status === '已恢复')
-        if (src % 2 === 1 || alarmId) {
+        if (src % 2 === 1 || alarmId || rowAt != null) {
           const rowRect = new Konva.Rect({
             x: 1,
             y,
@@ -1310,10 +1337,12 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
               i % 2 === 1
                 ? str(style, 'rowAlt', isHistory ? '#111827' : isAlarm ? '#1c1212' : '#111827')
                 : 'rgba(0,0,0,0.001)',
-            listening: Boolean(alarmId),
-            name: alarmId ? 'alarm-hit' : undefined,
+            listening: Boolean(alarmId) || rowAt != null,
+            name: alarmId ? 'alarm-hit' : rowAt != null ? 'history-hit' : undefined,
           })
           if (alarmId) rowRect.setAttr('alarmId', alarmId)
+          if (rowAt != null) rowRect.setAttr('alarmAt', rowAt)
+          if (rowAt != null && rowTag) rowRect.setAttr('alarmTag', rowTag)
           g.add(rowRect)
         }
         const level =

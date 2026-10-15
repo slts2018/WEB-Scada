@@ -71,6 +71,11 @@ function writeTrendCurves(next: TrendCurve[]) {
         ...(curve.label ? { label: curve.label } : {}),
         ...(curve.color ? { color: curve.color } : {}),
         ...(curve.series && curve.series.length ? { series: curve.series } : {}),
+        // 显示格式（可选字段：老工程没有就按原来"按量级自适应"）
+        ...(curve.unit ? { unit: curve.unit } : {}),
+        ...(typeof curve.decimals === 'number' ? { decimals: curve.decimals } : {}),
+        ...(typeof curve.min === 'number' ? { min: curve.min } : {}),
+        ...(typeof curve.max === 'number' ? { max: curve.max } : {}),
       })),
     },
   })
@@ -549,7 +554,8 @@ async function replaceImage(e: Event) {
         <label v-if="widget.type === 'trend' || widget.type === 'trendHistory'" class="top">
           <span>曲线变量（最多 {{ TREND_MAX_CURVES }} 条）</span>
           <div class="curve-list">
-            <div v-for="(curve, i) in trendCurveList" :key="curve.tagId" class="curve-row">
+            <div v-for="(curve, i) in trendCurveList" :key="curve.tagId || `empty${i}`" class="curve-block">
+            <div class="curve-row">
               <el-select
                 size="small"
                 filterable
@@ -578,6 +584,25 @@ async function replaceImage(e: Event) {
               <el-button size="small" text type="danger" @click="removeTrendCurve(curve.tagId)">
                 删除
               </el-button>
+            </div>
+            <div class="curve-row curve-row--fmt">
+              <span class="curve-name">{{ curve.label || curve.tagId || `曲线 ${i + 1}` }} 显示格式</span>
+              <el-input
+                size="small"
+                placeholder="单位"
+                :model-value="curve.unit ?? ''"
+                @update:model-value="(v: string) => setTrendCurve(curve.tagId, { unit: v.trim() })"
+              />
+              <el-input-number
+                size="small"
+                controls-position="right"
+                placeholder="小数位"
+                :min="0"
+                :max="6"
+                :model-value="curve.decimals"
+                @update:model-value="(v: number | undefined) => setTrendCurve(curve.tagId, { decimals: v == null ? undefined : Number(v) })"
+              />
+            </div>
             </div>
             <el-select
               v-model="trendAddSelection"
@@ -939,6 +964,35 @@ async function replaceImage(e: Event) {
 .curve-row :deep(.el-select),
 .curve-row :deep(.el-input) {
   width: 100%;
+}
+
+/* 变量行 + 它自己的"显示格式"行成一块 */
+.curve-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-bottom: 2px;
+}
+
+.curve-row--fmt {
+  grid-template-columns: minmax(0, 1fr) 88px 96px;
+}
+
+.curve-row--fmt :deep(.el-input-number) {
+  width: 100%;
+}
+
+/* 显示格式行：曲线名 + 单位 + 小数位 */
+.curve-row .curve-name {
+  overflow: hidden;
+  color: var(--scada-muted, #8b93a7);
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.curve-list .curve-row:nth-child(even) {
+  /* 变量行与格式行成对出现，这里不额外加间距 */
 }
 
 .curve-add {

@@ -19,6 +19,7 @@ import {
   widgetHasInteractiveLinks,
 } from '@/shared/runtime/bindingEngine'
 import { createClickDblclickGate } from '@/shared/runtime/clickDblclickGate'
+import { setActiveTrendToolbar } from '@/shared/runtime/trendToolbarFocus'
 
 export interface RuntimeStageHandlers {
   /** 图元交互事件（含 mouseEnter / mouseLeave） */
@@ -28,6 +29,8 @@ export interface RuntimeStageHandlers {
   onAnimationInput?: (widgetId: string) => void
   /** 实时报警行被点击，确认这一条 */
   onAlarmAck?: (alarmId: string) => void
+  /** 历史报警行被点击：反向联动到历史趋势（跳到这一条的时刻） */
+  onHistoryRowPick?: (widgetId: string, at: number, tagId?: string) => void
   onDragWrite?: (
     widgetId: string,
     axis: 'h' | 'v',
@@ -56,6 +59,8 @@ export interface RuntimeStageBundle {
   syncOverlays: () => void
   /** 原生叠层是否接收鼠标（只读 3D 面板里关掉） */
   setOverlayInteractive: (on: boolean) => void
+  /** 图元最大化：视口聚焦到该图元并隐藏其它图元（null = 还原整页） */
+  setFocusWidget: (widgetId: string | null) => void
 }
 
 /**
@@ -129,6 +134,9 @@ export function createRuntimeStage(
   const isTrendWidget = (widget: Widget2D): boolean =>
     widget.type === 'trend' || widget.type === 'trendHistory'
 
+  /** 最大化显示的图元 id（null = 正常整页显示） */
+  let focusId: string | null = null
+
   const trendLiveOverlay = createTrendLiveOverlay({
     host: container,
     onLegendSelect: (widgetId, hiddenNames) => {
@@ -154,6 +162,8 @@ export function createRuntimeStage(
     onCursor: (widgetId, at) => {
       const widget = sourceWidgetOf(widgetId)
       if (!widget || widget.type !== 'trendHistory') return
+      // 图内落了游标 = "这个图元接着键盘"（←/→、+/-、Esc 才落到它身上）
+      setActiveTrendToolbar(widgetId)
       setTrendHistoryCursor(widgetId, at)
       syncTrendOverlays()
     },
@@ -190,6 +200,59 @@ export function createRuntimeStage(
     syncTrendOverlays()
   }
 
+  /**
+   * 图元最大化 / 还原。
+   *
+   * 为什么用"缩放视口 + 隐藏其它图元"而不是新开一个舞台：图元本身、原生 ECharts 叠层、
+   * 工具条/点表这些 HTML 叠层都是按图元的绝对变换定位的，只要动 stage 的 scale/position，
+   * 它们会自己跟上，不必再维护第二套渲染路径（也不会重复订阅 Tag）。
+   * 最大化不改图元 transform，退出后整页视图原样还原。
+   */
+  const applyFocus = () => {
+    const target = focusId
+    for (const widget of allWidgetsOf()) {
+      const node = widgetLayer.findOne('#' + widget.id) as Konva.Group | null
+      if (!node) continue
+      const show = target == null ? widget.visible !== false : widget.id === target
+      node.visible(show)
+    }
+    if (target == null) {
+      fitToView()
+      return
+    }
+    const node = widgetLayer.findOne('#' + target) as Konva.Group | null
+    if (!node) {
+      focusId = null
+      fitToView()
+      return
+    }
+    const rect = node.getClientRect({ relativeTo: widgetLayer, skipShadow: true, skipStroke: false })
+    const cw = stage.width()
+    const ch = stage.height()
+    const margin = 6
+    const w = Math.max(1, rect.width)
+    const h = Math.max(1, rect.height)
+    const scale = Math.max(
+      0.05,
+      Math.min((cw - margin * 2) / w, (ch - margin * 2) / h),
+    )
+    stage.scale({ x: scale, y: scale })
+    stage.position({
+      x: (cw - w * scale) / 2 - rect.x * scale,
+      y: (ch - h * scale) / 2 - rect.y * scale,
+    })
+    stage.batchDraw()
+    viewChangeListener?.()
+    syncTrendOverlays()
+  }
+
+  const setFocusWidget = (widgetId: string | null) => {
+    const next = widgetId && widgetId.trim() ? widgetId.trim() : null
+    if (next === focusId) return
+    focusId = next
+    applyFocus()
+  }
+
   let viewChangeListener: (() => void) | null = null
 
   const getWidgetClientRect = (widgetId: string) => {
@@ -224,6 +287,9 @@ export function createRuntimeStage(
     const interactive =
       (widget.events?.length ?? 0) > 0 || widgetHasInteractiveLinks(widget)
     const alarmWidget = widget.type === 'alarm'
+    // 历史报警行可点：点了反查历史趋势（见 onHistoryRowPick）。
+    // 没人接这个回调时（例如只读的面板运行时）不要吃掉点击，保持原行为。
+    const historyWidget = widget.type === 'alarmHistory' && Boolean(handlers.onHistoryRowPick)
     // 趋势图元的图例要能点（隐藏/恢复曲线）：它不是"图元事件"，但必须参与命中测试，
     // 否则 listening(false) 会让整棵子树都点不到 —— 运行端"点了没反应"的根因。
     const legendToggle = widgetHasCurveLegend(widget)
@@ -232,9 +298,9 @@ export function createRuntimeStage(
     const canDrag = Boolean(dragH || dragV)
 
     node.draggable(canDrag)
-    node.listening(interactive || alarmWidget || legendToggle)
+    node.listening(interactive || alarmWidget || historyWidget || legendToggle)
 
-    if (!interactive && !alarmWidget) return
+    if (!interactive && !alarmWidget && !historyWidget) return
 
     const designX = widget.transform.x
     const designY = widget.transform.y
@@ -328,6 +394,15 @@ export function createRuntimeStage(
         handlers.onAlarmAck?.(String(alarmId))
         return
       }
+      // 历史报警：行上带"事件时刻"，点了就把同一画面的历史趋势跳过去
+      if (historyWidget) {
+        const at = Number(e.target?.getAttr?.('alarmAt'))
+        if (Number.isFinite(at)) {
+          const tagId = String(e.target?.getAttr?.('alarmTag') ?? '')
+          handlers.onHistoryRowPick?.(widget.id, at, tagId || undefined)
+          return
+        }
+      }
       if (interactive) emitClickOrDbl('click')
     })
     node.on('dblclick', (e) => {
@@ -413,6 +488,8 @@ export function createRuntimeStage(
 
   const renderPage = (next: Page2D) => {
     clearAllBlink()
+    // 换页 / 重新渲染整页时退出最大化：新页面上那个图元不一定还在
+    focusId = null
     currentPage = next
     pageWidth = next.width
     pageHeight = next.height
@@ -475,7 +552,7 @@ export function createRuntimeStage(
         widgetLayer.batchDraw()
         return
       }
-      node.visible(true)
+      node.visible(focusId == null || focusId === widgetId)
       node.position({ x: visual.transform.x, y: visual.transform.y })
       node.rotation(visual.transform.rotation)
       node.scale({ x: visual.transform.scaleX ?? 1, y: visual.transform.scaleY ?? 1 })
@@ -511,7 +588,8 @@ export function createRuntimeStage(
       return
     }
 
-    node.visible(true)
+    // 最大化时只显示被聚焦的那一个（否则每秒一次的属性刷新会把隐藏的图元弹回来）
+    node.visible(focusId == null || focusId === widgetId)
     const wasDragging = node.isDragging()
     if (!wasDragging) {
       syncWidgetNode(node, visual)
@@ -614,6 +692,7 @@ export function createRuntimeStage(
     },
     getSourceWidget: sourceWidgetOf,
     getWidgetClientRect,
+    setFocusWidget,
     setViewChangeListener: (fn) => {
       viewChangeListener = fn
     },

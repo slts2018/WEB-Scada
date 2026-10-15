@@ -17,6 +17,7 @@ import {
   TooltipComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
+import { formatTrendValue } from '@web-scada/core'
 
 use([
   LineChart,
@@ -42,6 +43,12 @@ export interface TrendChartSeries {
   times?: number[]
   /** 开关量 / 枚举量：用阶梯画（否则会被误看成斜线变化） */
   step?: boolean
+  /** 该时刻的质量（历史趋势）；Bad/Offline 区间在图上标红 */
+  qualities?: Array<string | null>
+  /** 显示单位（图例 / 悬停读数 / 游标读数 / 点表）；留空 = 不显示 */
+  unit?: string
+  /** 显示小数位；留空 = 按量级自适应 */
+  decimals?: number
 }
 
 export interface TrendChartSpec {
@@ -63,6 +70,8 @@ export interface TrendChartSpec {
   limits?: Array<{ value: number; label: string }>
   /** 报警区间（触发~恢复）：淡红底色 */
   alarmBands?: Array<{ from: number; to: number }>
+  /** 坏质量（Bad/Offline/Uncertain）区间的标记色；默认红 */
+  badQualityColor?: string
   /** 单曲线的固定量程；多曲线传 undefined = 每条曲线按自身数据自动缩放 */
   min?: number
   max?: number
@@ -270,6 +279,40 @@ function formatAxisClock(value: number): string {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
+/**
+ * 坏质量段（Bad / Offline / Uncertain）的红色覆盖序列。
+ *
+ * 为什么用"再画一条线"而不是改主线的颜色：ECharts 一条 line 序列只有一个 lineStyle，
+ * 想让"某几段变红"就得把这段单独画出来。这里保留坏段两端各一个点，
+ * 让红线与曲线颜色线在缺口两侧接得上，不会看着断成两截。
+ */
+const QUALITY_SERIES_PREFIX = '__quality__'
+
+function isBadQuality(q: string | null | undefined): boolean {
+  const text = String(q ?? '').toLowerCase()
+  return text === 'bad' || text === 'offline' || text === 'uncertain' || text === 'stale'
+}
+
+export function qualityOverlayPoints(s: TrendChartSeries): Array<number | null> {
+  const q = s.qualities
+  if (!q || !q.length) return []
+  const n = s.points.length
+  const out: Array<number | null> = new Array(n).fill(null)
+  let touched = false
+  for (let i = 0; i < n; i++) {
+    if (!isBadQuality(q[i])) {
+      touched = false
+      continue
+    }
+    out[i] = s.points[i] ?? null
+    // 缺口两侧各补一个点，让红线接进曲线色
+    if (!touched && i > 0 && out[i - 1] == null) out[i - 1] = s.points[i - 1] ?? null
+    touched = true
+    if (i + 1 < n && !isBadQuality(q[i + 1])) out[i + 1] = s.points[i + 1] ?? null
+  }
+  return out.some((v) => v != null) ? out : []
+}
+
 /** 分类轴的类目：按最长曲线取 0..n-1（堆叠/多曲线时要显式给，保证各曲线按序号对齐） */
 function categoryAxisData(spec: TrendChartSpec): string[] {
   const maxLen = spec.series.reduce((acc, item) => Math.max(acc, item.points.length), 0)
@@ -341,6 +384,8 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
           itemHeight: Math.round(tickFont * 0.5),
           textStyle: { color: axisColor, fontSize: tickFont },
           inactiveColor: 'rgba(148,163,184,0.35)',
+          // 只列真实曲线：坏质量段的红色覆盖序列不进图例
+          data: spec.series.map((item) => item.name),
           // 每次 setOption 都写上，避免下一帧把点掉的曲线弹回来
           selected: Object.fromEntries(
             spec.series.map((item) => [item.name, !(spec.legendOff ?? []).includes(item.name)]),
@@ -364,20 +409,25 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
           : [params as Record<string, unknown>]
         if (!list.length) return ''
         const head = String(list[0]?.axisValueLabel ?? list[0]?.name ?? '')
-        const rows = list.map((item) => {
-          const raw = item.value
-          const num = Array.isArray(raw) ? raw[raw.length - 1] : raw
-          const text =
-            typeof num === 'number' && Number.isFinite(num)
-              ? Math.abs(num) >= 100
-                ? num.toFixed(1)
-                : num.toFixed(2)
-              : '—'
-          // 变量名补空格对齐（rich 的 width 不总是被尊重，补空格最稳）
-          const name = String(item.seriesName ?? '')
-          const padded = name.length < 14 ? name.padEnd(14) : name
-          return `${(item.marker as string) ?? ''}{name|${padded}}{value|${text}}`
-        })
+        const rows = list
+          // 坏质量覆盖序列只是"标红"，不进读数
+          .filter((item) => !String(item.seriesName ?? '').startsWith(QUALITY_SERIES_PREFIX))
+          .map((item) => {
+            const raw = item.value
+            const num = Array.isArray(raw) ? raw[raw.length - 1] : raw
+            // 取值/单位/小数位按该曲线自己的显示格式（与图例、游标读数、点表一致）
+            const si = Number(item.seriesIndex)
+            const meta = Number.isInteger(si) ? spec.series[si] : undefined
+            const text = formatTrendValue(
+              typeof num === 'number' && Number.isFinite(num) ? num : null,
+              { unit: meta?.unit, decimals: meta?.decimals },
+            )
+            // 变量名补空格对齐（rich 的 width 不总是被尊重，补空格最稳）
+            const name = String(item.seriesName ?? '')
+            const padded = name.length < 14 ? name.padEnd(14) : name
+            return `${(item.marker as string) ?? ''}{name|${padded}}{value|${text}}`
+          })
+        if (!rows.length) return `{head|${head}}`
         return `{head|${head}}\n${rows.join('\n')}`
       },
       textStyle: {
@@ -527,7 +577,8 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
       axisLabel: { color: axisColor, fontSize: tickFont, margin: 4 },
       splitLine,
     },
-    series: spec.series.map((s, si) => ({
+    series: [
+      ...spec.series.map((s, si) => ({
       type: 'line',
       // 限值线只挂在第一条曲线上（同一个纵轴，挂多少条就画多少遍）
       ...(si === 0 && spec.limits?.length
@@ -569,7 +620,38 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
         useTime && s.times
           ? s.points.map((v, i) => [s.times?.[i] ?? i, v])
           : s.points,
-    })),
+      })),
+      // 坏质量段标红：叠一条只画坏段的线，压在曲线色之上（不进图例、不进读数）
+      ...(spec.stacked
+        ? []
+        : spec.series
+            .map((s, si) => {
+              const overlay = qualityOverlayPoints(s)
+              if (!overlay.length) return null
+              return {
+                type: 'line' as const,
+                name: `${QUALITY_SERIES_PREFIX}${si}`,
+                silent: true,
+                animation: false,
+                legendHoverLink: false,
+                showSymbol: false,
+                tooltip: { show: false },
+                ...(s.step ? { step: 'end' as const } : {}),
+                z: 4,
+                lineStyle: {
+                  width: Math.max(3, Math.round(F / 5)),
+                  color: spec.badQualityColor ?? '#ef4444',
+                  opacity: 0.9,
+                },
+                itemStyle: { color: spec.badQualityColor ?? '#ef4444' },
+                data:
+                  useTime && s.times
+                    ? overlay.map((v, i) => [s.times?.[i] ?? i, v])
+                    : overlay,
+              }
+            })
+            .filter((item): item is NonNullable<typeof item> => item != null)),
+    ],
   }
 }
 

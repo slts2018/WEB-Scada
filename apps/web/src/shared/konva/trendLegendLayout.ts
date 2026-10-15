@@ -10,12 +10,17 @@
  *
  * 文本宽度由调用方注入（真实渲染走 Konva 的度量，单测里给个假函数即可）。
  */
+import { formatTrendValue, type TrendValueFormat } from '@web-scada/core'
 
 export interface TrendLegendCurve {
   tagId: string
   /** 图例名；空则用 tagId */
   label?: string
   color?: string
+  /** 显示单位（留空 = 不显示） */
+  unit?: string
+  /** 显示小数位（留空 = 按量级自适应） */
+  decimals?: number
 }
 
 export interface TrendLegendEntry {
@@ -40,13 +45,9 @@ export interface TrendLegendLayout {
   overflow: { text: string; row: number; x: number } | null
 }
 
-/** 图例里的当前值：小数位按量级收敛；没有采样显示 "—" */
-export function formatLegendValue(v: number | null | undefined): string {
-  if (typeof v !== 'number' || !Number.isFinite(v)) return '—'
-  const abs = Math.abs(v)
-  if (abs >= 10000) return v.toFixed(0)
-  if (abs >= 100) return v.toFixed(1)
-  return v.toFixed(2)
+/** 图例里的当前值：按曲线配置的小数位/单位显示；没有采样显示 "—" */
+export function formatLegendValue(v: number | null | undefined, format?: TrendValueFormat): string {
+  return formatTrendValue(v, format)
 }
 
 /** 图例最多几行：别把绘图区挤没（最多 4 行，且不超过图元高度的 42%） */
@@ -76,7 +77,9 @@ export function trendLegendLayout(opts: {
     Math.ceil(opts.maxRows ?? maxTrendLegendRows(height, rowHeight)),
   )
   // 值那一列定宽：数字位数变化不会让图例重新换行（否则每秒重排一次，看着抖）
-  const valueW = Math.round(fontSize * 3.1)
+  // 有单位时再宽一点，否则 "58.0 %" 会被裁掉
+  const hasUnit = curves.some((curve) => Boolean(curve.unit && curve.unit.trim()))
+  const valueW = Math.round(fontSize * (hasUnit ? 5.4 : 3.1))
   const gutter = Math.round(fontSize * 0.8)
   const usable = Math.max(fontSize * 6, width - 16)
   const entries: TrendLegendEntry[] = []
@@ -114,6 +117,7 @@ export function trendLegendLayout(opts: {
       labelW,
       value: formatLegendValue(
         typeof opts.valueOf === 'function' ? opts.valueOf(curve, index) : undefined,
+        { unit: curve.unit, decimals: curve.decimals },
       ),
       valueW,
     })

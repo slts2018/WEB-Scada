@@ -113,15 +113,27 @@ export function stepTrendHistoryCursor(widgetId: string, dir: -1 | 1, tagIds: st
   if (typeof next === 'number') setTrendHistoryCursor(widgetId, next)
 }
 
-/** 复制到工单/聊天用的单行文本 */
-export function trendHistoryCursorText(widgetId: string, tagIds: string[]): string {
+/**
+ * 复制到工单/聊天用的单行文本。
+ * formatValue 由界面注入（按每条曲线配的单位/小数位格式化），缺省用原始数值。
+ */
+export function trendHistoryCursorText(
+  widgetId: string,
+  tagIds: string[],
+  formatValue?: (tagId: string, value: number | null) => string,
+): string {
   const readout = trendHistoryCursorReadout(widgetId, tagIds)
   if (!readout) return ''
   const at = new Date(readout.time)
   const p = (n: number) => String(n).padStart(2, '0')
   const stamp = `${at.getFullYear()}-${p(at.getMonth() + 1)}-${p(at.getDate())} ${p(at.getHours())}:${p(at.getMinutes())}:${p(at.getSeconds())}`
-  const parts = readout.rows.map(
-    (row) => `${row.tagId}=${row.value == null ? '—' : String(row.value)}`,
-  )
+  const parts = readout.rows.map((row) => {
+    const text = formatValue
+      ? formatValue(row.tagId, row.value)
+      : row.value == null
+        ? '—'
+        : String(row.value)
+    return `${row.tagId}=${text}`
+  })
   return `${stamp}  ${parts.join('  ')}`
 }

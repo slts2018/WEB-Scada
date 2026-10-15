@@ -151,6 +151,8 @@ function liveAlarmItems(columns: unknown): {
   ids: string[]
   statuses: string[]
   levels: string[]
+  times: number[]
+  tags: string[]
 } | null {
   try {
     const tags = useTagStore()
@@ -628,6 +630,8 @@ export function resolveWidgetVisual(
         alarmRowIds: live.ids,
         alarmRowStatus: live.statuses,
         alarmRowLevel: live.levels,
+        alarmRowTimes: live.times,
+        alarmRowTags: live.tags,
       }
     }
   }
@@ -640,6 +644,9 @@ export function resolveWidgetVisual(
         items: live.text,
         alarmRowStatus: live.statuses,
         alarmRowLevel: live.levels,
+        // 每行的事件时刻 / 变量：点这一行 → 历史趋势跳到该时刻（反向联动）
+        alarmRowTimes: live.times,
+        alarmRowTags: live.tags,
       }
     }
   }

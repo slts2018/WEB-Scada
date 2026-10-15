@@ -483,6 +483,39 @@ export interface TrendCurve {
   /** 该曲线单独的 Y 轴量程；留空 = 按自身数据自动缩放（多曲线默认） */
   min?: number
   max?: number
+  /** 显示单位（图例 / 悬停读数 / 游标读数 / 点表 / CSV）；留空 = 不显示 */
+  unit?: string
+  /** 显示小数位 0~6；留空 = 按量级自适应（原来的表现） */
+  decimals?: number
+}
+
+/** 每曲线显示格式：小数位 + 单位（留空时按量级自适应，与旧表现一致） */
+export interface TrendValueFormat {
+  unit?: string
+  decimals?: number
+}
+
+/** 数值 → 显示用小数字符串；null / 非数 → "—" */
+export function formatTrendNumber(value: number | null | undefined, decimals?: number): string {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+  const abs = Math.abs(value)
+  const digits =
+    typeof decimals === 'number' && Number.isFinite(decimals)
+      ? Math.min(6, Math.max(0, Math.trunc(decimals)))
+      : abs >= 10000
+        ? 0
+        : abs >= 100
+          ? 1
+          : 2
+  return value.toFixed(digits)
+}
+
+/** 数值 + 单位（"58.0 %"）；单位留空时就是纯数字 */
+export function formatTrendValue(value: number | null | undefined, format?: TrendValueFormat): string {
+  const text = formatTrendNumber(value, format?.decimals)
+  const unit = typeof format?.unit === 'string' ? format.unit.trim() : ''
+  if (text === '—' || !unit) return text
+  return `${text} ${unit}`
 }
 
 /** 一个趋势图元最多绑定的曲线数 */
@@ -540,6 +573,12 @@ export function trendCurves(props: Record<string, unknown> | undefined | null): 
     seen.add(dedupeKey)
     const label = typeof rec.label === 'string' && rec.label.trim() ? rec.label.trim() : undefined
     const color = typeof rec.color === 'string' && rec.color ? rec.color : undefined
+    const unit = typeof rec.unit === 'string' && rec.unit.trim() ? rec.unit.trim() : undefined
+    const rawDecimals = Number(rec.decimals)
+    const decimals =
+      Number.isFinite(rawDecimals) && rec.decimals !== null && rec.decimals !== ''
+        ? Math.min(6, Math.max(0, Math.trunc(rawDecimals)))
+        : undefined
     const series = Array.isArray(rec.series)
       ? rec.series.map((n) => Number(n)).filter((n) => Number.isFinite(n))
       : undefined
@@ -550,6 +589,8 @@ export function trendCurves(props: Record<string, unknown> | undefined | null): 
       series,
       min: finiteOrUndefined(rec.min),
       max: finiteOrUndefined(rec.max),
+      unit,
+      decimals,
     })
     if (out.length >= TREND_MAX_CURVES) break
   }

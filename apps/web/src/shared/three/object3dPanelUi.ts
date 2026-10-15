@@ -24,6 +24,10 @@ import {
   mountPanelKonvaRuntime,
   type PanelKonvaRuntime,
 } from '@/shared/three/panelKonvaRuntime'
+import {
+  getPanelTrendToolbarLayer,
+  mountPanelTrendToolbars,
+} from '@/shared/three/panelTrendToolbars'
 
 const panelKonvaByHost = new WeakMap<HTMLElement, PanelKonvaRuntime>()
 
@@ -379,6 +383,8 @@ export function getPanelKonvaRuntime(root: HTMLElement): PanelKonvaRuntime | und
 export function disposePanelKonvaRuntime(root: HTMLElement) {
   const host = findPanelHost(root)
   if (!host) return
+  // 工具条是 Vue 应用，必须先卸载（否则组件里的键盘监听/订阅会留在后台）
+  getPanelTrendToolbarLayer(host)?.dispose()
   const rt = panelKonvaByHost.get(host)
   rt?.dispose()
   panelKonvaByHost.delete(host)
@@ -389,6 +395,9 @@ export function refreshPanelKonvaVisuals(
   getTag: (id: string) => TagValue | undefined,
 ) {
   getPanelKonvaRuntime(root)?.refresh(getTag)
+  // 图元矩形可能因为面板内容/尺寸变化而变（工具条要跟着挪）
+  const host = findPanelHost(root)
+  if (host) getPanelTrendToolbarLayer(host)?.refresh()
 }
 
 function stopNav(e: Event) {
@@ -668,6 +677,9 @@ export function buildObject3dPanelElement(
     },
   })
   panelKonvaByHost.set(host, runtime)
+  // 面板里的历史趋势也挂同一套工具条（区间 / 缩放 / 跟随 / 采样间隔 / 点表 / 导出 / 快捷键）。
+  // 设计端场景是只读预览，不挂 —— 那里改区间没有意义。
+  if (!handlers.designerMode) mountPanelTrendToolbars(el, runtime)
 
   scaleWrap.appendChild(el)
   host.appendChild(scaleWrap)

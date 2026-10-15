@@ -5,8 +5,12 @@
  * 为什么是 HTML 叠层：趋势图本身画在 Konva 位图 / ECharts 原生叠层里，
  * 用 Element Plus 的日期选择器比在画布上自绘省事得多；与"历史报警"的搜索条同一套做法
  * （按图元矩形定位，见 trendToolbarClientRect）。
+ *
+ * 窄图元自适应：工具条是按图元宽度定位的，图元一小就必然放不下全部控件，
+ * 所以按实测宽度分档（宽 / 中 / 窄），放不下的收进"更多"气泡里，而不是被裁掉。
  */
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { formatTrendValue, type TrendValueFormat } from '@web-scada/core'
 import {
   setTrendHistoryTableVisible,
   trendHistoryTableVisibleOf,
@@ -41,17 +45,38 @@ import {
   trendHistoryWindowOf,
   zoomTrendHistoryWindow,
 } from '@/shared/runtime/trendHistoryQuery'
+import {
+  forgetTrendToolbar,
+  setActiveTrendToolbar,
+  shouldHandleTrendKeys,
+} from '@/shared/runtime/trendToolbarFocus'
+
+/** 曲线的显示格式（属性面板里配的单位 / 小数位） */
+export interface TrendToolbarCurve {
+  tagId: string
+  label?: string
+  unit?: string
+  decimals?: number
+}
 
 const props = defineProps<{
   widgetId: string
   preset: string
   tagIds: string[]
+  /** 曲线的单位 / 小数位（图例名可选，用于点表表头） */
+  curves?: TrendToolbarCurve[]
   /** 运行端是否允许改时间区间/缩放/采样间隔（发布端可锁死） */
   allowEdit?: boolean
+  /** 工具条实测宽度（px）；缺省时由 ResizeObserver 量 */
+  width?: number
+  /** 该图元是否正在最大化显示 */
+  fullscreen?: boolean
+  /** 是否提供"最大化"按钮（3D 面板内的只读面板不提供） */
+  fullscreenSupported?: boolean
 }>()
 
 const canEdit = () => props.allowEdit !== false
-const emit = defineEmits<{ change: [] }>()
+const emit = defineEmits<{ change: []; toggleFullscreen: [] }>()
 
 const preset = ref(props.preset || '-1h')
 const interval = ref('auto')
@@ -59,37 +84,134 @@ const follow = ref(true)
 const aggWindow = ref<string | null>(null)
 const notice = ref<{ kind: 'error' | 'empty'; text: string } | null>(null)
 const range = ref<[Date, Date]>([new Date(Date.now() - 3600_000), new Date()])
+const showHelp = ref(false)
+const showMore = ref(false)
 
-/** 点表（图下方弹出的数据表，与游标联动） */
+/* ---------- 曲线显示格式（单位 / 小数位） ---------- */
+
+const formatOf = computed(() => {
+  const map = new Map<string, TrendValueFormat>()
+  for (const curve of props.curves ?? []) {
+    map.set(curve.tagId, { unit: curve.unit, decimals: curve.decimals })
+  }
+  return map
+})
+
+/** 数值（不含单位）：游标读数与点表里的数字都用它，小数位跟属性面板一致 */
+function fmtNumber(tagId: string, value: number | null): string {
+  return formatTrendValue(value, formatOf.value.get(tagId))
+}
+
+/** 点表表头：变量名后补上单位，现场看表不用猜量纲 */
+function headerOf(tagId: string): string {
+  const unit = formatOf.value.get(tagId)?.unit?.trim()
+  return unit ? `${tagId} (${unit})` : tagId
+}
+
+/* ---------- 宽度分档：放不下的控件收进"更多" ---------- */
+
+const measured = ref(props.width && props.width > 0 ? props.width : 9999)
+const barWidth = computed(() => (measured.value > 0 ? measured.value : 9999))
+/** 中档：收起日期区间 / 采样间隔 / 导出 */
+const compact = computed(() => barWidth.value < 760)
+/** 窄档：只留区间快捷 + 前后平移 + 更多（其余全进气泡） */
+const narrow = computed(() => barWidth.value < 460)
+/** 游标读数一行放不下时改为两行 */
+const narrowCursor = computed(() => barWidth.value < 620)
+
+const root = ref<HTMLDivElement | null>(null)
+let observer: ResizeObserver | null = null
+
+/* ---------- 点表（图下方弹出的数据表，与游标联动） ---------- */
+
 const showTable = ref(trendHistoryTableVisibleOf(props.widgetId))
+const TABLE_PAGE_SIZES = [11, 20, 50, 100]
+const tablePage = ref(1)
+const tablePageSize = ref(11)
+const tableWrap = ref<HTMLDivElement | null>(null)
 
 function toggleTable(): void {
   showTable.value = !showTable.value
   setTrendHistoryTableVisible(props.widgetId, showTable.value)
   after()
 }
-const TABLE_ROWS = 11
+
+const tableRows = computed(() => trendHistoryExportRows(props.widgetId))
+
+const tableTotal = computed(() => tableRows.value?.times.length ?? 0)
+const tablePages = computed(() => Math.max(1, Math.ceil(tableTotal.value / Math.max(1, tablePageSize.value))))
+
+/** 游标所在的行号（没有游标或不在本窗口 = -1） */
+const cursorRowIndex = computed(() => {
+  const rows = tableRows.value
+  const at = cursorAt.value
+  if (!rows || at == null) return -1
+  let idx = -1
+  for (let i = 0; i < rows.times.length; i++) {
+    if ((rows.times[i] as number) <= at) idx = i
+    else break
+  }
+  return idx
+})
 
 const tableData = computed(() => {
-  const rows = trendHistoryExportRows(props.widgetId)
-  if (!rows) return { header: [] as string[], body: [] as Array<{ t: number; cells: Array<number | null>; cursor: boolean }>, total: 0 }
-  const at = cursorAt.value
-  let start = Math.max(0, rows.times.length - TABLE_ROWS)
-  if (at != null) {
-    let idx = 0
-    for (let i = 0; i < rows.times.length; i++) if ((rows.times[i] as number) <= at) idx = i
-    start = Math.min(Math.max(0, idx - Math.floor(TABLE_ROWS / 2)), Math.max(0, rows.times.length - TABLE_ROWS))
+  const rows = tableRows.value
+  if (!rows) {
+    return {
+      header: [] as string[],
+      body: [] as Array<{ t: number; cells: Array<number | null>; cursor: boolean }>,
+      total: 0,
+    }
   }
-  const body = rows.times.slice(start, start + TABLE_ROWS).map((t, k) => {
+  const size = Math.max(1, tablePageSize.value)
+  const start = (Math.min(tablePage.value, tablePages.value) - 1) * size
+  const body = rows.times.slice(start, start + size).map((t, k) => {
     const i = start + k
     return {
       t: t as number,
-      cells: rows.values.map((col) => col[i] ?? null),
-      cursor: at != null && rows.times[i] === at,
+      cells: rows.tagIds.map((tagId) => {
+        const col = rows.values[rows.tagIds.indexOf(tagId)]
+        return col?.[i] ?? null
+      }),
+      cursor: cursorAt.value != null && rows.times[i] === cursorAt.value,
     }
   })
   return { header: rows.tagIds, body, total: rows.times.length }
 })
+
+/**
+ * 把游标那一行滚进可视区（翻页 / 游标移动后都要做）。
+ * 只滚表格自己的 scrollTop —— 用 scrollIntoView 会把整个画面/页面容器一起带走。
+ */
+function scrollCursorIntoView(): void {
+  void nextTick(() => {
+    const wrap = tableWrap.value
+    if (!wrap) return
+    const row = wrap.querySelector('[data-cursor="1"]') as HTMLElement | null
+    if (!row) return
+    const target = row.offsetTop - (wrap.clientHeight - row.offsetHeight) / 2
+    wrap.scrollTop = Math.max(0, target)
+  })
+}
+
+/** 跳到游标所在页（工具栏"定位游标"按钮，游标移动时也自动跟） */
+function gotoCursorPage(): void {
+  const idx = cursorRowIndex.value
+  if (idx < 0) return
+  const size = Math.max(1, tablePageSize.value)
+  tablePage.value = Math.min(tablePages.value, Math.floor(idx / size) + 1)
+  scrollCursorIntoView()
+}
+
+function changePage(page: number): void {
+  tablePage.value = Math.min(tablePages.value, Math.max(1, page))
+  scrollCursorIntoView()
+}
+
+function changePageSize(size: number): void {
+  tablePageSize.value = Math.max(1, Number(size) || 11)
+  gotoCursorPage()
+}
 
 function fmtRowTime(ms: number): string {
   const d = new Date(ms)
@@ -124,6 +246,7 @@ function fmtClock(ms: number): string {
 /** 游标读数：时间 + 每条曲线吸附到的值 + 质量点 */
 function syncCursor(): void {
   const at = trendHistoryCursorOf(props.widgetId)
+  const moved = at !== cursorAt.value
   cursorAt.value = at
   if (at == null) {
     cursorRows.value = []
@@ -133,6 +256,8 @@ function syncCursor(): void {
   const readout = trendHistoryCursorReadout(props.widgetId, props.tagIds)
   cursorRows.value = readout?.rows ?? []
   cursorTimeText.value = fmtClock(at)
+  // 游标动了 → 点表跟着翻到它所在的那一页（"表与游标联动"）
+  if (moved && showTable.value) gotoCursorPage()
 }
 
 function stepCursor(dir: -1 | 1): void {
@@ -146,7 +271,9 @@ function clearCursor(): void {
 }
 
 async function copyCursor(): Promise<void> {
-  const text = trendHistoryCursorText(props.widgetId, props.tagIds)
+  const text = trendHistoryCursorText(props.widgetId, props.tagIds, (tagId, value) =>
+    fmtNumber(tagId, value),
+  )
   if (!text) return
   try {
     await navigator.clipboard.writeText(text)
@@ -168,20 +295,53 @@ function sync(): void {
   syncAlarms()
 }
 
-/** 键盘：有游标时 ←/→ 按采样点微调，Esc 清除（输入框里不抢键） */
+/** 键盘：←/→ 微调游标、+/- 缩放、Esc 清游标（输入框里不抢键） */
+function isTextTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null
+  if (!el) return false
+  if (el.isContentEditable) return true
+  const tag = el.tagName
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true
+  return false
+}
+
 function onKeydown(e: KeyboardEvent): void {
-  if (cursorAt.value == null) return
-  const el = e.target as HTMLElement | null
-  if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return
+  if (isTextTarget(e.target)) return
+  const hasCursor = cursorAt.value != null
+  if (!shouldHandleTrendKeys(props.widgetId, hasCursor)) return
   if (e.key === 'ArrowLeft') {
+    if (!hasCursor) return
     stepCursor(-1)
     e.preventDefault()
   } else if (e.key === 'ArrowRight') {
+    if (!hasCursor) return
     stepCursor(1)
     e.preventDefault()
+  } else if (e.key === '+' || e.key === '=') {
+    // 以游标为中心放大（没有游标时以窗口中心）
+    if (!canEdit()) return
+    zoom(0.5)
+    e.preventDefault()
+  } else if (e.key === '-' || e.key === '_') {
+    if (!canEdit()) return
+    zoom(2)
+    e.preventDefault()
   } else if (e.key === 'Escape') {
-    clearCursor()
+    if (showHelp.value || showMore.value) {
+      showHelp.value = false
+      showMore.value = false
+      return
+    }
+    if (hasCursor) clearCursor()
+    else if (props.fullscreen) emit('toggleFullscreen')
+  } else if (e.key === '?') {
+    showHelp.value = !showHelp.value
   }
+}
+
+/** 鼠标进工具条 / 在工具条上操作 = "这个图元接着键盘" */
+function markActive(): void {
+  setActiveTrendToolbar(props.widgetId)
 }
 
 let offLoaded: (() => void) | null = null
@@ -193,6 +353,13 @@ onMounted(() => {
   offCursor = onTrendHistoryCursor(sync)
   offAlarms = onTrendAlarmBandsChanged(syncAlarms)
   window.addEventListener('keydown', onKeydown)
+  if (typeof ResizeObserver !== 'undefined' && root.value) {
+    observer = new ResizeObserver((entries) => {
+      const w = entries[0]?.contentRect?.width ?? 0
+      if (w > 0) measured.value = w
+    })
+    observer.observe(root.value)
+  }
 })
 onBeforeUnmount(() => {
   offLoaded?.()
@@ -202,7 +369,22 @@ onBeforeUnmount(() => {
   offAlarms?.()
   offAlarms = null
   window.removeEventListener('keydown', onKeydown)
+  observer?.disconnect()
+  observer = null
+  forgetTrendToolbar(props.widgetId)
 })
+
+watch(
+  () => props.width,
+  (w) => {
+    if (typeof w === 'number' && w > 0 && !observer) measured.value = w
+  },
+)
+
+watch(
+  () => props.tagIds.join(','),
+  () => syncCursor(),
+)
 
 function after(): void {
   emit('change')
@@ -228,7 +410,7 @@ function shift(dir: -1 | 1): void {
 }
 
 function zoom(factor: number): void {
-  zoomTrendHistoryWindow(props.widgetId, factor)
+  zoomTrendHistoryWindow(props.widgetId, factor, cursorAt.value ?? undefined)
   after()
 }
 
@@ -254,7 +436,7 @@ function exportCsv(): void {
     ElMessage.warning('当前区间没有历史数据可导出')
     return
   }
-  const head = ['time', ...rows.tagIds].join(',')
+  const head = ['time', ...rows.tagIds.map((tagId) => headerOf(tagId))].join(',')
   const body = rows.times.map((t, i) => {
     const cells = rows.tagIds.map((_, k) => {
       const v = rows.values[k]?.[i]
@@ -272,96 +454,240 @@ function exportCsv(): void {
   a.remove()
   setTimeout(() => URL.revokeObjectURL(url), 4000)
 }
+
+const SHORTCUTS: Array<{ key: string; text: string }> = [
+  { key: '← / →', text: '游标按采样点前后移动' },
+  { key: '+ / -', text: '以游标为中心放大 / 缩小时间窗' },
+  { key: 'Esc', text: '清除游标（最大化时退出最大化）' },
+  { key: '单击图内', text: '落游标（吸附最近的采样点）' },
+  { key: '拖动竖线', text: '移动游标，读数实时更新' },
+  { key: '滚轮 / 框选', text: '缩放时间窗；双击还原' },
+]
 </script>
 
 <template>
-  <div class="trend-toolbar">
-  <div class="trend-bar" @pointerdown.stop @mousedown.stop @click.stop @dblclick.stop @wheel.stop>
-    <el-select
-      v-model="preset"
-      size="small"
-      class="w-preset"
-      :teleported="false"
-      :disabled="!canEdit()"
-      @change="applyPreset"
+  <div ref="root" class="trend-toolbar" @pointerenter="markActive">
+    <div
+      class="trend-bar"
+      :class="{ 'is-narrow': narrow, 'is-compact': compact }"
+      @pointerdown.stop
+      @mousedown.stop
+      @click.stop="markActive"
+      @dblclick.stop
+      @wheel.stop
     >
-      <el-option v-for="item in TREND_RANGES" :key="item.id" :label="item.label" :value="item.id" />
-    </el-select>
-    <el-date-picker
-      v-model="range"
-      type="datetimerange"
-      size="small"
-      class="w-range"
-      format="MM-DD HH:mm"
-      range-separator="~"
-      :clearable="false"
-      :teleported="false"
-      :disabled="!canEdit()"
-    />
-    <el-button size="small" type="primary" :disabled="!canEdit()" @click="applyRange">查</el-button>
-    <el-button-group>
-      <el-button size="small" :disabled="!canEdit()" @click="shift(-1)">◀</el-button>
-      <el-button size="small" :disabled="!canEdit()" @click="shift(1)">▶</el-button>
-      <el-button size="small" :disabled="!canEdit()" @click="zoom(2)">－</el-button>
-      <el-button size="small" :disabled="!canEdit()" @click="zoom(0.5)">＋</el-button>
-    </el-button-group>
-    <el-select
-      v-model="interval"
-      size="small"
-      class="w-interval"
-      :teleported="false"
-      :disabled="!canEdit()"
-      @change="applyInterval"
-    >
-      <el-option v-for="item in TREND_INTERVALS" :key="item.id" :label="item.label" :value="item.id" />
-    </el-select>
-    <el-checkbox
-      :model-value="follow"
-      size="small"
-      :disabled="!canEdit()"
-      @update:model-value="toggleFollow"
-    >跟随</el-checkbox>
-    <el-button size="small" @click="refresh">刷新</el-button>
-    <el-button size="small" :type="showTable ? 'primary' : 'default'" @click="toggleTable">表</el-button>
-    <el-button v-if="alarmBands.length" size="small" type="danger" plain @click="jumpToFirstAlarm">
-      报警 {{ alarmBands.length }}
-    </el-button>
-    <el-button size="small" @click="exportCsv">CSV</el-button>
-    <span v-if="aggWindow && interval === 'auto'" class="hint">按 {{ aggWindow }} 平均</span>
-    <span v-if="cursorAt == null" class="hint">图内单击落游标读数</span>
-    <span v-else class="cursor">
-      <el-button size="small" text @click="stepCursor(-1)">◀</el-button>
-      <span class="cursor-time">{{ cursorTimeText }}</span>
-      <span v-for="row in cursorRows" :key="row.tagId" class="cursor-row">
-        <i class="dot" :class="row.quality === 'Good' || row.quality == null ? 'ok' : 'bad'" />
-        {{ row.tagId }} {{ row.value == null ? '—' : row.value.toFixed(2) }}
-      </span>
-      <el-button size="small" text @click="stepCursor(1)">▶</el-button>
-      <el-button size="small" text @click="copyCursor">复制</el-button>
-      <el-button size="small" text @click="clearCursor">✕</el-button>
-    </span>
-    <span v-if="notice" class="notice" :class="notice.kind">{{ notice.text }}</span>
-  </div>
+      <el-select
+        v-model="preset"
+        size="small"
+        class="w-preset"
+        :teleported="false"
+        :disabled="!canEdit()"
+        @change="applyPreset"
+      >
+        <el-option v-for="item in TREND_RANGES" :key="item.id" :label="item.label" :value="item.id" />
+      </el-select>
 
-  <div v-if="showTable" class="table-wrap">
-    <table>
-      <thead>
-        <tr>
-          <th>时间</th>
-          <th v-for="tagId in tableData.header" :key="tagId">{{ tagId }}</th>
-        </tr>
-      </thead>
-      <tbody>
-        <tr v-for="row in tableData.body" :key="row.t" :class="{ 'row-cursor': row.cursor }">
-          <td class="t">{{ fmtRowTime(row.t) }}</td>
-          <td v-for="(cell, k) in row.cells" :key="k">{{ cell == null ? '—' : cell.toFixed(2) }}</td>
-        </tr>
-      </tbody>
-    </table>
-    <div class="table-foot">
-      共 {{ tableData.total }} 行<span v-if="cursorAt != null">（蓝底 = 游标行）</span>；导出请用 CSV
+      <template v-if="!compact">
+        <el-date-picker
+          v-model="range"
+          type="datetimerange"
+          size="small"
+          class="w-range"
+          format="MM-DD HH:mm"
+          range-separator="~"
+          :clearable="false"
+          :teleported="false"
+          :disabled="!canEdit()"
+          @change="applyRange"
+        />
+      </template>
+
+      <el-button-group>
+        <el-button size="small" :disabled="!canEdit()" title="前移一个窗口" @click="shift(-1)">◀</el-button>
+        <el-button size="small" :disabled="!canEdit()" title="后移一个窗口" @click="shift(1)">▶</el-button>
+      </el-button-group>
+      <el-button-group v-if="!narrow">
+        <el-button size="small" :disabled="!canEdit()" title="放大时间窗（键盘 -）" @click="zoom(2)">－</el-button>
+        <el-button size="small" :disabled="!canEdit()" title="缩小时间窗（键盘 +）" @click="zoom(0.5)">＋</el-button>
+      </el-button-group>
+
+      <template v-if="!compact">
+        <el-select
+          v-model="interval"
+          size="small"
+          class="w-interval"
+          :teleported="false"
+          :disabled="!canEdit()"
+          @change="applyInterval"
+        >
+          <el-option v-for="item in TREND_INTERVALS" :key="item.id" :label="item.label" :value="item.id" />
+        </el-select>
+        <el-checkbox
+          :model-value="follow"
+          size="small"
+          :disabled="!canEdit()"
+          @update:model-value="toggleFollow"
+        >跟随</el-checkbox>
+        <el-button size="small" @click="refresh">刷新</el-button>
+        <el-button size="small" :type="showTable ? 'primary' : 'default'" @click="toggleTable">表</el-button>
+      </template>
+
+      <el-button
+        v-if="alarmBands.length && !narrow"
+        size="small"
+        type="danger"
+        plain
+        @click="jumpToFirstAlarm"
+      >
+        报警 {{ alarmBands.length }}
+      </el-button>
+
+      <!-- 窄档：其余控件收进"更多"，不再被裁掉 -->
+      <el-popover
+        v-model:visible="showMore"
+        :teleported="false"
+        :width="250"
+        trigger="click"
+        placement="bottom-start"
+        popper-class="trend-more-popper"
+      >
+        <template #reference>
+          <el-button size="small" :type="showMore ? 'primary' : 'default'" title="更多控件">⋯</el-button>
+        </template>
+        <div class="more-panel">
+          <label class="more-row top">
+            <span>自定义区间</span>
+            <el-date-picker
+              v-model="range"
+              type="datetimerange"
+              size="small"
+              format="MM-DD HH:mm"
+              range-separator="~"
+              :clearable="false"
+              :teleported="false"
+              :disabled="!canEdit()"
+              @change="applyRange"
+            />
+          </label>
+          <label class="more-row">
+            <span>采样间隔</span>
+            <el-select v-model="interval" size="small" :teleported="false" :disabled="!canEdit()" @change="applyInterval">
+              <el-option v-for="item in TREND_INTERVALS" :key="item.id" :label="item.label" :value="item.id" />
+            </el-select>
+          </label>
+          <div class="more-row">
+            <el-checkbox
+              :model-value="follow"
+              size="small"
+              :disabled="!canEdit()"
+              @update:model-value="toggleFollow"
+            >跟随最新</el-checkbox>
+          </div>
+          <div class="more-btns">
+            <el-button size="small" :disabled="!canEdit()" title="放大时间窗" @click="zoom(2)">－ 缩小范围</el-button>
+            <el-button size="small" :disabled="!canEdit()" title="缩小时间窗" @click="zoom(0.5)">＋ 放大范围</el-button>
+            <el-button size="small" @click="refresh">刷新</el-button>
+            <el-button size="small" :type="showTable ? 'primary' : 'default'" @click="toggleTable">点表</el-button>
+            <el-button v-if="alarmBands.length" size="small" type="danger" plain @click="jumpToFirstAlarm">
+              报警 {{ alarmBands.length }}
+            </el-button>
+            <el-button size="small" @click="exportCsv">CSV</el-button>
+          </div>
+        </div>
+      </el-popover>
+
+      <template v-if="!narrow">
+        <el-button size="small" @click="exportCsv">CSV</el-button>
+      </template>
+
+      <span v-if="!narrow" class="spacer" />
+
+      <el-button
+        v-if="fullscreenSupported !== false"
+        size="small"
+        class="btn-icon"
+        :title="fullscreen ? '退出最大化（Esc）' : '最大化查看'"
+        @click="emit('toggleFullscreen')"
+      >{{ fullscreen ? '⤡' : '⛶' }}</el-button>
+      <el-button
+        size="small"
+        class="btn-icon"
+        :type="showHelp ? 'primary' : 'default'"
+        title="快捷键提示"
+        @click="showHelp = !showHelp"
+      >?</el-button>
+
+      <span v-if="aggWindow && interval === 'auto'" class="hint">按 {{ aggWindow }} 平均</span>
+      <span v-if="cursorAt == null && !narrow" class="hint">图内单击落游标读数</span>
+      <span v-else-if="cursorAt != null" class="cursor" :class="{ 'cursor--wrap': narrowCursor }">
+        <el-button size="small" text @click="stepCursor(-1)">◀</el-button>
+        <span class="cursor-time">{{ cursorTimeText }}</span>
+        <span v-for="row in cursorRows" :key="row.tagId" class="cursor-row">
+          <i class="dot" :class="row.quality === 'Good' || row.quality == null ? 'ok' : 'bad'" />
+          {{ row.tagId }} {{ fmtNumber(row.tagId, row.value) }}
+        </span>
+        <el-button size="small" text @click="stepCursor(1)">▶</el-button>
+        <el-button v-if="!narrow" size="small" text @click="copyCursor">复制</el-button>
+        <el-button size="small" text @click="clearCursor">✕</el-button>
+      </span>
+      <span v-if="notice" class="notice" :class="notice.kind">{{ notice.text }}</span>
     </div>
-  </div>
+
+    <!-- 快捷键提示：工具条右侧 "?" 打开，Esc 关闭 -->
+    <div v-if="showHelp" class="shortcuts" @pointerdown.stop @wheel.stop>
+      <div class="shortcuts-head">
+        <span>快捷键 / 鼠标操作</span>
+        <el-button size="small" text @click="showHelp = false">✕</el-button>
+      </div>
+      <div v-for="item in SHORTCUTS" :key="item.key" class="shortcuts-row">
+        <kbd>{{ item.key }}</kbd>
+        <span>{{ item.text }}</span>
+      </div>
+    </div>
+
+    <div v-if="showTable" ref="tableWrap" class="table-wrap" @pointerdown.stop @wheel.stop>
+      <table>
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th v-for="tagId in tableData.header" :key="tagId">{{ headerOf(tagId) }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr
+            v-for="row in tableData.body"
+            :key="row.t"
+            :class="{ 'row-cursor': row.cursor }"
+            :data-cursor="row.cursor ? '1' : undefined"
+          >
+            <td class="t">{{ fmtRowTime(row.t) }}</td>
+            <td v-for="(cell, k) in row.cells" :key="k">{{ fmtNumber(tableData.header[k] ?? '', cell) }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="table-foot">
+        <span>
+          共 {{ tableData.total }} 行 · 第 {{ Math.min(tablePage, tablePages) }}/{{ tablePages }} 页
+          <span v-if="cursorAt != null">（蓝底 = 游标行）</span>
+        </span>
+        <span class="table-page">
+          <el-button size="small" text :disabled="tablePage <= 1" @click="changePage(1)">⏮</el-button>
+          <el-button size="small" text :disabled="tablePage <= 1" @click="changePage(tablePage - 1)">◀</el-button>
+          <el-button size="small" text :disabled="tablePage >= tablePages" @click="changePage(tablePage + 1)">▶</el-button>
+          <el-button size="small" text :disabled="tablePage >= tablePages" @click="changePage(tablePages)">⏭</el-button>
+          <el-select
+            :model-value="tablePageSize"
+            size="small"
+            class="w-pagesize"
+            :teleported="false"
+            @change="changePageSize"
+          >
+            <el-option v-for="size in TABLE_PAGE_SIZES" :key="size" :label="`${size} 行/页`" :value="size" />
+          </el-select>
+          <el-button size="small" text :disabled="cursorRowIndex < 0" @click="gotoCursorPage">定位游标</el-button>
+        </span>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -399,9 +725,16 @@ function exportCsv(): void {
   color: #e2e8f0;
   font-size: 11px;
 }
+.trend-bar :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
 .w-preset {
   width: 104px;
   flex: 0 0 auto;
+}
+.trend-bar.is-narrow .w-preset,
+.trend-bar.is-compact .w-preset {
+  width: 84px;
 }
 .w-range {
   width: 210px;
@@ -411,6 +744,17 @@ function exportCsv(): void {
   width: 88px;
   flex: 0 0 auto;
 }
+.w-pagesize {
+  width: 92px;
+  flex: 0 0 auto;
+}
+.btn-icon {
+  flex: 0 0 auto;
+  padding: 0 6px;
+}
+.spacer {
+  flex: 1 1 auto;
+}
 .cursor {
   display: flex;
   align-items: center;
@@ -418,6 +762,11 @@ function exportCsv(): void {
   font-size: 11px;
   color: #e2e8f0;
   white-space: nowrap;
+  overflow: hidden;
+}
+.cursor--wrap {
+  flex-wrap: wrap;
+  row-gap: 0;
 }
 .cursor-time {
   font-family: ui-monospace, Consolas, monospace;
@@ -440,12 +789,77 @@ function exportCsv(): void {
 .dot.bad {
   background: #f87171;
 }
+/* 快捷键提示面板：贴在图元左上角，不抢图内的鼠标 */
+.shortcuts {
+  position: absolute;
+  left: 0;
+  top: 100%;
+  z-index: 4;
+  min-width: 220px;
+  padding: 6px 8px 8px;
+  background: rgba(11, 18, 32, 0.97);
+  border: 1px solid #1e3a5f;
+  border-top: none;
+  border-radius: 0 0 4px 4px;
+  font-size: 11px;
+  color: #cbd5e1;
+  pointer-events: auto;
+}
+.shortcuts-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  color: #93c5fd;
+}
+.shortcuts-row {
+  display: grid;
+  grid-template-columns: 92px 1fr;
+  gap: 6px;
+  padding: 1px 0;
+}
+.shortcuts-row kbd {
+  font-family: ui-monospace, Consolas, monospace;
+  color: #e2e8f0;
+  background: #16223a;
+  border: 1px solid #24344f;
+  border-radius: 3px;
+  padding: 0 4px;
+  text-align: center;
+}
+.more-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.more-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  font-size: 12px;
+  color: #cbd5e1;
+}
+.more-row.top {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+}
+.more-row :deep(.el-select) {
+  width: 118px;
+}
+.more-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
 .table-wrap {
   position: absolute;
   left: 0;
   right: 0;
   top: 100%;
-  max-height: 190px;
+  /* 与 trendHistoryTable 里给图表让出的高度（TREND_TABLE_H）对齐，别盖住曲线 */
+  max-height: 148px;
   overflow: auto;
   z-index: 3;
   background: rgba(11, 18, 32, 0.97);
@@ -481,8 +895,20 @@ function exportCsv(): void {
   background: rgba(61, 139, 253, 0.18);
 }
 .table-foot {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   padding: 2px 6px;
   color: #64748b;
+  background: rgba(11, 18, 32, 0.97);
+}
+.table-page {
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 .hint {
   color: #94a3b8;

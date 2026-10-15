@@ -76,6 +76,10 @@ export interface AlarmListText {
   ids: string[]
   statuses: string[]
   levels: string[]
+  /** 每行对应的事件时刻（epoch ms）；历史报警用它做"点一行 → 趋势跳该时刻" */
+  times: number[]
+  /** 每行对应的变量 id：反向联动时优先跳"曲线里有这个变量"的趋势图元 */
+  tags: string[]
 }
 
 function tagNameOf(alarm: ActiveAlarm, meta: TagMeta | undefined): string {
@@ -117,6 +121,8 @@ export function formatActiveAlarmItems(
     ids: rows.map((alarm) => alarm.alarmId),
     statuses: rows.map((alarm) => statusText(alarm)),
     levels: rows.map((alarm) => LEVEL_LABEL[alarm.level] ?? alarm.level),
+    times: rows.map((alarm) => alarm.raisedAt),
+    tags: rows.map((alarm) => alarm.tagId),
   }
 }
 
@@ -238,5 +244,7 @@ export function formatAlarmHistoryItems(
     ids: [],
     statuses: rows.map((event) => eventText(event.eventKind)),
     levels: rows.map((event) => LEVEL_LABEL[event.level] ?? event.level),
+    times: rows.map((event) => event.eventAt),
+    tags: rows.map((event) => event.tagId),
   }
 }

@@ -45,10 +45,18 @@ export {
   trendCurveTagIds,
   trendCurveColor,
   resolveTrendRange,
+  formatTrendNumber,
+  formatTrendValue,
   TREND_PALETTE,
   TREND_MAX_CURVES,
 } from './factory/widget'
-export type { BuiltinWidgetType, DrawToolType, WidgetPaletteItem, TrendCurve } from './factory/widget'
+export type {
+  BuiltinWidgetType,
+  DrawToolType,
+  WidgetPaletteItem,
+  TrendCurve,
+  TrendValueFormat,
+} from './factory/widget'
 export {
   createObject3D,
   createDefaultObject3DPanel,

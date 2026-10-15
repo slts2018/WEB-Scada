@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, nextTick, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type {
   AnimationLinkInput,
@@ -26,6 +26,16 @@ import Canvas3DRuntime from '@/components/runtime/Canvas3DRuntime.vue'
 import { object3dTreeSignature } from '@/shared/project/object3dTree'
 import { historyPagerClientRect, historySearchClientRect } from '@/shared/runtime/alarmHistoryQuery'
 import { trendToolbarClientRect } from '@/shared/runtime/trendHistoryQuery'
+import {
+  onWidgetFullscreenChange,
+  setWidgetFullscreen,
+  widgetFullscreenId,
+  widgetFullscreenOf,
+} from '@/shared/runtime/widgetFullscreen'
+import {
+  jumpTrendHistoryToTime,
+  registerTrendHistoryLinkTarget,
+} from '@/shared/runtime/trendHistoryLink'
 import AlarmHistorySearchBar from '@/components/runtime/AlarmHistorySearchBar.vue'
 import TrendHistoryToolbar from '@/components/runtime/TrendHistoryToolbar.vue'
 import AlarmHistoryPager from '@/components/runtime/AlarmHistoryPager.vue'
@@ -51,6 +61,7 @@ const log = useOutputLogStore()
 let bundle: RuntimeStageBundle | null = null
 let removeListener: (() => void) | null = null
 let stopSchedules: (() => void) | null = null
+let offFullscreen: (() => void) | null = null
 /** valueChange 上一帧采样 */
 const lastTagSnapshot = new Map<string, string>()
 
@@ -90,11 +101,13 @@ function syncHistoryBars() {
     x: boardBox ? hostBox.left - boardBox.left : 0,
     y: boardBox ? hostBox.top - boardBox.top : 0,
   }
+  const focusId = widgetFullscreenId()
   const next: HistoryBar[] = []
   for (const layer of props.page.layers) {
     if (!layer.visible) continue
     for (const widget of layer.widgets) {
     if (widget.type !== 'alarmHistory' || widget.visible === false) continue
+    if (focusId) continue
     const node = bundle.stage.findOne(`#${widget.id}`)
     if (!node) continue
     const rect = historySearchClientRect(
@@ -125,13 +138,78 @@ type TrendBar = {
   id: string
   preset: string
   tagIds: string[]
+  /** 每曲线的显示格式（单位 / 小数位，属性面板配的） */
+  curves: Array<{ tagId: string; label?: string; unit?: string; decimals?: number }>
   allowEdit: boolean
+  fullscreen: boolean
   x: number
   y: number
   w: number
   h: number
 }
 const trendBars = ref<TrendBar[]>([])
+
+/** 历史报警 ↔ 历史趋势 反向联动：当前画面上可被联动的趋势图元（注销函数） */
+let unregisterTrendLinks: Array<() => void> = []
+
+function syncTrendLinks(bars: TrendBar[]) {
+  for (const off of unregisterTrendLinks) off()
+  unregisterTrendLinks = bars
+    .filter((bar) => bar.tagIds.length > 0)
+    .map((bar) => registerTrendHistoryLinkTarget({ widgetId: bar.id, tagIds: bar.tagIds }))
+}
+
+/** 历史报警表里点了一行 → 历史趋势跳到该时刻 */
+function onHistoryRowPick(_widgetId: string, at: number, tagId?: string) {
+  const jump = jumpTrendHistoryToTime(at, tagId)
+  if (!jump) {
+    ElMessage.warning('当前画面没有可联动的历史趋势图元')
+    return
+  }
+  const d = new Date(jump.at)
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  ElMessage.success(
+    `历史趋势已跳到 ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}${jump.windowMoved ? '（窗口已前移）' : ''}`,
+  )
+  refreshAllVisuals()
+}
+
+/** 正在最大化的图元 id（模块里的状态是普通变量，这里存一份响应式的供界面用） */
+const fullscreenWidgetId = ref<string | null>(widgetFullscreenId())
+
+/** 图元最大化：只显示它一个，并把它铺满视口（退出 = 还原整页） */
+function syncFullscreen() {
+  const id = widgetFullscreenId()
+  fullscreenWidgetId.value = id
+  bundle?.setFocusWidget(id)
+  syncScene3dOverlays()
+  syncHistoryBars()
+  syncTrendBars()
+}
+
+/** Esc 退出最大化（工具栏也有 Esc，但鼠标在画面空白处时也要能退） */
+function onFullscreenKeydown(e: KeyboardEvent) {
+  if (e.key !== 'Escape') return
+  if (!widgetFullscreenId()) return
+  setWidgetFullscreen(null)
+}
+
+/** 被最大化的图元标题（画面上给一个"退出"的提示条） */
+const maximizedWidgetName = computed(() => {
+  const id = fullscreenWidgetId.value
+  if (!id) return ''
+  const widget = allWidgets(props.page).find((item) => item.id === id)
+  if (!widget) return ''
+  return String(widget.props.title ?? widget.name ?? '趋势图元')
+})
+
+function toggleTrendFullscreen(widgetId: string) {
+  setWidgetFullscreen(widgetFullscreenOf(widgetId) ? null : widgetId)
+}
+
+function exitTrendFullscreen() {
+  setWidgetFullscreen(null)
+}
 
 function syncTrendBars() {
   if (!bundle || !host.value) {
@@ -145,25 +223,37 @@ function syncTrendBars() {
     x: boardBox ? hostBox.left - boardBox.left : 0,
     y: boardBox ? hostBox.top - boardBox.top : 0,
   }
+  const focusId = widgetFullscreenId()
   const next: TrendBar[] = []
   for (const layer of props.page.layers) {
     if (!layer.visible) continue
     for (const widget of layer.widgets) {
       if (widget.type !== 'trendHistory' || widget.visible === false) continue
       if (widget.props.showToolbar === false) continue
+      // 最大化时其它图元是隐藏的，它们的叠层也不该留在画面上
+      if (focusId && widget.id !== focusId) continue
       const node = bundle.stage.findOne(`#${widget.id}`)
       if (!node) continue
       const rect = trendToolbarClientRect((p) => node.getAbsoluteTransform().point(p), widget, origin)
+      const curves = trendCurves(widget.props)
       next.push({
         id: widget.id,
         preset: String(widget.props.range ?? '-1h'),
-        tagIds: trendCurves(widget.props).map((curve) => curve.tagId).filter(Boolean),
+        tagIds: curves.map((curve) => curve.tagId).filter(Boolean),
+        curves: curves.map((curve) => ({
+          tagId: curve.tagId,
+          label: curve.label,
+          unit: curve.unit,
+          decimals: curve.decimals,
+        })),
         allowEdit: widget.props.allowTimeEdit !== false,
+        fullscreen: focusId === widget.id,
         ...rect,
       })
     }
   }
   trendBars.value = next
+  syncTrendLinks(next)
 }
 
 function onHistorySearch() {
@@ -209,9 +299,12 @@ function syncScene3dOverlays() {
   }
   const next: Scene3dSlot[] = []
   let paintOrder = 0
+  const focusId = widgetFullscreenId()
   for (const widget of allWidgets(props.page)) {
     paintOrder += 1
     if (widget.type !== 'scene3d' || widget.visible === false) continue
+    // 最大化某个图元时，其余图元（含三维）都不显示
+    if (focusId) continue
     const page3d = resolveScene3dPage(String(widget.props.page3dId || ''))
     if (!page3d) continue
     const rect = bundle.getWidgetClientRect(widget.id)
@@ -490,13 +583,16 @@ onMounted(() => {
         if (!res.ok) ElMessage.error(res.message)
       })
     },
+    onHistoryRowPick,
   }, { chartInteraction: true })
   bundle.setViewChangeListener(() => {
     syncScene3dOverlays()
     syncHistoryBars()
-  syncTrendBars()
+    syncTrendBars()
   })
   setupSubscription(props.page)
+  offFullscreen = onWidgetFullscreenChange(syncFullscreen)
+  window.addEventListener('keydown', onFullscreenKeydown)
   if (!props.embedded) tags.connectRealtime()
   removeListener = tags.addListener(() => {
     refreshAllVisuals()
@@ -528,6 +624,16 @@ watch(
 
 onUnmounted(() => {
   firePageTrigger('unload')
+  offFullscreen?.()
+  offFullscreen = null
+  window.removeEventListener('keydown', onFullscreenKeydown)
+  for (const off of unregisterTrendLinks) off()
+  unregisterTrendLinks = []
+  // 本画面正在最大化的图元要跟着卸载，否则下一个画面会莫名只剩这一块
+  const focusId = widgetFullscreenId()
+  if (focusId && allWidgets(props.page).some((widget) => widget.id === focusId)) {
+    setWidgetFullscreen(null)
+  }
   writeResolver?.(null)
   writeResolver = null
   stopSchedules?.()
@@ -560,13 +666,22 @@ onUnmounted(() => {
       v-for="bar in trendBars"
       :key="bar.id + ':toolbar'"
       class="history-search"
+      :class="{ 'is-maximized': bar.fullscreen }"
       :widget-id="bar.id"
       :preset="bar.preset"
       :tag-ids="bar.tagIds"
+      :curves="bar.curves"
       :allow-edit="bar.allowEdit"
+      :width="bar.w"
+      :fullscreen="bar.fullscreen"
       :style="{ left: bar.x + 'px', top: bar.y + 'px', width: bar.w + 'px', height: bar.h + 'px' }"
       @change="onHistorySearch"
+      @toggle-fullscreen="toggleTrendFullscreen(bar.id)"
     />
+    <div v-if="maximizedWidgetName" class="maximized-hint">
+      <span>{{ maximizedWidgetName }} · 已最大化</span>
+      <el-button size="small" text @click="exitTrendFullscreen">退出 (Esc)</el-button>
+    </div>
     <AlarmHistoryPager
       v-for="bar in historyBars"
       :key="bar.id + ':page'"
@@ -644,6 +759,29 @@ onUnmounted(() => {
   box-sizing: border-box;
   border: none;
   border-radius: 0;
+}
+
+/* 最大化提示条：贴在画面上方中间，随时能退出 */
+.maximized-hint {
+  position: absolute;
+  top: 6px;
+  left: 50%;
+  z-index: 10002;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 6px 2px 10px;
+  border: 1px solid #1e3a5f;
+  border-radius: 4px;
+  background: rgba(11, 18, 32, 0.94);
+  color: #93c5fd;
+  font-size: 12px;
+  transform: translateX(-50%);
+}
+
+.history-search.is-maximized {
+  /* 最大化时工具条要盖在放大的图元之上 */
+  z-index: 10001;
 }
 
 .hud {
