@@ -38,6 +38,8 @@ export interface TrendChartSeries {
   points: Array<number | null>
   /** 有则用时间轴（历史趋势），没有则按采样序号（实时趋势） */
   times?: number[]
+  /** 开关量 / 枚举量：用阶梯画（否则会被误看成斜线变化） */
+  step?: boolean
 }
 
 export interface TrendChartSpec {
@@ -47,6 +49,8 @@ export interface TrendChartSpec {
   rangeLabel?: string
   /** 顶部要给 HTML 工具栏留出的高度（图表 CSS 像素；0/缺省 = 不留） */
   chromeTop?: number
+  /** 底部要给 HTML 点表留出的高度（图表 CSS 像素） */
+  chromeBottom?: number
   /** 底部数据区域缩放滑块（仅历史趋势 + 原生叠层） */
   slider?: boolean
   /** 工具箱里的“框选放大” */
@@ -151,7 +155,8 @@ export function trendChartLayout(spec: TrendChartSpec): TrendChartLayout {
   // 底部默认只留横轴刻度（绘图区高度全给曲线）；
   // 历史趋势另外给底部滑块留一条（spec.slider），否则滑块会压掉时间轴
   const sliderHeight = spec.slider ? Math.max(22 * S, Math.round(F * 1.6)) : 0
-  const bottom = axisH + sliderHeight
+  const chromeBottom = Math.max(0, Math.round(Number(spec.chromeBottom) || 0))
+  const bottom = axisH + sliderHeight + chromeBottom
 
   return {
     fontSize: F,
@@ -538,7 +543,8 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
         : {}),
       name: s.name,
       showSymbol: false,
-      smooth: 0.15,
+      // 开关量用阶梯：不做平滑，不然 0/1 会被描成斜线
+      ...(s.step ? { step: 'end' as const } : { smooth: 0.15 }),
       // 堆叠折线：同组 stack 名 → ECharts 逐条累加（官方 Stacked Line 示例的做法）
       // 注意：不要再加 sampling——LTTB 降采样与 stack / 时间轴组合时会出现"空图"且不报错
       ...(spec.stacked ? { stack: 'total' } : {}),

@@ -7,6 +7,10 @@
  * （按图元矩形定位，见 trendToolbarClientRect）。
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import {
+  setTrendHistoryTableVisible,
+  trendHistoryTableVisibleOf,
+} from '@/shared/runtime/trendHistoryTable'
 import { ElMessage } from 'element-plus'
 import {
   clearTrendHistoryCursor,
@@ -55,7 +59,13 @@ const notice = ref<{ kind: 'error' | 'empty'; text: string } | null>(null)
 const range = ref<[Date, Date]>([new Date(Date.now() - 3600_000), new Date()])
 
 /** 点表（图下方弹出的数据表，与游标联动） */
-const showTable = ref(false)
+const showTable = ref(trendHistoryTableVisibleOf(props.widgetId))
+
+function toggleTable(): void {
+  showTable.value = !showTable.value
+  setTrendHistoryTableVisible(props.widgetId, showTable.value)
+  after()
+}
 const TABLE_ROWS = 11
 
 const tableData = computed(() => {
@@ -141,18 +151,36 @@ function sync(): void {
   syncCursor()
 }
 
+/** 键盘：有游标时 ←/→ 按采样点微调，Esc 清除（输入框里不抢键） */
+function onKeydown(e: KeyboardEvent): void {
+  if (cursorAt.value == null) return
+  const el = e.target as HTMLElement | null
+  if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return
+  if (e.key === 'ArrowLeft') {
+    stepCursor(-1)
+    e.preventDefault()
+  } else if (e.key === 'ArrowRight') {
+    stepCursor(1)
+    e.preventDefault()
+  } else if (e.key === 'Escape') {
+    clearCursor()
+  }
+}
+
 let offLoaded: (() => void) | null = null
 let offCursor: (() => void) | null = null
 onMounted(() => {
   sync()
   offLoaded = onTrendHistoryLoaded(sync)
   offCursor = onTrendHistoryCursor(sync)
+  window.addEventListener('keydown', onKeydown)
 })
 onBeforeUnmount(() => {
   offLoaded?.()
   offLoaded = null
   offCursor?.()
   offCursor = null
+  window.removeEventListener('keydown', onKeydown)
 })
 
 function after(): void {
@@ -273,7 +301,7 @@ function exportCsv(): void {
       @update:model-value="toggleFollow"
     >跟随</el-checkbox>
     <el-button size="small" @click="refresh">刷新</el-button>
-    <el-button size="small" :type="showTable ? 'primary' : 'default'" @click="showTable = !showTable">表</el-button>
+    <el-button size="small" :type="showTable ? 'primary' : 'default'" @click="toggleTable">表</el-button>
     <el-button size="small" @click="exportCsv">CSV</el-button>
     <span v-if="aggWindow && interval === 'auto'" class="hint">按 {{ aggWindow }} 平均</span>
     <span v-if="cursorAt == null" class="hint">图内单击落游标读数</span>

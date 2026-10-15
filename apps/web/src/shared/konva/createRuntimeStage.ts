@@ -10,7 +10,7 @@ import {
 import { setTrendZoom } from '@/shared/konva/trendChart'
 import { createTrendLiveOverlay } from '@/shared/konva/trendChartLive'
 import { createTrendHistoryZoomBridge } from '@/shared/konva/trendHistoryZoom'
-import { setTrendHistoryCursor } from '@/shared/runtime/trendHistoryCursor'
+import { setTrendHistoryCursor, trendHistoryCursorOf } from '@/shared/runtime/trendHistoryCursor'
 import { syncNativeTrendCharts } from '@/shared/konva/trendNativeCharts'
 import { attachTrendChartInteraction } from '@/shared/konva/trendChartInteraction'
 import {
@@ -150,6 +150,7 @@ export function createRuntimeStage(
       historyZoom.handleZoom(widgetId, zoom)
     },
     onReset: (widgetId) => historyZoom.handleReset(widgetId),
+    cursorOf: (widgetId) => trendHistoryCursorOf(widgetId),
     onCursor: (widgetId, at) => {
       const widget = sourceWidgetOf(widgetId)
       if (!widget || widget.type !== 'trendHistory') return

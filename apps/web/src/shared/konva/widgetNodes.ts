@@ -6,6 +6,7 @@ import {
   liveTrendTimes,
 } from '@/shared/runtime/trendSeries'
 import { useProjectStore } from '@/stores/project'
+import { useTagStore } from '@/stores/tag'
 import {
   trendHistorySeries,
   trendHistoryTimes,
@@ -348,6 +349,8 @@ export function buildTrendSpec(opts: {
   demoData?: boolean
   /** 顶部给 HTML 工具栏留的高度（CSS px，仅历史趋势 + 原生路径） */
   chromeTop?: number
+  /** 底部给 HTML 点表留的高度（CSS px） */
+  chromeBottom?: number
   /** 超采样倍数（图片路径用；原生叠层传 1） */
   scale?: number
   /** 原生模式：用 ECharts 自带的图例/dataZoom/toolbox */
@@ -401,6 +404,7 @@ export function buildTrendSpec(opts: {
             : curveSamples(widget.id, curve.tagId) ?? curve.series) ?? []
         ).slice(),
         times: isHistory ? trendHistoryTimes(widget.id, curve.tagId) : curveTimes(widget.id, curve.tagId),
+        step: seriesStepOf(curve.tagId),
       }))
     : [
         {
@@ -408,6 +412,7 @@ export function buildTrendSpec(opts: {
           color: str(style, 'lineColor', '#38bdf8'),
           points: legacyHistorySeries.slice(),
           times: legacyHistoryTimes,
+          step: seriesStepOf(legacyTagId),
         },
       ]
 
@@ -426,6 +431,7 @@ export function buildTrendSpec(opts: {
     title,
     rangeLabel: rangeLabel || undefined,
     chromeTop: opts.chromeTop,
+    chromeBottom: opts.chromeBottom,
     // 报警限值线：各曲线变量上配置的 HH/H/L/LL 阈值（同一个纵轴，合并成一组线）
     limits: historyLimitsOf(curves),
     // 游标：历史趋势落的竖线（实时趋势不画）
@@ -459,7 +465,7 @@ export function buildTrendSpec(opts: {
  */
 export function buildTrendLiveSpec(
   widget: Widget2D,
-  opts: { width: number; height: number; fontSize: number; chromeTop?: number },
+  opts: { width: number; height: number; fontSize: number; chromeTop?: number; chromeBottom?: number },
 ): TrendChartSpec {
   const isHistory = widget.type === 'trendHistory'
   const livePoints = liveSeriesOf(widget.id) ?? []
@@ -477,6 +483,7 @@ export function buildTrendLiveSpec(
     style: widget.style,
     demoData: isDemoTrendData(widget, livePoints.length),
     chromeTop: opts.chromeTop,
+    chromeBottom: opts.chromeBottom,
     scale: 1,
     native: true,
   })
@@ -501,6 +508,16 @@ function trendChartCanvas(opts: Parameters<typeof buildTrendSpec>[0]): HTMLCanva
   ].join('#')
   return renderTrendChart(key, spec, trendHoverOf(opts.widget.id) ?? null)
 }
+/** 开关量 / 字符串量 → 阶梯画（拿不到元数据就当数值处理） */
+function seriesStepOf(tagId: string): boolean {
+  try {
+    const meta = useTagStore().metas.find((item) => item.tagId === tagId)
+    return meta?.dataType === 'bool' || meta?.dataType === 'string'
+  } catch {
+    return false
+  }
+}
+
 /** 历史趋势的报警限值线（按变量拉一次配置，60s 缓存） */
 function historyLimitsOf(curves: TrendCurve[]): Array<{ value: number; label: string }> {
   ensureAlarmLimits()

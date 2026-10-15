@@ -12,6 +12,7 @@ import {
   setTrendChartRendered,
 } from '@/shared/konva/widgetNodes'
 import { TREND_TOOLBAR_H } from '@/shared/runtime/trendHistoryQuery'
+import { trendHistoryTableHeightOf } from '@/shared/runtime/trendHistoryTable'
 
 /** 旋转或自带点击事件的图元仍走位图：叠层会挡拖拽 / 业务点击。 */
 export function widgetUsesNativeTrend(widget: Widget2D): boolean {
@@ -60,6 +61,8 @@ export function syncNativeTrendCharts(opts: {
       height: rect.height,
       fontSize: Math.max(10, pageFont * scale),
       chromeTop: showToolbar ? Math.round(TREND_TOOLBAR_H * scale) : 0,
+      chromeBottom:
+        widget.type === 'trendHistory' ? Math.round(trendHistoryTableHeightOf(widget.id) * scale) : 0,
     })
     spec.zoom = trendZoomOf(widget.id) ?? undefined
     slots.push({

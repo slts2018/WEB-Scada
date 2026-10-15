@@ -58,6 +58,8 @@ export function createTrendLiveOverlay(opts: {
   onZoom?: (widgetId: string, zoom: { start: number; end: number }) => void
   /** 图内单击 = 在该时刻落游标（历史趋势） */
   onCursor?: (widgetId: string, at: number) => void
+  /** 当前游标时间（拖游标时判断“按住的是不是那条线”） */
+  cursorOf?: (widgetId: string) => number | null
   /** 双击图内 = 还原缩放（图标路径由 trendChartInteraction 处理，这里只管原生叠层） */
   onReset?: (widgetId: string) => void
 }): TrendLiveOverlay {
@@ -118,6 +120,47 @@ export function createTrendLiveOverlay(opts: {
       live.set(slot.widgetId, item)
       // 双击 = 还原显示缩放（历史趋势还会因此跳回“当前查询窗口”）
       chart.getZr().on('dblclick', () => opts.onReset?.(slot.widgetId))
+      // 拖游标：按住时指针离竖线 ±8px 内就算“拖游标”，
+      // 拖期间临时关掉 dataZoom 的左键平移（否则窗口会跟着一起跑），松手恢复。
+      let cursorDrag = false
+      const nearCursor = (offsetX: number): boolean => {
+        const at = opts.cursorOf?.(slot.widgetId)
+        if (at == null) return false
+        try {
+          const px = chart.convertToPixel({ xAxisIndex: 0 }, at)
+          const x = Array.isArray(px) ? Number(px[0]) : Number(px)
+          return Number.isFinite(x) && Math.abs(offsetX - x) <= 8
+        } catch {
+          return false
+        }
+      }
+      const setPanEnabled = (on: boolean) => {
+        try {
+          chart.setOption({ dataZoom: [{ moveOnMouseMove: on }] })
+        } catch {
+          /* 窗口正在换算时可能报错：忽略 */
+        }
+      }
+      chart.getZr().on('mousedown', (e: { offsetX: number }) => {
+        if (!opts.onCursor || !nearCursor(e.offsetX)) return
+        cursorDrag = true
+        setPanEnabled(false)
+      })
+      chart.getZr().on('mousemove', (e: { offsetX: number; offsetY: number }) => {
+        if (!cursorDrag || !opts.onCursor) return
+        try {
+          const v = chart.convertFromPixel({ xAxisIndex: 0 }, [e.offsetX, e.offsetY])
+          const at = Array.isArray(v) ? Number(v[0]) : Number(v)
+          if (Number.isFinite(at)) opts.onCursor(slot.widgetId, at)
+        } catch {
+          /* 换算不出来就跳过这一帧 */
+        }
+      })
+      chart.getZr().on('mouseup', () => {
+        if (!cursorDrag) return
+        cursorDrag = false
+        setPanEnabled(true)
+      })
       // zrender 只在"没有拖动"时才发 click：拖拽平移不会误落游标
       chart.getZr().on('click', (e: { offsetX: number; offsetY: number }) => {
         if (!opts.onCursor) return
