@@ -23,6 +23,7 @@ import { alarmHistoryEvents, alarmHistoryQuery, requestAlarmHistory } from '@/sh
 import {
   appendTrendHistoryLivePoint,
   requestTrendHistory,
+  trendHistoryFollowOf,
   trendHistorySeries,
 } from '@/shared/runtime/trendHistoryQuery'
 import { pushCurveSample, pushLiveSeries, retainCurveTimeWindow } from '@/shared/runtime/trendSeries'
@@ -252,14 +253,19 @@ function applyTrendLiveSample(widget: Widget2D, tag: TagValue): boolean {
 }
 
 /**
- * 历史曲线末端接实时值：窗口还在"跟随最新"时，把当前实时点接到曲线末端。
- * 否则曲线末尾会比页面上的实时值旧几秒（历史写入 + 轮询刷新都有延迟）。
+ * 历史曲线末端接实时值：**只有"跟随最新"开着**时才把当前实时点接到曲线末端
+ * （那时曲线末尾本来就在追"现在"，不接会比页面上的实时值旧几秒）。
+ *
+ * 没跟随时历史趋势是"一次查询的静态快照"：接了实时值，曲线末端（以及跟着数据算的
+ * 时间轴）每秒都会往前爬一格，看起来就和实时趋势一样一直在刷新 —— 那是假象，
+ * 数据其实还是那次查询的结果。
  */
 function feedHistoryLiveTail(
   widgetId: string,
   tagIds: string[],
   tags: { getValue: (tagId: string) => TagValue | undefined },
 ): void {
+  if (!trendHistoryFollowOf(widgetId)) return
   for (const tagId of tagIds) {
     const tag = tags.getValue(tagId)
     if (!tag || !Number.isFinite(tag.timestamp)) continue

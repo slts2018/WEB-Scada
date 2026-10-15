@@ -456,6 +456,7 @@ function exportCsv(): void {
 }
 
 const SHORTCUTS: Array<{ key: string; text: string }> = [
+  { key: '跟随', text: '默认关闭：区间是一次查询的快照；勾上才随时间滚动并按 10s 刷新' },
   { key: '← / →', text: '游标按采样点前后移动' },
   { key: '+ / -', text: '以游标为中心放大 / 缩小时间窗' },
   { key: 'Esc', text: '清除游标（最大化时退出最大化）' },
@@ -528,7 +529,11 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
           :disabled="!canEdit()"
           @update:model-value="toggleFollow"
         >跟随</el-checkbox>
-        <el-button size="small" @click="refresh">刷新</el-button>
+        <el-button
+          size="small"
+          :title="follow ? '重新查询当前窗口' : '重新查询（回到最新）'"
+          @click="refresh"
+        >刷新</el-button>
         <el-button size="small" :type="showTable ? 'primary' : 'default'" @click="toggleTable">表</el-button>
       </template>
 
@@ -586,7 +591,11 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
           <div class="more-btns">
             <el-button size="small" :disabled="!canEdit()" title="放大时间窗" @click="zoom(2)">－ 缩小范围</el-button>
             <el-button size="small" :disabled="!canEdit()" title="缩小时间窗" @click="zoom(0.5)">＋ 放大范围</el-button>
-            <el-button size="small" @click="refresh">刷新</el-button>
+            <el-button
+              size="small"
+              :title="follow ? '重新查询当前窗口' : '重新查询（回到最新）'"
+              @click="refresh"
+            >刷新</el-button>
             <el-button size="small" :type="showTable ? 'primary' : 'default'" @click="toggleTable">点表</el-button>
             <el-button v-if="alarmBands.length" size="small" type="danger" plain @click="jumpToFirstAlarm">
               报警 {{ alarmBands.length }}
@@ -618,6 +627,7 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
       >?</el-button>
 
       <span v-if="aggWindow && interval === 'auto'" class="hint">按 {{ aggWindow }} 平均</span>
+      <span v-if="!follow && !narrow" class="hint">区间已固定 · 刷新取最新</span>
       <span v-if="cursorAt == null && !narrow" class="hint">图内单击落游标读数</span>
       <span v-else-if="cursorAt != null" class="cursor" :class="{ 'cursor--wrap': narrowCursor }">
         <el-button size="small" text @click="stepCursor(-1)">◀</el-button>

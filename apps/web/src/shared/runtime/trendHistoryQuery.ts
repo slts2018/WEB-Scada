@@ -113,6 +113,11 @@ interface WidgetHistory {
   runtimeInterval: string | null
   /** 手动搜索 / 缩放后的绝对窗口；有它时覆盖 preset */
   custom: TrendHistoryWindow | null
+  /**
+   * custom 是不是"没跟随 → 自动冻结的相对预设"。
+   * 是的话「刷新」= 重新按预设取到最新的一段；手动设的绝对窗口则原样重查。
+   */
+  autoFrozen: boolean
   follow: boolean
   maxPoints: number
   series: Map<string, CurveHistory>
@@ -147,7 +152,10 @@ function ensureWidget(widgetId: string, preset = '-1h'): WidgetHistory {
       propInterval: 'auto',
       runtimeInterval: null,
       custom: null,
-      follow: true,
+      autoFrozen: false,
+      // 历史趋势默认**不跟随**：区间是"一次查询的静态快照"（见 loadWidget 里的冻结），
+      // 想看滚动/自动刷新要显式勾工具条上的"跟随"。
+      follow: false,
       maxPoints: 240,
       series: new Map(),
       status: {
@@ -157,7 +165,7 @@ function ensureWidget(widgetId: string, preset = '-1h'): WidgetHistory {
         preset,
         interval: 'auto',
         aggWindow: null,
-        follow: true,
+        follow: false,
         queryMs: 0,
         updatedAt: 0,
         emptyTags: [],
@@ -218,6 +226,14 @@ function scheduleFlush(): void {
 async function loadWidget(w: WidgetHistory, force: boolean): Promise<void> {
   if (!w.tagIds.length) return
   w.dirty = false
+  // 没开"跟随" = 静态区间：相对预设（-1h / -24h …）只在**第一次查询**时按"现在"解析一次，
+  // 然后固定成绝对窗口。否则每次查询都按新的"现在"重算，曲线会像实时趋势一样一直往前爬
+  // （现场看到的就是"历史曲线也在实时刷新"）。
+  if (!w.follow && !w.custom) {
+    w.custom = effectiveTrendWindow(w)
+    w.customRange = w.custom
+    w.autoFrozen = true
+  }
   const key = queryKey(w)
   if (!force && w.loadedKey === key) return
   if (!force && w.loading) return
@@ -317,6 +333,10 @@ export function requestTrendHistory(
   let changed = false
   if (w.preset !== (start || '-1h')) {
     w.preset = start || '-1h'
+    // 预设变了（设计端改了"时间范围"）→ 丢掉旧的绝对窗口，按新预设重新解析一次
+    w.custom = null
+    w.customRange = null
+    w.autoFrozen = false
     changed = true
   }
   if (w.maxPoints !== nextLimit) {
@@ -443,6 +463,8 @@ export function setTrendHistoryWindow(widgetId: string, from: number, to: number
   if (w.custom && w.custom.from === from && w.custom.to === to) return
   w.custom = { from, to }
   w.customRange = { from, to }
+  // 用户自己定的窗口（自定义区间 / 缩放 / 平移 / 报警跳转）：刷新时原样重查，别跳到最新
+  w.autoFrozen = false
   w.dirty = true
   emitLoaded()
   scheduleFlush()
@@ -453,13 +475,16 @@ export function setTrendHistorySearch(widgetId: string, from: number, to: number
   setTrendHistoryWindow(widgetId, from, to)
 }
 
-/** 切回预设区间（跟随最新） */
+/**
+ * 切回预设区间。
+ * 跟随开着 → 继续跟随（区间随时间滚动）；没开（默认）→ 取新预设的一次静态快照。
+ */
 export function setTrendHistoryPreset(widgetId: string, preset: string): void {
   const w = ensureWidget(widgetId, preset)
   w.preset = preset
   w.custom = null
   w.customRange = null
-  w.follow = true
+  w.autoFrozen = false
   w.dirty = true
   emitLoaded()
   scheduleFlush()
@@ -505,10 +530,14 @@ export function setTrendHistoryFollow(widgetId: string, follow: boolean): void {
     w.follow = true
     w.custom = null
     w.customRange = null
+    w.autoFrozen = false
   } else {
     w.follow = false
     w.custom = effectiveTrendWindow(w)
     w.customRange = w.custom
+    // 手动"冻在这里"：刷新时保持这个窗口；曲线末端也不再接实时值
+    w.autoFrozen = false
+    for (const curve of w.series.values()) curve.live = null
   }
   w.dirty = true
   emitLoaded()
@@ -516,13 +545,22 @@ export function setTrendHistoryFollow(widgetId: string, follow: boolean): void {
 }
 
 export function trendHistoryFollowOf(widgetId: string): boolean {
-  return widgets.get(widgetId)?.follow ?? true
+  return widgets.get(widgetId)?.follow ?? false
 }
 
-/** 手动刷新（不影响窗口） */
+/**
+ * 手动刷新。
+ * 没跟随（默认）时相对预设是"自动冻结"的快照：刷新 = 重新按预设取到最新的一段；
+ * 自己设过的绝对窗口（自定义区间 / 缩放 / 报警跳转）则原样重查。
+ */
 export function refreshTrendHistory(widgetId: string, force = true): void {
   const w = widgets.get(widgetId)
   if (!w) return
+  if (w.autoFrozen) {
+    w.custom = null
+    w.customRange = null
+    w.autoFrozen = false
+  }
   w.dirty = true
   if (force) w.loadedKey = ''
   scheduleFlush()
