@@ -15,7 +15,7 @@ import {
   type AlarmFieldId,
   type AlarmHistoryFieldId,
 } from '@/shared/runtime/alarmText'
-import { TREND_RANGES, releaseTrendHistory } from '@/shared/runtime/trendHistoryQuery'
+import { TREND_INTERVALS, TREND_RANGES, releaseTrendHistory } from '@/shared/runtime/trendHistoryQuery'
 import { clearCurveSamples } from '@/shared/runtime/trendSeries'
 import { exportTrendWidgetImage } from '@/shared/konva/widgetNodes'
 import { useProjectStore } from '@/stores/project'
@@ -608,6 +608,26 @@ async function replaceImage(e: Event) {
             <el-option v-for="item in TREND_RANGES" :key="item.id" :label="item.label" :value="item.id" />
           </el-select>
         </label>
+        <label v-if="widget.type === 'trendHistory'">
+          <span>采样间隔</span>
+          <el-select
+            size="small"
+            :model-value="String(widget.props.historyInterval ?? 'auto')"
+            @update:model-value="(v: string) => updateProp('historyInterval', v)"
+          >
+            <el-option v-for="item in TREND_INTERVALS" :key="item.id" :label="item.label" :value="item.id" />
+          </el-select>
+        </label>
+        <p v-if="widget.type === 'trendHistory'" class="hint">
+          该间隔是默认值；运行端工具栏可以临时改（不写回工程）。
+        </p>
+        <el-checkbox
+          v-if="widget.type === 'trendHistory'"
+          :model-value="widget.props.showToolbar !== false"
+          @update:model-value="(v: boolean | string | number) => updateProp('showToolbar', Boolean(v))"
+        >
+          显示图内工具栏（区间 / 缩放 / 跟随 / 导出）
+        </el-checkbox>
         <label v-if="widget.type !== 'trendHistory'">
           <span>类型</span>
           <el-select

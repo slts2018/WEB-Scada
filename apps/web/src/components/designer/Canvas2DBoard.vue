@@ -4,6 +4,7 @@ import {
   createWidget2D,
   isDrawToolType,
   normalizePolyPoints,
+  trendCurves,
   type BuiltinWidgetType,
   type Page2D,
   type Widget2D,
@@ -21,7 +22,9 @@ import { collectPageTagIds, resolveWidgetVisual } from '@/shared/runtime/binding
 import { rectsIntersect, snapTransform, snapWithGuides } from '@/shared/designer/geometry'
 import { isDesignerCanvasContext, isTypingTarget } from '@/shared/designer/designerHotkeys'
 import { historyPagerClientRect, historySearchClientRect } from '@/shared/runtime/alarmHistoryQuery'
+import { trendToolbarClientRect } from '@/shared/runtime/trendHistoryQuery'
 import AlarmHistorySearchBar from '@/components/runtime/AlarmHistorySearchBar.vue'
+import TrendHistoryToolbar from '@/components/runtime/TrendHistoryToolbar.vue'
 import AlarmHistoryPager from '@/components/runtime/AlarmHistoryPager.vue'
 
 const RULER = 24
@@ -198,6 +201,42 @@ function syncHistoryBars() {
   historyBars.value = next
 }
 
+/** 历史趋势工具栏：与运行端同一套定位方式 */
+type TrendBar = { id: string; preset: string; tagIds: string[]; x: number; y: number; w: number; h: number }
+const trendBars = ref<TrendBar[]>([])
+
+function syncTrendBars() {
+  if (!bundle || !host.value) {
+    trendBars.value = []
+    return
+  }
+  const board = host.value.parentElement
+  const hostBox = host.value.getBoundingClientRect()
+  const boardBox = board?.getBoundingClientRect()
+  const origin = {
+    x: boardBox ? hostBox.left - boardBox.left : 0,
+    y: boardBox ? hostBox.top - boardBox.top : 0,
+  }
+  const next: TrendBar[] = []
+  for (const layer of props.page.layers) {
+    if (!layer.visible) continue
+    for (const widget of layer.widgets) {
+      if (widget.type !== 'trendHistory' || widget.visible === false) continue
+      if (widget.props.showToolbar === false) continue
+      const node = bundle.widgetLayer.findOne(`#${widget.id}`)
+      if (!node) continue
+      const rect = trendToolbarClientRect((p) => node.getAbsoluteTransform().point(p), widget, origin)
+      next.push({
+        id: widget.id,
+        preset: String(widget.props.range ?? '-1h'),
+        tagIds: trendCurves(widget.props).map((curve) => curve.tagId).filter(Boolean),
+        ...rect,
+      })
+    }
+  }
+  trendBars.value = next
+}
+
 function onHistorySearch() {
   if (project.previewLive) applyDesignerPreview()
   else renderAllWidgets()
@@ -205,6 +244,7 @@ function onHistorySearch() {
 
 function paintRulers(view?: { scale: number; x: number; y: number }) {
   syncHistoryBars()
+  syncTrendBars()
   const v = view ?? bundle?.getView()
   if (!v || !rulerX.value || !rulerY.value || !host.value) return
   const { scale, x, y } = v
@@ -1194,6 +1234,16 @@ defineExpose({ fitView, zoomBy, zoomExact, toggleHand, handMode })
       :key="bar.id"
       class="history-search"
       :widget-id="bar.id"
+      :style="{ left: bar.x + 'px', top: bar.y + 'px', width: bar.w + 'px', height: bar.h + 'px' }"
+      @change="onHistorySearch"
+    />
+    <TrendHistoryToolbar
+      v-for="bar in trendBars"
+      :key="bar.id + ':toolbar'"
+      class="history-search"
+      :widget-id="bar.id"
+      :preset="bar.preset"
+      :tag-ids="bar.tagIds"
       :style="{ left: bar.x + 'px', top: bar.y + 'px', width: bar.w + 'px', height: bar.h + 'px' }"
       @change="onHistorySearch"
     />
