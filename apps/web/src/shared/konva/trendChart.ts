@@ -11,6 +11,7 @@ import {
   GraphicComponent,
   GridComponent,
   LegendComponent,
+  MarkLineComponent,
   TitleComponent,
   TooltipComponent,
 } from 'echarts/components'
@@ -23,6 +24,8 @@ use([
   GraphicComponent,
   GridComponent,
   LegendComponent,
+  // 报警限值线（HH/H/L/LL）用 markLine 画
+  MarkLineComponent,
   TitleComponent,
   TooltipComponent,
   CanvasRenderer,
@@ -50,6 +53,8 @@ export interface TrendChartSpec {
   selectZoom?: boolean
   /** 游标时间（epoch ms）；画一条竖线 + 时间标签 */
   cursor?: number
+  /** 报警限值线（按量程直接画水平虚线） */
+  limits?: Array<{ value: number; label: string }>
   /** 单曲线的固定量程；多曲线传 undefined = 每条曲线按自身数据自动缩放 */
   min?: number
   max?: number
@@ -512,8 +517,25 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
       axisLabel: { color: axisColor, fontSize: tickFont, margin: 4 },
       splitLine,
     },
-    series: spec.series.map((s) => ({
+    series: spec.series.map((s, si) => ({
       type: 'line',
+      // 限值线只挂在第一条曲线上（同一个纵轴，挂多少条就画多少遍）
+      ...(si === 0 && spec.limits?.length
+        ? {
+            markLine: {
+              silent: true,
+              symbol: 'none',
+              animation: false,
+              lineStyle: { type: 'dashed', width: 1, color: '#f87171', opacity: 0.85 },
+              label: {
+                color: '#fca5a5',
+                fontSize: tickFont,
+                formatter: (p: { name?: string; value?: number }) => `${p.name ?? ''} ${p.value ?? ''}`,
+              },
+              data: spec.limits.map((item) => ({ yAxis: item.value, name: item.label })),
+            },
+          }
+        : {}),
       name: s.name,
       showSymbol: false,
       smooth: 0.15,

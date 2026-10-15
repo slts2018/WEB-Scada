@@ -6,7 +6,7 @@
  * 用 Element Plus 的日期选择器比在画布上自绘省事得多；与"历史报警"的搜索条同一套做法
  * （按图元矩形定位，见 trendToolbarClientRect）。
  */
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   clearTrendHistoryCursor,
@@ -53,6 +53,37 @@ const follow = ref(true)
 const aggWindow = ref<string | null>(null)
 const notice = ref<{ kind: 'error' | 'empty'; text: string } | null>(null)
 const range = ref<[Date, Date]>([new Date(Date.now() - 3600_000), new Date()])
+
+/** 点表（图下方弹出的数据表，与游标联动） */
+const showTable = ref(false)
+const TABLE_ROWS = 11
+
+const tableData = computed(() => {
+  const rows = trendHistoryExportRows(props.widgetId)
+  if (!rows) return { header: [] as string[], body: [] as Array<{ t: number; cells: Array<number | null>; cursor: boolean }>, total: 0 }
+  const at = cursorAt.value
+  let start = Math.max(0, rows.times.length - TABLE_ROWS)
+  if (at != null) {
+    let idx = 0
+    for (let i = 0; i < rows.times.length; i++) if ((rows.times[i] as number) <= at) idx = i
+    start = Math.min(Math.max(0, idx - Math.floor(TABLE_ROWS / 2)), Math.max(0, rows.times.length - TABLE_ROWS))
+  }
+  const body = rows.times.slice(start, start + TABLE_ROWS).map((t, k) => {
+    const i = start + k
+    return {
+      t: t as number,
+      cells: rows.values.map((col) => col[i] ?? null),
+      cursor: at != null && rows.times[i] === at,
+    }
+  })
+  return { header: rows.tagIds, body, total: rows.times.length }
+})
+
+function fmtRowTime(ms: number): string {
+  const d = new Date(ms)
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  return `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
+}
 
 const cursorAt = ref<number | null>(null)
 const cursorRows = ref<CursorRow[]>([])
@@ -195,6 +226,7 @@ function exportCsv(): void {
 </script>
 
 <template>
+  <div class="trend-toolbar">
   <div class="trend-bar" @pointerdown.stop @mousedown.stop @click.stop @dblclick.stop @wheel.stop>
     <el-select
       v-model="preset"
@@ -241,6 +273,7 @@ function exportCsv(): void {
       @update:model-value="toggleFollow"
     >跟随</el-checkbox>
     <el-button size="small" @click="refresh">刷新</el-button>
+    <el-button size="small" :type="showTable ? 'primary' : 'default'" @click="showTable = !showTable">表</el-button>
     <el-button size="small" @click="exportCsv">CSV</el-button>
     <span v-if="aggWindow && interval === 'auto'" class="hint">按 {{ aggWindow }} 平均</span>
     <span v-if="cursorAt == null" class="hint">图内单击落游标读数</span>
@@ -257,9 +290,36 @@ function exportCsv(): void {
     </span>
     <span v-if="notice" class="notice" :class="notice.kind">{{ notice.text }}</span>
   </div>
+
+  <div v-if="showTable" class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>时间</th>
+          <th v-for="tagId in tableData.header" :key="tagId">{{ tagId }}</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr v-for="row in tableData.body" :key="row.t" :class="{ 'row-cursor': row.cursor }">
+          <td class="t">{{ fmtRowTime(row.t) }}</td>
+          <td v-for="(cell, k) in row.cells" :key="k">{{ cell == null ? '—' : cell.toFixed(2) }}</td>
+        </tr>
+      </tbody>
+    </table>
+    <div class="table-foot">
+      共 {{ tableData.total }} 行<span v-if="cursorAt != null">（蓝底 = 游标行）</span>；导出请用 CSV
+    </div>
+  </div>
+  </div>
 </template>
 
 <style scoped>
+.trend-toolbar {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
 .trend-bar {
   display: flex;
   flex-direction: row;
@@ -269,7 +329,7 @@ function exportCsv(): void {
   height: 100%;
   box-sizing: border-box;
   padding: 1px 4px;
-  overflow: hidden;
+  overflow: visible;
   pointer-events: auto;
   background: rgba(11, 18, 32, 0.92);
   border-bottom: 1px solid #1e3a5f;
@@ -327,6 +387,50 @@ function exportCsv(): void {
 }
 .dot.bad {
   background: #f87171;
+}
+.table-wrap {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  max-height: 190px;
+  overflow: auto;
+  z-index: 3;
+  background: rgba(11, 18, 32, 0.97);
+  border: 1px solid #1e3a5f;
+  border-top: none;
+  font-size: 11px;
+  color: #cbd5e1;
+  pointer-events: auto;
+}
+.table-wrap table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.table-wrap th,
+.table-wrap td {
+  padding: 2px 6px;
+  text-align: left;
+  white-space: nowrap;
+  border-bottom: 1px solid #16223a;
+}
+.table-wrap th {
+  position: sticky;
+  top: 0;
+  background: #0f1a2c;
+  color: #94a3b8;
+  font-weight: normal;
+}
+.table-wrap td.t {
+  font-family: ui-monospace, Consolas, monospace;
+  color: #93c5fd;
+}
+.row-cursor {
+  background: rgba(61, 139, 253, 0.18);
+}
+.table-foot {
+  padding: 2px 6px;
+  color: #64748b;
 }
 .hint {
   color: #94a3b8;

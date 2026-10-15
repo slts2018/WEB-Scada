@@ -35,6 +35,7 @@ import {
 import { HISTORY_FILTER_HEIGHT, HISTORY_PAGER_HEIGHT, alarmHistoryWindow, historyRowCapacity, historySampleMatches } from '@/shared/runtime/alarmHistoryQuery'
 import { trendHistoryRangeText } from '@/shared/runtime/trendHistoryQuery'
 import { trendHistoryCursorOf, trendHistoryCursorReadout } from '@/shared/runtime/trendHistoryCursor'
+import { alarmLimitsOf, ensureAlarmLimits } from '@/shared/runtime/trendAlarmLimits'
 
 function num(style: Record<string, unknown>, key: string, fallback: number) {
   const v = style[key]
@@ -425,6 +426,8 @@ export function buildTrendSpec(opts: {
     title,
     rangeLabel: rangeLabel || undefined,
     chromeTop: opts.chromeTop,
+    // 报警限值线：各曲线变量上配置的 HH/H/L/LL 阈值（同一个纵轴，合并成一组线）
+    limits: historyLimitsOf(curves),
     // 游标：历史趋势落的竖线（实时趋势不画）
     cursor: isHistory ? trendHistoryCursorOf(widget.id) ?? undefined : undefined,
     // 历史趋势才需要底部滑块与框选缩放，且只有原生叠层能真正拖得动
@@ -498,6 +501,23 @@ function trendChartCanvas(opts: Parameters<typeof buildTrendSpec>[0]): HTMLCanva
   ].join('#')
   return renderTrendChart(key, spec, trendHoverOf(opts.widget.id) ?? null)
 }
+/** 历史趋势的报警限值线（按变量拉一次配置，60s 缓存） */
+function historyLimitsOf(curves: TrendCurve[]): Array<{ value: number; label: string }> {
+  ensureAlarmLimits()
+  const out: Array<{ value: number; label: string }> = []
+  const seen = new Set<string>()
+  for (const curve of curves) {
+    if (!curve.tagId) continue
+    for (const limit of alarmLimitsOf(curve.tagId)) {
+      const key = `${limit.value}|${limit.code}`
+      if (seen.has(key)) continue
+      seen.add(key)
+      out.push({ value: limit.value, label: `${curve.label || curve.tagId} ${limit.code}` })
+    }
+  }
+  return out
+}
+
 /**
  * 按图元自身配置渲染一张 ECharts 位图（含悬停读数与缩放窗口）。
  * 渲染路径与"图元交互重绘"（悬停 / 拖拽缩放）都走这个函数，保证两边一致。
