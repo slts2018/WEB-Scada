@@ -9,6 +9,15 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
+  clearTrendHistoryCursor,
+  onTrendHistoryCursor,
+  stepTrendHistoryCursor,
+  trendHistoryCursorOf,
+  trendHistoryCursorReadout,
+  trendHistoryCursorText,
+  type CursorRow,
+} from '@/shared/runtime/trendHistoryCursor'
+import {
   TREND_INTERVALS,
   TREND_RANGES,
   onTrendHistoryLoaded,
@@ -45,6 +54,51 @@ const aggWindow = ref<string | null>(null)
 const notice = ref<{ kind: 'error' | 'empty'; text: string } | null>(null)
 const range = ref<[Date, Date]>([new Date(Date.now() - 3600_000), new Date()])
 
+const cursorAt = ref<number | null>(null)
+const cursorRows = ref<CursorRow[]>([])
+const cursorTimeText = ref('')
+
+function fmtClock(ms: number): string {
+  const d = new Date(ms)
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+/** 游标读数：时间 + 每条曲线吸附到的值 + 质量点 */
+function syncCursor(): void {
+  const at = trendHistoryCursorOf(props.widgetId)
+  cursorAt.value = at
+  if (at == null) {
+    cursorRows.value = []
+    cursorTimeText.value = ''
+    return
+  }
+  const readout = trendHistoryCursorReadout(props.widgetId, props.tagIds)
+  cursorRows.value = readout?.rows ?? []
+  cursorTimeText.value = fmtClock(at)
+}
+
+function stepCursor(dir: -1 | 1): void {
+  stepTrendHistoryCursor(props.widgetId, dir, props.tagIds)
+  after()
+}
+
+function clearCursor(): void {
+  clearTrendHistoryCursor(props.widgetId)
+  after()
+}
+
+async function copyCursor(): Promise<void> {
+  const text = trendHistoryCursorText(props.widgetId, props.tagIds)
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    ElMessage.success('读数已复制')
+  } catch {
+    ElMessage.warning('复制失败，请手动选择文本')
+  }
+}
+
 function sync(): void {
   preset.value = props.preset || '-1h'
   interval.value = trendHistoryIntervalOf(props.widgetId)
@@ -53,16 +107,21 @@ function sync(): void {
   aggWindow.value = trendHistoryStatusOf(props.widgetId)?.aggWindow ?? null
   const win = trendHistoryWindowOf(props.widgetId)
   if (win) range.value = [new Date(win.from), new Date(win.to)]
+  syncCursor()
 }
 
 let offLoaded: (() => void) | null = null
+let offCursor: (() => void) | null = null
 onMounted(() => {
   sync()
   offLoaded = onTrendHistoryLoaded(sync)
+  offCursor = onTrendHistoryCursor(sync)
 })
 onBeforeUnmount(() => {
   offLoaded?.()
   offLoaded = null
+  offCursor?.()
+  offCursor = null
 })
 
 function after(): void {
@@ -184,6 +243,18 @@ function exportCsv(): void {
     <el-button size="small" @click="refresh">刷新</el-button>
     <el-button size="small" @click="exportCsv">CSV</el-button>
     <span v-if="aggWindow && interval === 'auto'" class="hint">按 {{ aggWindow }} 平均</span>
+    <span v-if="cursorAt == null" class="hint">图内单击落游标读数</span>
+    <span v-else class="cursor">
+      <el-button size="small" text @click="stepCursor(-1)">◀</el-button>
+      <span class="cursor-time">{{ cursorTimeText }}</span>
+      <span v-for="row in cursorRows" :key="row.tagId" class="cursor-row">
+        <i class="dot" :class="row.quality === 'Good' || row.quality == null ? 'ok' : 'bad'" />
+        {{ row.tagId }} {{ row.value == null ? '—' : row.value.toFixed(2) }}
+      </span>
+      <el-button size="small" text @click="stepCursor(1)">▶</el-button>
+      <el-button size="small" text @click="copyCursor">复制</el-button>
+      <el-button size="small" text @click="clearCursor">✕</el-button>
+    </span>
     <span v-if="notice" class="notice" :class="notice.kind">{{ notice.text }}</span>
   </div>
 </template>
@@ -227,6 +298,35 @@ function exportCsv(): void {
 .w-interval {
   width: 88px;
   flex: 0 0 auto;
+}
+.cursor {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: #e2e8f0;
+  white-space: nowrap;
+}
+.cursor-time {
+  font-family: ui-monospace, Consolas, monospace;
+  color: #93c5fd;
+}
+.cursor-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.dot.ok {
+  background: #34d399;
+}
+.dot.bad {
+  background: #f87171;
 }
 .hint {
   color: #94a3b8;

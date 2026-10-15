@@ -56,6 +56,8 @@ export function createTrendLiveOverlay(opts: {
   onLegendSelect?: (widgetId: string, hidden: string[]) => void
   /** 底部滑块 / 滚轮缩放 → 记下时间窗，下次 setOption 不会把窗口弹回去 */
   onZoom?: (widgetId: string, zoom: { start: number; end: number }) => void
+  /** 图内单击 = 在该时刻落游标（历史趋势） */
+  onCursor?: (widgetId: string, at: number) => void
   /** 双击图内 = 还原缩放（图标路径由 trendChartInteraction 处理，这里只管原生叠层） */
   onReset?: (widgetId: string) => void
 }): TrendLiveOverlay {
@@ -116,6 +118,17 @@ export function createTrendLiveOverlay(opts: {
       live.set(slot.widgetId, item)
       // 双击 = 还原显示缩放（历史趋势还会因此跳回“当前查询窗口”）
       chart.getZr().on('dblclick', () => opts.onReset?.(slot.widgetId))
+      // zrender 只在"没有拖动"时才发 click：拖拽平移不会误落游标
+      chart.getZr().on('click', (e: { offsetX: number; offsetY: number }) => {
+        if (!opts.onCursor) return
+        try {
+          const v = chart.convertFromPixel({ xAxisIndex: 0 }, [e.offsetX, e.offsetY])
+          const at = Array.isArray(v) ? Number(v[0]) : Number(v)
+          if (Number.isFinite(at)) opts.onCursor(slot.widgetId, at)
+        } catch {
+          /* 缩放/改窗口瞬间换算出 NaN：忽略 */
+        }
+      })
       // 图例点选：写回"被点掉的曲线"，这样每 tick 重画不会把它弹回来
       chart.on('legendselectchanged', (params: unknown) => {
         const selected = (params as { selected?: Record<string, boolean> }).selected ?? {}

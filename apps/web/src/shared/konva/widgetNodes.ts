@@ -34,6 +34,7 @@ import {
 } from '@web-scada/core'
 import { HISTORY_FILTER_HEIGHT, HISTORY_PAGER_HEIGHT, alarmHistoryWindow, historyRowCapacity, historySampleMatches } from '@/shared/runtime/alarmHistoryQuery'
 import { trendHistoryRangeText } from '@/shared/runtime/trendHistoryQuery'
+import { trendHistoryCursorOf, trendHistoryCursorReadout } from '@/shared/runtime/trendHistoryCursor'
 
 function num(style: Record<string, unknown>, key: string, fallback: number) {
   const v = style[key]
@@ -176,6 +177,11 @@ function measureLegendText(text: string, fontSize: number): number {
 /** 图例里显示哪个数：运行时缓冲（实时）/ 历史查询结果优先，其次曲线自带的 series */
 function legendValueOf(widget: Widget2D, isHistory: boolean) {
   return (curve: TrendCurve): number | null => {
+    // 历史趋势有游标时，图例显示**游标处**的值（否则看不出读数对应哪一点）
+    if (isHistory && trendHistoryCursorOf(widget.id) != null) {
+      const row = trendHistoryCursorReadout(widget.id, [curve.tagId])?.rows[0]
+      if (row) return row.value
+    }
     const list = isHistory
       ? trendHistorySeries(widget.id, curve.tagId) ?? curve.series
       : curveSamples(widget.id, curve.tagId) ?? curve.series
@@ -419,6 +425,8 @@ export function buildTrendSpec(opts: {
     title,
     rangeLabel: rangeLabel || undefined,
     chromeTop: opts.chromeTop,
+    // 游标：历史趋势落的竖线（实时趋势不画）
+    cursor: isHistory ? trendHistoryCursorOf(widget.id) ?? undefined : undefined,
     // 历史趋势才需要底部滑块与框选缩放，且只有原生叠层能真正拖得动
     slider: isHistory && native === true,
     selectZoom: isHistory && native === true,

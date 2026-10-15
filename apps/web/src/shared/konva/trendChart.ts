@@ -48,6 +48,8 @@ export interface TrendChartSpec {
   slider?: boolean
   /** 工具箱里的“框选放大” */
   selectZoom?: boolean
+  /** 游标时间（epoch ms）；画一条竖线 + 时间标签 */
+  cursor?: number
   /** 单曲线的固定量程；多曲线传 undefined = 每条曲线按自身数据自动缩放 */
   min?: number
   max?: number
@@ -271,6 +273,23 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
   const tickFont = layout.tickFont
   // 时间窗 = 整段窗口 + 当前缩放区间
   const window = applyTrendZoom(spec.timeMin, spec.timeMax, spec.zoom)
+  // 游标时间 → 图内像素 x（时间轴是线性映射；超出可见窗口不画）
+  const cursorAt = typeof spec.cursor === 'number' && Number.isFinite(spec.cursor) ? spec.cursor : null
+  const cursorX = (() => {
+    if (cursorAt == null) return null
+    const lo = window.min
+    const hi = window.max
+    if (lo == null || hi == null || hi <= lo) return null
+    const frac = (cursorAt - lo) / (hi - lo)
+    if (frac < 0 || frac > 1) return null
+    return layout.grid.left + frac * layout.grid.width
+  })()
+  const cursorLabel = (() => {
+    if (cursorAt == null) return ''
+    const d = new Date(cursorAt)
+    const p2 = (n: number) => String(n).padStart(2, '0')
+    return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
+  })()
 
   const titles: Record<string, unknown>[] = []
   if (spec.title) {
@@ -424,6 +443,29 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
           },
         }
       : undefined,
+    // 游标：竖线落在当前可见窗口的对应位置（窗口 = 数据范围 + 显示缩放）
+    graphic: cursorX == null ? undefined : [
+      {
+        type: 'line',
+        silent: true,
+        z: 100,
+        shape: {
+          x1: cursorX,
+          y1: layout.grid.top,
+          x2: cursorX,
+          y2: layout.grid.top + layout.grid.height,
+        },
+        style: { stroke: '#f8fafc', lineWidth: 1, lineDash: [4, 3], opacity: 0.7 },
+      },
+      {
+        type: 'text',
+        silent: true,
+        z: 101,
+        left: Math.min(cursorX + 4, layout.grid.left + layout.grid.width - tickFont * 5),
+        top: layout.grid.top,
+        style: { text: cursorLabel, fill: '#e2e8f0', fontSize: tickFont, fontFamily: 'ui-monospace, monospace' },
+      },
+    ],
     grid: {
       left: layout.grid.left,
       right: layout.grid.right,

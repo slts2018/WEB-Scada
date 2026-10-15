@@ -4,6 +4,7 @@ import { attachTrendChartInteraction } from '@/shared/konva/trendChartInteractio
 import { setTrendZoom } from '@/shared/konva/trendChart'
 import { createTrendLiveOverlay } from '@/shared/konva/trendChartLive'
 import { createTrendHistoryZoomBridge } from '@/shared/konva/trendHistoryZoom'
+import { setTrendHistoryCursor } from '@/shared/runtime/trendHistoryCursor'
 import { syncNativeTrendCharts } from '@/shared/konva/trendNativeCharts'
 import { setHiddenCurves, syncWidgetNode } from '@/shared/konva/widgetNodes'
 
@@ -166,6 +167,12 @@ export function createKonvaStage(
       historyZoom.handleZoom(widgetId, zoom)
     },
     onReset: (widgetId) => historyZoom.handleReset(widgetId),
+    onCursor: (widgetId, at) => {
+      const widget = options.resolveWidget?.(widgetId)
+      if (!widget || widget.type !== 'trendHistory') return
+      setTrendHistoryCursor(widgetId, at)
+      flushTrend(false)
+    },
   })
 
   const historyZoom = createTrendHistoryZoomBridge({
