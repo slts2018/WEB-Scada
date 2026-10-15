@@ -34,9 +34,10 @@ import {
   type Widget2D,
 } from '@web-scada/core'
 import { HISTORY_FILTER_HEIGHT, HISTORY_PAGER_HEIGHT, alarmHistoryWindow, historyRowCapacity, historySampleMatches } from '@/shared/runtime/alarmHistoryQuery'
-import { trendHistoryRangeText } from '@/shared/runtime/trendHistoryQuery'
+import { trendHistoryRangeText, trendHistoryWindowOf } from '@/shared/runtime/trendHistoryQuery'
 import { trendHistoryCursorOf, trendHistoryCursorReadout } from '@/shared/runtime/trendHistoryCursor'
 import { alarmLimitsOf, ensureAlarmLimits } from '@/shared/runtime/trendAlarmLimits'
+import { ensureTrendAlarmBands, trendAlarmBandsOf } from '@/shared/runtime/trendAlarmEvents'
 
 function num(style: Record<string, unknown>, key: string, fallback: number) {
   const v = style[key]
@@ -421,10 +422,13 @@ export function buildTrendSpec(opts: {
   const window = alignSeriesTimeWindow(series)
   const zoom = trendZoomOf(widget.id)
 
-  // 单曲线才固定图元上的量程；多曲线按各自数据自动缩放
+  // 单曲线自动用图元量程；多曲线默认自动缩放，
+  // 但在属性里手动填了 min/max 就当“锁定量程”用（趋势不会跳来跳去）
   const single = series.length === 1
-  const min = single ? Number(widget.props.min) : Number.NaN
-  const max = single ? Number(widget.props.max) : Number.NaN
+  const manual = Number.isFinite(Number(widget.props.min)) || Number.isFinite(Number(widget.props.max))
+  const useManual = single || manual
+  const min = useManual ? Number(widget.props.min) : Number.NaN
+  const max = useManual ? Number(widget.props.max) : Number.NaN
   const spec: TrendChartSpec = {
     width,
     height,
@@ -434,6 +438,7 @@ export function buildTrendSpec(opts: {
     chromeBottom: opts.chromeBottom,
     // 报警限值线：各曲线变量上配置的 HH/H/L/LL 阈值（同一个纵轴，合并成一组线）
     limits: historyLimitsOf(curves),
+    alarmBands: isHistory ? historyAlarmBandsOf(widget, curves) : undefined,
     // 游标：历史趋势落的竖线（实时趋势不画）
     cursor: isHistory ? trendHistoryCursorOf(widget.id) ?? undefined : undefined,
     // 历史趋势才需要底部滑块与框选缩放，且只有原生叠层能真正拖得动
@@ -508,6 +513,19 @@ function trendChartCanvas(opts: Parameters<typeof buildTrendSpec>[0]): HTMLCanva
   ].join('#')
   return renderTrendChart(key, spec, trendHoverOf(opts.widget.id) ?? null)
 }
+/** 历史趋势的报警区间（与"历史报警"控件同一份事件源，按窗口缓存 30s） */
+function historyAlarmBandsOf(widget: Widget2D, curves: TrendCurve[]): Array<{ from: number; to: number }> | undefined {
+  const tagIds = curves.map((curve) => curve.tagId).filter(Boolean)
+  if (!tagIds.length) return undefined
+  const win = trendHistoryWindowOf(widget.id)
+  if (!win) return undefined
+  ensureTrendAlarmBands(widget.id, tagIds, win.from, win.to)
+  const bands = trendAlarmBandsOf(widget.id)
+  return bands.length
+    ? bands.map((band: { from: number; to: number }) => ({ from: band.from, to: band.to }))
+    : undefined
+}
+
 /** 开关量 / 字符串量 → 阶梯画（拿不到元数据就当数值处理） */
 function seriesStepOf(tagId: string): boolean {
   try {

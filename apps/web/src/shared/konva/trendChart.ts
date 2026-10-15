@@ -11,6 +11,7 @@ import {
   GraphicComponent,
   GridComponent,
   LegendComponent,
+  MarkAreaComponent,
   MarkLineComponent,
   TitleComponent,
   TooltipComponent,
@@ -24,7 +25,8 @@ use([
   GraphicComponent,
   GridComponent,
   LegendComponent,
-  // 报警限值线（HH/H/L/LL）用 markLine 画
+  // 报警限值线（markLine）与报警区间（markArea）
+  MarkAreaComponent,
   MarkLineComponent,
   TitleComponent,
   TooltipComponent,
@@ -59,6 +61,8 @@ export interface TrendChartSpec {
   cursor?: number
   /** 报警限值线（按量程直接画水平虚线） */
   limits?: Array<{ value: number; label: string }>
+  /** 报警区间（触发~恢复）：淡红底色 */
+  alarmBands?: Array<{ from: number; to: number }>
   /** 单曲线的固定量程；多曲线传 undefined = 每条曲线按自身数据自动缩放 */
   min?: number
   max?: number
@@ -440,7 +444,8 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
           iconStyle: { borderColor: axisColor, borderWidth: 1.4 },
           emphasis: { iconStyle: { borderColor: '#e2e8f0' } },
           feature: {
-            saveAsImage: { title: '导出图片', name: '', pixelRatio: 2, backgroundColor: 'transparent' },
+            // 白底：截图直接贴报告/打印，不会在白纸上变成一块黑
+            saveAsImage: { title: '导出图片', name: '', pixelRatio: 2, backgroundColor: theme.background },
             // 历史趋势：框选放大（选中一段直接缩放）
             ...(spec.selectZoom
               ? {
@@ -539,6 +544,16 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
               },
               data: spec.limits.map((item) => ({ yAxis: item.value, name: item.label })),
             },
+            ...(spec.alarmBands?.length
+              ? {
+                  markArea: {
+                    silent: true,
+                    animation: false,
+                    itemStyle: { color: 'rgba(248,113,113,0.10)' },
+                    data: spec.alarmBands.map((band) => [{ xAxis: band.from }, { xAxis: band.to }]),
+                  },
+                }
+              : {}),
           }
         : {}),
       name: s.name,
