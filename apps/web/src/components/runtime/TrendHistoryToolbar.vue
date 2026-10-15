@@ -326,10 +326,19 @@ function fmtStamp(ms: number): string {
   return `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
 }
 
+/**
+ * 游标读数里的时间：窗口跨天时带日期（与图上的 x 轴刻度一致），
+ * 否则"08:32:11"在 24 小时窗口里分不清是今天还是昨天。
+ */
 function fmtClock(ms: number): string {
   const d = new Date(ms)
   const p = (n: number) => String(n).padStart(2, '0')
-  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  const clock = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  const win = trendHistoryWindowOf(props.widgetId)
+  const withDate = Boolean(
+    win && new Date(win.from).toDateString() !== new Date(win.to).toDateString(),
+  )
+  return withDate ? `${p(d.getMonth() + 1)}-${p(d.getDate())} ${clock}` : clock
 }
 
 /** 游标读数：时间 + 每条曲线吸附到的值 + 质量点 */

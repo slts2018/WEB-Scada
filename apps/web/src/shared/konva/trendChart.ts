@@ -269,14 +269,21 @@ function ensureHost(): HTMLDivElement | null {
 }
 
 /**
- * 时间轴刻度一律显示到秒。
- * ECharts 默认在整分（秒为 0）时收成 HH:mm，于是 08:38:00 变成 08:38，和旁边的 08:37:50 对不齐。
+ * 时间轴刻度格式（同一条轴上格式必须统一：ECharts 默认整分时收成 HH:mm，
+ * 会跟旁边的 HH:mm:ss 对不齐）。
+ *
+ * - 窗口在同一天内：`时:分:秒`（短跨度看秒才有意义）
+ * - 窗口跨天 / 跨度 ≥24h：`月-日 时:分` —— 只写 `16:50` 分不清是哪一天的 16:50；
+ *   跨天但跨度不到 1 小时（跨零点的短窗口）仍带秒，免得刻度全挤成一个值。
  */
-function formatAxisClock(value: number): string {
+function formatAxisClock(value: number, withDate = false, withSeconds = true): string {
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return ''
   const pad = (n: number) => String(n).padStart(2, '0')
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+  const time = withSeconds
+    ? `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
+    : `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  return withDate ? `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time}` : time
 }
 
 /**
@@ -330,6 +337,14 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
   const tickFont = layout.tickFont
   // 时间窗 = 整段窗口 + 当前缩放区间
   const window = applyTrendZoom(spec.timeMin, spec.timeMax, spec.zoom)
+  // 轴刻度要不要带日期：跨天（或跨度 ≥24h）就带 —— 只写"16:50"分不清是哪一天的 16:50
+  const axisSpan = window.min != null && window.max != null ? window.max - window.min : 0
+  const axisCrossesDay =
+    window.min != null &&
+    window.max != null &&
+    new Date(window.min).toDateString() !== new Date(window.max).toDateString()
+  const axisWithDate = axisCrossesDay || axisSpan >= 24 * 3600_000
+  const axisWithSeconds = !axisWithDate || axisSpan < 3600_000
   // 游标时间 → 图内像素 x（时间轴是线性映射；超出可见窗口不画）
   const cursorAt = typeof spec.cursor === 'number' && Number.isFinite(spec.cursor) ? spec.cursor : null
   const cursorX = (() => {
@@ -341,11 +356,13 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
     if (frac < 0 || frac > 1) return null
     return layout.grid.left + frac * layout.grid.width
   })()
+  // 游标时间标签：轴带日期时（跨天窗口）也带日期，免得看不出是哪一天
   const cursorLabel = (() => {
     if (cursorAt == null) return ''
     const d = new Date(cursorAt)
     const p2 = (n: number) => String(n).padStart(2, '0')
-    return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
+    const clock = `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
+    return axisWithDate ? `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${clock}` : clock
   })()
 
   const titles: Record<string, unknown>[] = []
@@ -553,7 +570,7 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
             fontSize: tickFont,
             hideOverlap: true,
             margin: Math.round(tickFont * 0.4),
-            formatter: (value: number) => formatAxisClock(value),
+            formatter: (value: number) => formatAxisClock(value, axisWithDate, axisWithSeconds),
           },
           splitLine: { show: false },
         }
