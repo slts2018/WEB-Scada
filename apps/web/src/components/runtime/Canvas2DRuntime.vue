@@ -36,6 +36,13 @@ import {
   jumpTrendHistoryToTime,
   registerTrendHistoryLinkTarget,
 } from '@/shared/runtime/trendHistoryLink'
+import {
+  onTrendHistoryTableChange,
+  trendHistoryTableHeightOf,
+  trendHistoryTableVisibleOf,
+  trendTableHeightFor,
+} from '@/shared/runtime/trendHistoryTable'
+import TrendHistoryTable from '@/components/runtime/TrendHistoryTable.vue'
 import AlarmHistorySearchBar from '@/components/runtime/AlarmHistorySearchBar.vue'
 import TrendHistoryToolbar from '@/components/runtime/TrendHistoryToolbar.vue'
 import AlarmHistoryPager from '@/components/runtime/AlarmHistoryPager.vue'
@@ -62,6 +69,7 @@ let bundle: RuntimeStageBundle | null = null
 let removeListener: (() => void) | null = null
 let stopSchedules: (() => void) | null = null
 let offFullscreen: (() => void) | null = null
+let offTrendTable: (() => void) | null = null
 /** valueChange 上一帧采样 */
 const lastTagSnapshot = new Map<string, string>()
 
@@ -134,6 +142,18 @@ function syncHistoryBars() {
 }
 
 /** 历史趋势工具栏：按图元矩形定位（与"历史报警"的搜索条同一套做法） */
+/** 点表：贴在图元底部那条"让出来"的位置上（高度与图表 chromeBottom 同源） */
+type TrendTableSlot = {
+  id: string
+  curves: Array<{ tagId: string; label?: string; unit?: string; decimals?: number }>
+  x: number
+  y: number
+  w: number
+  h: number
+}
+const trendTables = ref<TrendTableSlot[]>([])
+let trendTableSignature = ''
+
 type TrendBar = {
   id: string
   preset: string
@@ -254,6 +274,62 @@ function syncTrendBars() {
   }
   trendBars.value = next
   syncTrendLinks(next)
+  syncTrendTables()
+}
+
+/**
+ * 点表的位置：图元底部、高度 = trendHistoryTableHeightOf(同一个函数给图表算 chromeBottom)。
+ * 只有"表开着"且图元可见时才挂；矩形没变就不动它（免得每次 Tag 刷新都重挂一遍组件）。
+ */
+function syncTrendTables() {
+  if (!bundle || !host.value) {
+    trendTables.value = []
+    trendTableSignature = ''
+    return
+  }
+  const board = host.value.parentElement
+  const hostBox = host.value.getBoundingClientRect()
+  const boardBox = board?.getBoundingClientRect()
+  const origin = {
+    x: boardBox ? hostBox.left - boardBox.left : 0,
+    y: boardBox ? hostBox.top - boardBox.top : 0,
+  }
+  const focusId = widgetFullscreenId()
+  const next: TrendTableSlot[] = []
+  for (const layer of props.page.layers) {
+    if (!layer.visible) continue
+    for (const widget of layer.widgets) {
+      if (widget.type !== 'trendHistory' || widget.visible === false) continue
+      if (focusId && widget.id !== focusId) continue
+      if (!trendHistoryTableVisibleOf(widget.id)) continue
+      const rect = bundle.getWidgetClientRect(widget.id)
+      if (!rect) continue
+      // 高度以图表侧算好的为准（绘图区留够之后剩下的）；图表还没报（位图路径）时按图元高度估
+      const stored = trendHistoryTableHeightOf(widget.id)
+      const h = stored > 0 ? stored : trendTableHeightFor(rect.height)
+      if (h <= 0) continue
+      const curves = trendCurves(widget.props)
+      next.push({
+        id: widget.id,
+        curves: curves.map((curve) => ({
+          tagId: curve.tagId,
+          label: curve.label,
+          unit: curve.unit,
+          decimals: curve.decimals,
+        })),
+        x: origin.x + rect.x,
+        y: origin.y + rect.y + rect.height - h,
+        w: rect.width,
+        h,
+      })
+    }
+  }
+  const signature = next
+    .map((slot) => `${slot.id}:${Math.round(slot.x)},${Math.round(slot.y)},${Math.round(slot.w)},${Math.round(slot.h)}`)
+    .join('|')
+  if (signature === trendTableSignature) return
+  trendTableSignature = signature
+  trendTables.value = next
 }
 
 function onHistorySearch() {
@@ -592,6 +668,13 @@ onMounted(() => {
   })
   setupSubscription(props.page)
   offFullscreen = onWidgetFullscreenChange(syncFullscreen)
+  // 点表开关变化时立刻算一次位置（正常也会被 after() 的刷新带上，这里兜个底）
+  offTrendTable = onTrendHistoryTableChange(() => {
+    // 顺序要紧：先让图表按新状态重排（顺便算出点表该占多高），再按那个高度摆表
+    bundle?.syncOverlays()
+    trendTableSignature = ''
+    refreshAllVisuals()
+  })
   window.addEventListener('keydown', onFullscreenKeydown)
   if (!props.embedded) tags.connectRealtime()
   removeListener = tags.addListener(() => {
@@ -626,6 +709,8 @@ onUnmounted(() => {
   firePageTrigger('unload')
   offFullscreen?.()
   offFullscreen = null
+  offTrendTable?.()
+  offTrendTable = null
   window.removeEventListener('keydown', onFullscreenKeydown)
   for (const off of unregisterTrendLinks) off()
   unregisterTrendLinks = []
@@ -677,6 +762,15 @@ onUnmounted(() => {
       :style="{ left: bar.x + 'px', top: bar.y + 'px', width: bar.w + 'px', height: bar.h + 'px' }"
       @change="onHistorySearch"
       @toggle-fullscreen="toggleTrendFullscreen(bar.id)"
+    />
+    <!-- 点表：贴图元底部，占的高度与图表让出的 chromeBottom 同源 -->
+    <TrendHistoryTable
+      v-for="slot in trendTables"
+      :key="slot.id + ':table'"
+      class="trend-table"
+      :widget-id="slot.id"
+      :curves="slot.curves"
+      :style="{ left: slot.x + 'px', top: slot.y + 'px', width: slot.w + 'px', height: slot.h + 'px' }"
     />
     <div v-if="maximizedWidgetName" class="maximized-hint">
       <span>{{ maximizedWidgetName }} · 已最大化</span>
@@ -748,6 +842,12 @@ onUnmounted(() => {
 .history-search {
   position: absolute;
   z-index: 10001;
+}
+
+/* 点表：贴在图元底部（图表让出的那一条），盖在画布之上 */
+.trend-table {
+  position: absolute;
+  z-index: 10002;
 }
 
 .scene3d-overlay {

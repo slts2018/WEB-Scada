@@ -36,6 +36,7 @@ import {
 } from '@web-scada/core'
 import { HISTORY_FILTER_HEIGHT, HISTORY_PAGER_HEIGHT, alarmHistoryWindow, historyRowCapacity, historySampleMatches } from '@/shared/runtime/alarmHistoryQuery'
 import { trendHistoryRangeText, trendHistoryWindowOf } from '@/shared/runtime/trendHistoryQuery'
+import { trendHistoryTableVisibleOf } from '@/shared/runtime/trendHistoryTable'
 import { trendHistoryCursorOf, trendHistoryCursorReadout } from '@/shared/runtime/trendHistoryCursor'
 import { alarmLimitsOf, ensureAlarmLimits } from '@/shared/runtime/trendAlarmLimits'
 import { ensureTrendAlarmBands, trendAlarmBandsOf } from '@/shared/runtime/trendAlarmEvents'
@@ -435,6 +436,10 @@ export function buildTrendSpec(opts: {
 
   // 单曲线自动用图元量程；多曲线默认自动缩放，
   // 但在属性里手动填了 min/max 就当“锁定量程”用（趋势不会跳来跳去）
+  // 点表开着（只有原生路径铺得下/挂得住点表）：图例与滑块让位给它
+  const tableOpen =
+    isHistory && native === true && widget.type === 'trendHistory' && trendHistoryTableVisibleOf(widget.id)
+
   const single = series.length === 1
   const manual = Number.isFinite(Number(widget.props.min)) || Number.isFinite(Number(widget.props.max))
   const useManual = single || manual
@@ -455,6 +460,9 @@ export function buildTrendSpec(opts: {
     // 历史趋势才需要底部滑块与框选缩放，且只有原生叠层能真正拖得动
     slider: isHistory && native === true,
     selectZoom: isHistory && native === true,
+    // 点表开着时：图例与底部滑块让位（表头就是图例、表里就是读数），把高度留给曲线和表
+    hideLegend: tableOpen,
+    hideSlider: tableOpen,
     min: Number.isFinite(min) ? min : undefined,
     max: Number.isFinite(max) ? max : undefined,
     stacked: widget.props.chartStack === true,

@@ -15,7 +15,7 @@
  * 一律收进「⋯」，不再和主控件抢地方；图元变窄时"起止时间"这一组也并进「⋯」。
  * 成对按钮用图标（⇤⇥ 平移一个窗口、◀▶ 游标步进），文字按钮只留给动词（搜索/刷新/表/跟随）。
  */
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
   ArrowLeft,
   ArrowRight,
@@ -33,6 +33,7 @@ import {
 } from '@element-plus/icons-vue'
 import { formatTrendValue, type TrendValueFormat } from '@web-scada/core'
 import {
+  onTrendHistoryTableChange,
   setTrendHistoryTableVisible,
   trendHistoryTableVisibleOf,
 } from '@/shared/runtime/trendHistoryTable'
@@ -176,98 +177,11 @@ let observer: ResizeObserver | null = null
 /* ---------- 点表（图下方弹出的数据表，与游标联动） ---------- */
 
 const showTable = ref(trendHistoryTableVisibleOf(props.widgetId))
-const TABLE_PAGE_SIZES = [11, 20, 50, 100]
-const tablePage = ref(1)
-const tablePageSize = ref(11)
-const tableWrap = ref<HTMLDivElement | null>(null)
 
 function toggleTable(): void {
   showTable.value = !showTable.value
   setTrendHistoryTableVisible(props.widgetId, showTable.value)
   after()
-}
-
-const tableRows = computed(() => trendHistoryExportRows(props.widgetId))
-
-const tableTotal = computed(() => tableRows.value?.times.length ?? 0)
-const tablePages = computed(() => Math.max(1, Math.ceil(tableTotal.value / Math.max(1, tablePageSize.value))))
-
-/** 游标所在的行号（没有游标或不在本窗口 = -1） */
-const cursorRowIndex = computed(() => {
-  const rows = tableRows.value
-  const at = cursorAt.value
-  if (!rows || at == null) return -1
-  let idx = -1
-  for (let i = 0; i < rows.times.length; i++) {
-    if ((rows.times[i] as number) <= at) idx = i
-    else break
-  }
-  return idx
-})
-
-const tableData = computed(() => {
-  const rows = tableRows.value
-  if (!rows) {
-    return {
-      header: [] as string[],
-      body: [] as Array<{ t: number; cells: Array<number | null>; cursor: boolean }>,
-      total: 0,
-    }
-  }
-  const size = Math.max(1, tablePageSize.value)
-  const start = (Math.min(tablePage.value, tablePages.value) - 1) * size
-  const body = rows.times.slice(start, start + size).map((t, k) => {
-    const i = start + k
-    return {
-      t: t as number,
-      cells: rows.tagIds.map((tagId) => {
-        const col = rows.values[rows.tagIds.indexOf(tagId)]
-        return col?.[i] ?? null
-      }),
-      cursor: cursorAt.value != null && rows.times[i] === cursorAt.value,
-    }
-  })
-  return { header: rows.tagIds, body, total: rows.times.length }
-})
-
-/**
- * 把游标那一行滚进可视区（翻页 / 游标移动后都要做）。
- * 只滚表格自己的 scrollTop —— 用 scrollIntoView 会把整个画面/页面容器一起带走。
- */
-function scrollCursorIntoView(): void {
-  void nextTick(() => {
-    const wrap = tableWrap.value
-    if (!wrap) return
-    const row = wrap.querySelector('[data-cursor="1"]') as HTMLElement | null
-    if (!row) return
-    const target = row.offsetTop - (wrap.clientHeight - row.offsetHeight) / 2
-    wrap.scrollTop = Math.max(0, target)
-  })
-}
-
-/** 跳到游标所在页（工具栏"定位游标"按钮，游标移动时也自动跟） */
-function gotoCursorPage(): void {
-  const idx = cursorRowIndex.value
-  if (idx < 0) return
-  const size = Math.max(1, tablePageSize.value)
-  tablePage.value = Math.min(tablePages.value, Math.floor(idx / size) + 1)
-  scrollCursorIntoView()
-}
-
-function changePage(page: number): void {
-  tablePage.value = Math.min(tablePages.value, Math.max(1, page))
-  scrollCursorIntoView()
-}
-
-function changePageSize(size: number): void {
-  tablePageSize.value = Math.max(1, Number(size) || 11)
-  gotoCursorPage()
-}
-
-function fmtRowTime(ms: number): string {
-  const d = new Date(ms)
-  const p2 = (n: number) => String(n).padStart(2, '0')
-  return `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
 }
 
 const alarmBands = ref<AlarmBand[]>([])
@@ -360,8 +274,7 @@ function syncCursor(): void {
   const readout = trendHistoryCursorReadout(props.widgetId, props.tagIds)
   cursorRows.value = readout?.rows ?? []
   cursorTimeText.value = fmtClock(at)
-  // 游标动了 → 点表跟着翻到它所在的那一页（"表与游标联动"）
-  if (moved && showTable.value) gotoCursorPage()
+  void moved
 }
 
 function stepCursor(dir: -1 | 1): void {
@@ -466,11 +379,15 @@ function markActive(): void {
 let offLoaded: (() => void) | null = null
 let offCursor: (() => void) | null = null
 let offAlarms: (() => void) | null = null
+let offTable: (() => void) | null = null
 onMounted(() => {
   sync()
   offLoaded = onTrendHistoryLoaded(sync)
   offCursor = onTrendHistoryCursor(sync)
   offAlarms = onTrendAlarmBandsChanged(syncAlarms)
+  offTable = onTrendHistoryTableChange(() => {
+    showTable.value = trendHistoryTableVisibleOf(props.widgetId)
+  })
   window.addEventListener('keydown', onKeydown)
   if (typeof ResizeObserver !== 'undefined' && root.value) {
     observer = new ResizeObserver((entries) => {
@@ -487,6 +404,8 @@ onBeforeUnmount(() => {
   offCursor = null
   offAlarms?.()
   offAlarms = null
+  offTable?.()
+  offTable = null
   window.removeEventListener('keydown', onKeydown)
   observer?.disconnect()
   observer = null
@@ -867,49 +786,6 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
       </div>
     </div>
 
-    <div v-if="showTable" ref="tableWrap" class="table-wrap" @pointerdown.stop @wheel.stop>
-      <table>
-        <thead>
-          <tr>
-            <th>时间</th>
-            <th v-for="tagId in tableData.header" :key="tagId">{{ headerOf(tagId) }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr
-            v-for="row in tableData.body"
-            :key="row.t"
-            :class="{ 'row-cursor': row.cursor }"
-            :data-cursor="row.cursor ? '1' : undefined"
-          >
-            <td class="t">{{ fmtRowTime(row.t) }}</td>
-            <td v-for="(cell, k) in row.cells" :key="k">{{ fmtNumber(tableData.header[k] ?? '', cell) }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <div class="table-foot">
-        <span>
-          共 {{ tableData.total }} 行 · 第 {{ Math.min(tablePage, tablePages) }}/{{ tablePages }} 页
-          <span v-if="cursorAt != null">（蓝底 = 游标行）</span>
-        </span>
-        <span class="table-page">
-          <el-button size="small" text :disabled="tablePage <= 1" @click="changePage(1)">⏮</el-button>
-          <el-button size="small" text :disabled="tablePage <= 1" @click="changePage(tablePage - 1)">◀</el-button>
-          <el-button size="small" text :disabled="tablePage >= tablePages" @click="changePage(tablePage + 1)">▶</el-button>
-          <el-button size="small" text :disabled="tablePage >= tablePages" @click="changePage(tablePages)">⏭</el-button>
-          <el-select
-            :model-value="tablePageSize"
-            size="small"
-            class="w-pagesize"
-            :teleported="false"
-            @change="changePageSize"
-          >
-            <el-option v-for="size in TABLE_PAGE_SIZES" :key="size" :label="`${size} 行/页`" :value="size" />
-          </el-select>
-          <el-button size="small" text :disabled="cursorRowIndex < 0" @click="gotoCursorPage">定位游标</el-button>
-        </span>
-      </div>
-    </div>
   </div>
 </template>
 
@@ -1110,63 +986,6 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
-}
-.table-wrap {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 100%;
-  /* 与 trendHistoryTable 里给图表让出的高度（TREND_TABLE_H）对齐，别盖住曲线 */
-  max-height: 148px;
-  overflow: auto;
-  z-index: 3;
-  background: rgba(11, 18, 32, 0.97);
-  border: 1px solid #1e3a5f;
-  border-top: none;
-  font-size: 11px;
-  color: #cbd5e1;
-  pointer-events: auto;
-}
-.table-wrap table {
-  width: 100%;
-  border-collapse: collapse;
-}
-.table-wrap th,
-.table-wrap td {
-  padding: 2px 6px;
-  text-align: left;
-  white-space: nowrap;
-  border-bottom: 1px solid #16223a;
-}
-.table-wrap th {
-  position: sticky;
-  top: 0;
-  background: #0f1a2c;
-  color: #94a3b8;
-  font-weight: normal;
-}
-.table-wrap td.t {
-  font-family: ui-monospace, Consolas, monospace;
-  color: #93c5fd;
-}
-.row-cursor {
-  background: rgba(61, 139, 253, 0.18);
-}
-.table-foot {
-  position: sticky;
-  bottom: 0;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 2px 6px;
-  color: #64748b;
-  background: rgba(11, 18, 32, 0.97);
-}
-.table-page {
-  display: flex;
-  align-items: center;
-  gap: 2px;
 }
 .hint {
   /* 位置不够时先压提示文字，别把按钮挤出图元 */

@@ -62,6 +62,13 @@ export interface TrendChartSpec {
   chromeBottom?: number
   /** 底部数据区域缩放滑块（仅历史趋势 + 原生叠层） */
   slider?: boolean
+  /**
+   * 临时把图内图例 / 底部滑块让给点表（点表开着时用）：
+   * 表头就是"变量 + 颜色"的图例、表里就是精确读数，没必要再占两条版面，
+   * 让出来的高度正好给曲线和表。
+   */
+  hideLegend?: boolean
+  hideSlider?: boolean
   /** 工具箱里的“框选放大” */
   selectZoom?: boolean
   /** 游标时间（epoch ms）；画一条竖线 + 时间标签 */
@@ -122,6 +129,8 @@ export interface TrendChartLayout {
   grid: { left: number; right: number; top: number; bottom: number; width: number; height: number }
   /** 底部滑块占的高度（0 = 没有） */
   sliderHeight: number
+  /** 图例要不要用"单行可滚动"（曲线多、图例本来要占好几行时） */
+  legendScroll: boolean
 }
 
 
@@ -156,7 +165,11 @@ export function trendChartLayout(spec: TrendChartSpec): TrendChartLayout {
   // 再让出半个刻度字高：y 轴第一个刻度是"顶格居中"的，不然会压到标题上
   // 原生模式还要给 ECharts 自带图例留出**实际行数**（它会自动换行）
   const legendRowHeight = Math.round(tickFont * 1.5)
-  const legendRows = spec.native ? estimateLegendRows(spec, tickFont, width - 16 * S) : 0
+  // 图例行数：多到两行以上就改用"可滚动图例"（单行 + 左右箭头）——
+  // 否则 8 条曲线的大字号图例会占掉图元小半高，绘图区被压成一条缝（曲线看着就"没了"）。
+  const legendRowsWanted = spec.native && !spec.hideLegend ? estimateLegendRows(spec, tickFont, width - 16 * S) : 0
+  const legendScroll = legendRowsWanted > 2
+  const legendRows = legendScroll ? 1 : legendRowsWanted
   // 顶部还要给 HTML 工具栏（区间/跟随/导出）让位
   const chromeTop = Math.max(0, Math.round(Number(spec.chromeTop) || 0))
   const top = titleTop + Math.round(tickFont * 0.65) + legendRows * legendRowHeight + chromeTop
@@ -167,7 +180,7 @@ export function trendChartLayout(spec: TrendChartSpec): TrendChartLayout {
   const axisH = Math.max(18 * S, Math.round(F * 1.7))
   // 底部默认只留横轴刻度（绘图区高度全给曲线）；
   // 历史趋势另外给底部滑块留一条（spec.slider），否则滑块会压掉时间轴
-  const sliderHeight = spec.slider ? Math.max(22 * S, Math.round(F * 1.6)) : 0
+  const sliderHeight = spec.slider && !spec.hideSlider ? Math.max(22 * S, Math.round(F * 1.6)) : 0
   const chromeBottom = Math.max(0, Math.round(Number(spec.chromeBottom) || 0))
   const bottom = axisH + sliderHeight + chromeBottom
 
@@ -176,6 +189,7 @@ export function trendChartLayout(spec: TrendChartSpec): TrendChartLayout {
     titleFont,
     tickFont,
     sliderHeight,
+    legendScroll,
     grid: {
       left,
       right,
@@ -392,10 +406,12 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
     // 原生模式：用 ECharts 自带图例（能点、能框选），放在标题下面一行
     legend: spec.native
       ? {
-          show: true,
+          show: !spec.hideLegend,
           top: layout.titleFont + Math.round(tickFont * 0.25),
           left: 8,
           right: 8,
+          // 一屏放不下时用可滚动图例（单行 + 左右箭头），排版也按一行算
+          type: spec.native && layout.legendScroll ? 'scroll' : 'plain',
           itemGap: Math.round(tickFont * 0.9),
           itemWidth: Math.round(tickFont * 1.1),
           itemHeight: Math.round(tickFont * 0.5),
@@ -490,6 +506,7 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
                   type: 'slider',
                   xAxisIndex: 0,
                   filterMode: 'none',
+                  show: !spec.hideSlider,
                   bottom: 2,
                   height: Math.max(12, Math.round(layout.sliderHeight - 8)),
                   borderColor: axisColor,

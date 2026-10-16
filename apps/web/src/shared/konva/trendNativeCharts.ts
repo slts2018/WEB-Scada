@@ -4,7 +4,7 @@
  */
 import type Konva from 'konva'
 import type { Widget2D } from '@web-scada/core'
-import { buildTrendChartOption, trendZoomOf } from '@/shared/konva/trendChart'
+import { buildTrendChartOption, trendChartLayout, trendZoomOf } from '@/shared/konva/trendChart'
 import type { TrendLiveOverlay, TrendLiveSlot } from '@/shared/konva/trendChartLive'
 import {
   buildTrendLiveSpec,
@@ -12,7 +12,11 @@ import {
   setTrendChartRendered,
 } from '@/shared/konva/widgetNodes'
 import { TREND_TOOLBAR_H } from '@/shared/runtime/trendHistoryQuery'
-import { trendHistoryTableHeightOf } from '@/shared/runtime/trendHistoryTable'
+import {
+  setTrendHistoryTableHeight,
+  trendHistoryTableVisibleOf,
+  trendTableHeightBudget,
+} from '@/shared/runtime/trendHistoryTable'
 
 /** 旋转或自带点击事件的图元仍走位图：叠层会挡拖拽 / 业务点击。 */
 export function widgetUsesNativeTrend(widget: Widget2D): boolean {
@@ -61,9 +65,18 @@ export function syncNativeTrendCharts(opts: {
       height: rect.height,
       fontSize: Math.max(10, pageFont * scale),
       chromeTop: showToolbar ? Math.round(TREND_TOOLBAR_H * scale) : 0,
-      chromeBottom:
-        widget.type === 'trendHistory' ? Math.round(trendHistoryTableHeightOf(widget.id) * scale) : 0,
+      chromeBottom: 0,
     })
+    // 点表：先按"没有表"排一次版，看看绘图区能有多大；让出最小绘图高度后剩下的才给表。
+    // 这样短图元上表不会把曲线压成一条缝，而表的高度和图表让出的空间**是同一个数**。
+    if (widget.type === 'trendHistory') {
+      let tableH = 0
+      if (trendHistoryTableVisibleOf(widget.id)) {
+        tableH = trendTableHeightBudget(trendChartLayout(spec).grid.height)
+      }
+      setTrendHistoryTableHeight(widget.id, tableH)
+      spec.chromeBottom = tableH
+    }
     spec.zoom = trendZoomOf(widget.id) ?? undefined
     slots.push({
       widgetId: widget.id,
