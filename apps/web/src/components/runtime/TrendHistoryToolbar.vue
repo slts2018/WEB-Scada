@@ -17,8 +17,6 @@
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import {
-  ArrowLeft,
-  ArrowRight,
   Close,
   CopyDocument,
   DArrowLeft,
@@ -44,9 +42,7 @@ import {
   setTrendHistoryCursor,
   stepTrendHistoryCursor,
   trendHistoryCursorOf,
-  trendHistoryCursorReadout,
   trendHistoryCursorText,
-  type CursorRow,
 } from '@/shared/runtime/trendHistoryCursor'
 import { onTrendAlarmBandsChanged, trendAlarmBandsOf, type AlarmBand } from '@/shared/runtime/trendAlarmEvents'
 import {
@@ -199,8 +195,7 @@ function syncAlarms(): void {
 }
 
 const cursorAt = ref<number | null>(null)
-const cursorRows = ref<CursorRow[]>([])
-const cursorTimeText = ref('')
+
 
 /**
  * 起止时间框 ↔ 真实窗口：面板表头、"自定义区间"标记、两个输入框都按当前窗口刷新。
@@ -240,25 +235,14 @@ function fmtStamp(ms: number): string {
   return `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
 }
 
-/**
- * 游标读数里的时间：窗口跨天时带日期（与图上的 x 轴刻度一致），
- * 否则"08:32:11"在 24 小时窗口里分不清是今天还是昨天。
- */
-function fmtClock(ms: number): string {
-  const d = new Date(ms)
-  const p = (n: number) => String(n).padStart(2, '0')
-  const clock = `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
-  const win = trendHistoryWindowOf(props.widgetId)
-  const withDate = Boolean(
-    win && new Date(win.from).toDateString() !== new Date(win.to).toDateString(),
-  )
-  return withDate ? `${p(d.getMonth() + 1)}-${p(d.getDate())} ${clock}` : clock
-}
 
-/** 游标读数：时间 + 每条曲线吸附到的值 + 质量点 */
+
+/**
+ * 游标状态同步。游标读数**不在工具条上显示**了（占地方、和点表/图例重复）：
+ * 值看点表里那一行（蓝底），时间看图上竖线的标签与「⋯ → 跳到时刻」框。
+ */
 function syncCursor(): void {
   const at = trendHistoryCursorOf(props.widgetId)
-  const moved = at !== cursorAt.value
   cursorAt.value = at
   // 「时刻」控件跟着游标（游标没变时不回写，避免打断正在手输的用户）
   if (at == null) {
@@ -266,15 +250,6 @@ function syncCursor(): void {
   } else if (jumpAt.value?.getTime() !== at) {
     jumpAt.value = new Date(at)
   }
-  if (at == null) {
-    cursorRows.value = []
-    cursorTimeText.value = ''
-    return
-  }
-  const readout = trendHistoryCursorReadout(props.widgetId, props.tagIds)
-  cursorRows.value = readout?.rows ?? []
-  cursorTimeText.value = fmtClock(at)
-  void moved
 }
 
 function stepCursor(dir: -1 | 1): void {
@@ -737,6 +712,9 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
             <el-button size="small" :icon="CopyDocument" :disabled="cursorAt == null" @click="copyCursor">
               复制读数
             </el-button>
+            <el-button size="small" :icon="Close" :disabled="cursorAt == null" @click="clearCursor">
+              清除游标
+            </el-button>
             <el-button size="small" @click="exportCsv">导出 CSV</el-button>
             <el-button v-if="alarmBands.length" size="small" type="danger" plain @click="jumpToFirstAlarm">
               跳到报警 {{ alarmBands.length }} 处
@@ -762,16 +740,6 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
       <span class="spacer" />
 
       <span v-if="showAggHint && aggWindow && interval === 'auto'" class="hint">按 {{ aggWindow }} 平均</span>
-      <span v-if="cursorAt != null" class="cursor">
-        <el-button size="small" text :icon="ArrowLeft" title="游标前一个采样点（←）" @click="stepCursor(-1)" />
-        <span class="cursor-time">{{ cursorTimeText }}</span>
-        <span v-for="row in cursorRows" :key="row.tagId" class="cursor-row">
-          <i class="dot" :class="row.quality === 'Good' || row.quality == null ? 'ok' : 'bad'" />
-          {{ row.tagId }} {{ fmtNumber(row.tagId, row.value) }}
-        </span>
-        <el-button size="small" text :icon="ArrowRight" title="游标后一个采样点（→）" @click="stepCursor(1)" />
-        <el-button size="small" text :icon="Close" title="清除游标（Esc）" @click="clearCursor" />
-      </span>
     </div>
 
     <!-- 快捷键提示：从「⋯」或按 ? 打开，Esc 关闭 -->
@@ -870,40 +838,6 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   flex: 1 1 0;
   min-width: 0;
 }
-.cursor {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  /* 可收缩：控件多了先压读数，别把按钮挤出图元 */
-  flex: 0 1 auto;
-  min-width: 0;
-  font-size: 11px;
-  color: #e2e8f0;
-  white-space: nowrap;
-  overflow: hidden;
-}
-
-.cursor-time {
-  font-family: ui-monospace, Consolas, monospace;
-  color: #93c5fd;
-}
-.cursor-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-}
-.dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  display: inline-block;
-}
-.dot.ok {
-  background: #34d399;
-}
-.dot.bad {
-  background: #f87171;
-}
 /* 快捷键提示面板：贴在图元左上角，不抢图内的鼠标 */
 .shortcuts {
   position: absolute;
@@ -942,6 +876,7 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   padding: 0 4px;
   text-align: center;
 }
+/* 「⋯」面板：分组标题 + 一行一个控件 */
 .more-panel {
   display: flex;
   flex-direction: column;
@@ -977,7 +912,6 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
 .more-row :deep(.el-select) {
   width: 118px;
 }
-
 .more-row :deep(.el-date-editor) {
   width: 100%;
   max-width: 100%;
@@ -987,6 +921,7 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   flex-wrap: wrap;
   gap: 4px;
 }
+
 .hint {
   /* 位置不够时先压提示文字，别把按钮挤出图元 */
   flex: 0 1 auto;

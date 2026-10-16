@@ -145,6 +145,8 @@ onMounted(() => {
   })
   // 数据/窗口变了 → 表内容跟着变
   offLoaded = onTrendHistoryLoaded(refresh)
+  // 打开时如果已经有游标，直接翻到游标那一页（"表与游标联动"）
+  if (cursorAt.value != null) gotoCursorPage()
   offTable = onTrendHistoryTableChange(() => {
     refresh()
     scrollCursorIntoView()
