@@ -67,7 +67,8 @@ export function mountPanelTrendToolbars(
   const bars = shallowRef<PanelTrendBar[]>([])
   const tables = shallowRef<PanelTrendTable[]>([])
   let unregister: Array<() => void> = []
-  let lastSignature = ''
+  /** 同 Canvas2DRuntime：哨兵用 null，"关掉点表"算出来的空签名才不会被当成没变化 */
+  let lastSignature: string | null = null
 
   const refresh = () => {
     const next: PanelTrendBar[] = []

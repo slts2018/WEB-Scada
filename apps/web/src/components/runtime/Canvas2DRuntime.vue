@@ -152,7 +152,12 @@ type TrendTableSlot = {
   h: number
 }
 const trendTables = ref<TrendTableSlot[]>([])
-let trendTableSignature = ''
+/**
+ * 已渲染的点表签名。哨兵必须是 `null`（而不是空串）：
+ * 关掉点表时算出来的签名正好是空串，用空串当哨兵会被判成"没变化"，
+ * 于是表留在页面上不消失（现场报过这个 bug）。`null` 表示"还没算过"，任何结果都算变化。
+ */
+let trendTableSignature: string | null = null
 
 type TrendBar = {
   id: string
@@ -284,7 +289,7 @@ function syncTrendBars() {
 function syncTrendTables() {
   if (!bundle || !host.value) {
     trendTables.value = []
-    trendTableSignature = ''
+    trendTableSignature = null
     return
   }
   const board = host.value.parentElement
@@ -670,9 +675,9 @@ onMounted(() => {
   offFullscreen = onWidgetFullscreenChange(syncFullscreen)
   // 点表开关变化时立刻算一次位置（正常也会被 after() 的刷新带上，这里兜个底）
   offTrendTable = onTrendHistoryTableChange(() => {
-    // 顺序要紧：先让图表按新状态重排（顺便算出点表该占多高），再按那个高度摆表
+    // 顺序要紧：先让图表按新状态重排（顺便算出点表该占多高），再按那个高度摆/撤表。
+    // 不要手动清签名：签名本身把"开/关"都算进去了（见 trendTableSignature 的注释）。
     bundle?.syncOverlays()
-    trendTableSignature = ''
     refreshAllVisuals()
   })
   window.addEventListener('keydown', onFullscreenKeydown)
