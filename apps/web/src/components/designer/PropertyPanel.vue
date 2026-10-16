@@ -164,6 +164,29 @@ function removeTrendCurve(tagId: string) {
   writeTrendCurves(trendCurveList.value.filter((curve) => curve.tagId !== tagId))
 }
 
+/**
+ * 纵轴量程：自动 = 清掉 min/max，让 ECharts 按数据缩放；锁定 = 填上下限，曲线不会跳。
+ * 注意多曲线也吃这两个值（同一根纵轴），所以填写了就整图锁定。
+ */
+const autoYRange = computed(() => {
+  const props = widget.value?.props
+  if (!props) return true
+  return !Number.isFinite(Number(props.min)) && !Number.isFinite(Number(props.max))
+})
+
+function setAutoYRange(on: boolean) {
+  const current = widget.value
+  if (!current) return
+  project.updateWidget(current.id, {
+    props: {
+      ...current.props,
+      // 写 undefined：存工程时 JSON 会丢掉这两个键，运行端按"没配 = 自动"处理
+      min: on ? undefined : Number(current.props.min ?? 0),
+      max: on ? undefined : Number(current.props.max ?? 100),
+    },
+  })
+}
+
 const alarmColumns = computed(() => alarmFieldsOf(widget.value?.props.columns))
 const historyColumns = computed(() => alarmHistoryFieldsOf(widget.value?.props.columns))
 
@@ -740,7 +763,43 @@ async function replaceImage(e: Event) {
             @update:model-value="(v: string) => updateProp('series', v)"
           />
         </label>
-        <div v-if="!trendCurveList.length" class="row">
+        <label v-if="widget.type === 'trend' || widget.type === 'trendHistory'">
+          <span>纵轴量程</span>
+          <el-checkbox
+            :model-value="autoYRange"
+            @update:model-value="(v: boolean | string | number) => setAutoYRange(Boolean(v))"
+          >
+            自动（按区间里的数据缩放）
+          </el-checkbox>
+        </label>
+        <div
+          v-if="(widget.type === 'trend' || widget.type === 'trendHistory') && !autoYRange"
+          class="row"
+        >
+          <label>
+            <span>最小</span>
+            <el-input-number
+              size="small"
+              controls-position="right"
+              :model-value="Number(widget.props.min ?? 0)"
+              @update:model-value="(v: number | undefined) => updateProp('min', Number(v) || 0)"
+            />
+          </label>
+          <label>
+            <span>最大</span>
+            <el-input-number
+              size="small"
+              controls-position="right"
+              :model-value="Number(widget.props.max ?? 100)"
+              @update:model-value="(v: number | undefined) => updateProp('max', Number(v) || 0)"
+            />
+          </label>
+        </div>
+        <p v-if="widget.type === 'trend' || widget.type === 'trendHistory'" class="hint">
+          自动 = 纵轴按当前区间里的数据缩放（<strong>含 0</strong>，所以量程外的曲线会显得平）；
+          取消勾选并填上下限就锁定量程，曲线不会跳来跳去。堆叠显示时纵轴始终自动（按累加值）。
+        </p>
+        <div v-if="widget.type === 'chart'" class="row">
           <label>
             <span>最小</span>
             <el-input-number
