@@ -12,6 +12,11 @@ export interface TagMeta {
   address?: string
   dataType: 'bool' | 'int' | 'float' | 'string'
   unit?: string
+  /**
+   * 显示小数位 0～6。留空 = 按数值大小自动取位。
+   * 实时/历史曲线的图例、游标、点表读这里，不再在曲线上另配。
+   */
+  decimals?: number
   writable: boolean
   description?: string
   /**
@@ -101,6 +106,17 @@ export interface DeviceMeta {
   channel?: string
   enabled: boolean
   description?: string
+}
+
+/** 设备链路状态。运行时计算，不写入设备配置。 */
+export type DeviceLinkState = 'online' | 'offline' | 'disabled' | 'unsupported' | 'unknown'
+
+export interface DeviceLinkStatus {
+  deviceId: string
+  online: boolean
+  state: DeviceLinkState
+  checkedAt?: number
+  message?: string
 }
 
 /** 历史数据缺 deviceId 时的回填默认设备（与 MOCK_DEVICES 一致） */

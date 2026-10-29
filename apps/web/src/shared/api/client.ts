@@ -1,4 +1,5 @@
 import type {
+  DeviceLinkStatus,
   DeviceMeta,
   ProjectDocument,
   PublishPackage,
@@ -361,6 +362,10 @@ export async function apiDeleteTag(tagId: string): Promise<void> {
 
 export async function apiListDevices(): Promise<{ items: DeviceMeta[] }> {
   return request('/devices')
+}
+
+export async function apiListDeviceStatus(): Promise<{ items: DeviceLinkStatus[] }> {
+  return request('/devices/status')
 }
 
 export async function apiCreateDevice(meta: DeviceMeta): Promise<DeviceMeta> {

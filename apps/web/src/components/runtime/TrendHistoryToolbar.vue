@@ -6,30 +6,29 @@
  * 用 Element Plus 的日期选择器比在画布上自绘省事得多；与"历史报警"的搜索条同一套做法
  * （按图元矩形定位，见 trendToolbarClientRect）。
  *
- * 布局（越重要的越靠左，成组用竖线分隔，只留最常用的在条上）：
+ * 布局（单行，按功能分组；按图元宽度能放几组放几组，放不下的组整组收进「…」）：
  *
- *   区间 │ 开始 结束 搜索 │ ⇤ ⇥ 跟随 刷新 表 │ ⋯        ◀ 08:32:11 ▶ ✕
- *   └── 时间 ──┘└── 导航 ──┘└─ 工具 ─┘   └─ 游标读数（有游标才出现）─┘
+ *   时间 开始 结束 搜索 刷新 │ 浏览 ⇤ ⇥ 放大 缩小 表 │ 定位 时刻 间隔 │ 工具 导出 最大化 快捷键 …
  *
- * 其余（跳到时刻 / 采样间隔 / 缩放 / 点表 / 导出 CSV / 复制读数 / 报警跳转 / 全屏 / 快捷键）
- * 一律收进「⋯」，不再和主控件抢地方；图元变窄时"起止时间"这一组也并进「⋯」。
- * 成对按钮用图标（⇤⇥ 平移一个窗口、◀▶ 游标步进），文字按钮只留给动词（搜索/刷新/表/跟随）。
+ * 按钮一律只放图标，文字放在 title 里（鼠标悬停显示），省出地方给图表。
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, withDefaults } from 'vue'
 import {
-  Close,
-  CopyDocument,
+  Bell,
   DArrowLeft,
   DArrowRight,
+  Download,
   FullScreen,
   Memo,
-  Operation,
+  MoreFilled,
+  QuestionFilled,
   Refresh,
   ScaleToOriginal,
+  Search,
   ZoomIn,
   ZoomOut,
 } from '@element-plus/icons-vue'
-import { formatTrendValue, type TrendValueFormat } from '@web-scada/core'
+import type { TrendValueFormat } from '@web-scada/core'
 import {
   onTrendHistoryTableChange,
   setTrendHistoryTableVisible,
@@ -42,28 +41,24 @@ import {
   setTrendHistoryCursor,
   stepTrendHistoryCursor,
   trendHistoryCursorOf,
-  trendHistoryCursorText,
 } from '@/shared/runtime/trendHistoryCursor'
 import { onTrendAlarmBandsChanged, trendAlarmBandsOf, type AlarmBand } from '@/shared/runtime/trendAlarmEvents'
 import {
   TREND_INTERVALS,
-  TREND_RANGES,
   onTrendHistoryLoaded,
   refreshTrendHistory,
   setTrendHistoryFollow,
   setTrendHistoryInterval,
-  setTrendHistoryPreset,
   setTrendHistoryWindow,
   shiftTrendHistoryWindow,
   trendHistoryExportRows,
   trendHistoryFollowOf,
   trendHistoryIntervalOf,
-  trendHistoryIsManualWindow,
   trendHistoryNoticeOf,
-  trendHistoryPresetOf,
   trendHistoryStatusOf,
   trendHistoryWindowOf,
   zoomTrendHistoryWindow,
+  setTrendToolbarMeasuredHeight,
 } from '@/shared/runtime/trendHistoryQuery'
 import { jumpTrendHistoryWidgetToTime } from '@/shared/runtime/trendHistoryLink'
 import {
@@ -71,8 +66,9 @@ import {
   setActiveTrendToolbar,
   shouldHandleTrendKeys,
 } from '@/shared/runtime/trendToolbarFocus'
+import { tagDisplayFormat } from '@/shared/runtime/tagDisplay'
 
-/** 曲线的显示格式（属性面板里配的单位 / 小数位） */
+/** 曲线标识（单位和小数位在变量上，不在这里配） */
 export interface TrendToolbarCurve {
   tagId: string
   label?: string
@@ -80,26 +76,153 @@ export interface TrendToolbarCurve {
   decimals?: number
 }
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   widgetId: string
-  preset: string
   tagIds: string[]
-  /** 曲线的单位 / 小数位（图例名可选，用于点表表头） */
+  /** 曲线列表（表头单位从变量读） */
   curves?: TrendToolbarCurve[]
   /** 运行端是否允许改时间区间/缩放/采样间隔（发布端可锁死） */
   allowEdit?: boolean
-  /** 工具条实测宽度（px）；缺省时由 ResizeObserver 量 */
+  /** 工具条实测宽度（px）；缺省时由父级定位框给出 */
   width?: number
   /** 该图元是否正在最大化显示 */
   fullscreen?: boolean
   /** 是否提供"最大化"按钮（3D 面板内的只读面板不提供） */
   fullscreenSupported?: boolean
-}>()
+}>(), {
+  fullscreenSupported: true,
+})
 
-const canEdit = () => props.allowEdit !== false
+const rootEl = ref<HTMLDivElement | null>(null)
+let rootObserver: ResizeObserver | null = null
+let lastRootWidth = 0
+
+function mainBar(): HTMLElement | null {
+  return rootEl.value?.querySelector<HTMLElement>('.trend-bar.is-main') ?? null
+}
+
+function reportBarHeight(): void {
+  const h = mainBar()?.offsetHeight ?? 0
+  if (h > 0) setTrendToolbarMeasuredHeight(props.widgetId, h)
+}
+
+/* ---------- 单行显示：按功能分组，放不下的组从末尾起整组收进「…」 ---------- */
+
+const PLACES = ['bar', 'more'] as const
+type Place = (typeof PLACES)[number]
+type GroupKey = 'time' | 'nav' | 'locate' | 'tools'
+
+const GROUPS: { key: GroupKey; label: string }[] = [
+  { key: 'time', label: '时间' },
+  { key: 'nav', label: '浏览' },
+  { key: 'locate', label: '定位' },
+  { key: 'tools', label: '工具' },
+]
+
+/** 「…」按钮自己要占的宽度（含间距） */
+const MORE_BTN_W = 34
+/** 与 `.trend-bar { gap }` 一致 */
+const GROUP_GAP = 4
+/** `.is-main .tb-group + .tb-group` 的 margin-left（竖线分隔，不进 width） */
+const GROUP_MARGIN = 3
+
+const showMore = ref(false)
+/** 从第几组起收进「…」；Infinity = 全部放在条上 */
+const hiddenFrom = ref(Number.POSITIVE_INFINITY)
+/**
+ * 各组自身宽度缓存。画布缩放只改工具条外框宽，组内按钮尺寸不变，
+ * 所以缩放时用缓存同步算，避免「先全部摊开再收」的一帧闪满。
+ */
+let cachedGroupWs: number[] | null = null
+
+const hasOverflow = computed(() => hiddenFrom.value < GROUPS.length)
+
+function groupInPlace(index: number, place: Place): boolean {
+  const hidden = index >= hiddenFrom.value
+  return place === 'bar' ? !hidden : hidden
+}
+
+/** 前 count 组（可选再加「…」）一共要占多宽 */
+function widthOf(count: number, widths: number[], withMore: boolean): number {
+  if (count <= 0) return withMore ? MORE_BTN_W : 0
+  let sum = 0
+  for (let i = 0; i < count; i++) sum += widths[i] ?? 0
+  // 组与组之间：flex gap + 后一组的 margin-left
+  if (count > 1) sum += (count - 1) * (GROUP_GAP + GROUP_MARGIN)
+  if (withMore) sum += GROUP_GAP + MORE_BTN_W
+  return sum
+}
+
+function pickHiddenFrom(barInnerW: number, widths: number[]): number {
+  if (widths.length === 0) return Number.POSITIVE_INFINITY
+  if (widthOf(widths.length, widths, false) <= barInnerW) return Number.POSITIVE_INFINITY
+  for (let k = widths.length - 1; k >= 0; k--) {
+    if (widthOf(k, widths, true) <= barInnerW) return k
+  }
+  return 0
+}
+
+function applyHidden(next: number): void {
+  if (next !== hiddenFrom.value) hiddenFrom.value = next
+  if (next >= GROUPS.length) showMore.value = false
+  reportBarHeight()
+}
+
+let layoutSeq = 0
+
+/** 只用缓存按当前条宽立刻决定显示几组（缩放路径，无闪烁） */
+function relayoutFromCache(): boolean {
+  if (!cachedGroupWs || cachedGroupWs.length !== GROUPS.length) return false
+  const bar = mainBar()
+  if (!bar) return false
+  // clientWidth 已扣掉边框；再扣左右 padding 4+4
+  const inner = Math.max(0, bar.clientWidth - 8)
+  applyHidden(pickHiddenFrom(inner, cachedGroupWs))
+  return true
+}
+
+/**
+ * 重新量各组宽度。量的时候临时全部摆上，并用 overflow:hidden 挡住，
+ * 避免用户看到「一瞬间全挤在条上」。
+ */
+async function remasure(): Promise<void> {
+  const seq = ++layoutSeq
+  const bar = mainBar()
+  if (!bar) return
+  bar.classList.add('is-measuring')
+  hiddenFrom.value = Number.POSITIVE_INFINITY
+  await nextTick()
+  if (seq !== layoutSeq) return
+  const groups = Array.from(bar.querySelectorAll<HTMLElement>(':scope > [data-tg]'))
+  cachedGroupWs = groups.map((el) => el.getBoundingClientRect().width)
+  const inner = Math.max(0, bar.clientWidth - 8)
+  applyHidden(pickHiddenFrom(inner, cachedGroupWs))
+  await nextTick()
+  bar.classList.remove('is-measuring')
+  reportBarHeight()
+}
+
+/** 宽度变了优先走缓存；内容变了（报警按钮出现等）才重测 */
+function relayout(forceMeasure = false): void {
+  if (!forceMeasure && relayoutFromCache()) return
+  void remasure()
+}
+
+function toggleHelp(): void {
+  showHelp.value = !showHelp.value
+  if (showHelp.value) showMore.value = false
+}
+
+/** 点到工具条外面就收起「…」面板 */
+function onDocPointerDown(e: PointerEvent): void {
+  if (!showMore.value) return
+  const target = e.target as Node | null
+  if (target && rootEl.value?.contains(target)) return
+  showMore.value = false
+}
 const emit = defineEmits<{ change: []; toggleFullscreen: [] }>()
+const canEdit = () => props.allowEdit !== false
 
-const preset = ref(props.preset || '-1h')
 const interval = ref('auto')
 const follow = ref(false)
 const aggWindow = ref<string | null>(null)
@@ -124,51 +247,24 @@ const editingField = ref<'from' | 'to' | null>(null)
  */
 const jumpAt = ref<Date | null>(null)
 const showHelp = ref(false)
-const showMore = ref(false)
-/** 「⋯」面板表头显示当前区间（sync 时刷新；模块里的窗口状态不是响应式的） */
-const rangeText = ref('')
-/** 区间下拉里的"自定义区间"：窗口被手动改过（起止/缩放/平移/报警跳转）时选它，别装作还在按预设 */
-const CUSTOM_PRESET = 'custom'
-const presetOptions = computed(() => [
-  ...TREND_RANGES.map((item) => ({ id: item.id as string, label: item.label as string })),
-  { id: CUSTOM_PRESET, label: '自定义区间' },
-])
 
-/* ---------- 曲线显示格式（单位 / 小数位） ---------- */
+/* ---------- 曲线显示格式：读变量上的单位 / 小数位 ---------- */
 
 const formatOf = computed(() => {
   const map = new Map<string, TrendValueFormat>()
-  for (const curve of props.curves ?? []) {
-    map.set(curve.tagId, { unit: curve.unit, decimals: curve.decimals })
+  const ids = props.curves?.length ? props.curves.map((curve) => curve.tagId) : props.tagIds
+  for (const tagId of ids) {
+    if (!tagId) continue
+    map.set(tagId, tagDisplayFormat(tagId))
   }
   return map
 })
-
-/** 数值（不含单位）：游标读数与点表里的数字都用它，小数位跟属性面板一致 */
-function fmtNumber(tagId: string, value: number | null): string {
-  return formatTrendValue(value, formatOf.value.get(tagId))
-}
 
 /** 点表表头：变量名后补上单位，现场看表不用猜量纲 */
 function headerOf(tagId: string): string {
   const unit = formatOf.value.get(tagId)?.unit?.trim()
   return unit ? `${tagId} (${unit})` : tagId
 }
-
-/* ---------- 宽度分档：放不下的控件收进"更多" ---------- */
-
-const measured = ref(props.width && props.width > 0 ? props.width : 9999)
-const barWidth = computed(() => (measured.value > 0 ? measured.value : 9999))
-/** 起止时间这一组（开始+结束+搜索 ≈ 380px）放不下时并进「⋯」 */
-const showRange = computed(() => barWidth.value >= 800)
-/** 「跟随」这种模式开关在很窄的图元上也让位（状态在「⋯」里也能看到） */
-const showFollow = computed(() => barWidth.value >= 460)
-/** 条上是否还有余量显示"按 Xs 平均"这类小字提示 */
-const showAggHint = computed(() => barWidth.value >= 900)
-
-
-const root = ref<HTMLDivElement | null>(null)
-let observer: ResizeObserver | null = null
 
 /* ---------- 点表（图下方弹出的数据表，与游标联动） ---------- */
 
@@ -198,18 +294,12 @@ const cursorAt = ref<number | null>(null)
 
 
 /**
- * 起止时间框 ↔ 真实窗口：面板表头、"自定义区间"标记、两个输入框都按当前窗口刷新。
+ * 起止时间框 ↔ 真实窗口：面板表头和两个输入框都按当前窗口刷新。
  * 正在编辑的那个框除外（别打断手输），编辑一结束（失焦）就回到真实值。
  */
 function syncRangeFields(): void {
   const win = trendHistoryWindowOf(props.widgetId)
   if (!win) return
-  rangeText.value = `${fmtStamp(win.from)} ~ ${fmtStamp(win.to)}`
-  // 下拉要反映"实际在用的区间"：运行端改过预设就以改过的为准；窗口是手动指定的就显示"自定义区间"
-  const manual = trendHistoryIsManualWindow(props.widgetId)
-  const runtimePreset = trendHistoryPresetOf(props.widgetId) || props.preset || '-1h'
-  const nextPreset = manual ? CUSTOM_PRESET : runtimePreset
-  if (preset.value !== nextPreset) preset.value = nextPreset
   if (editingField.value !== 'from' && fromAt.value?.getTime() !== win.from) {
     fromAt.value = new Date(win.from)
   }
@@ -228,18 +318,9 @@ function endEditField(): void {
   syncRangeFields()
 }
 
-/** 面板表头用的完整时间戳（月-日 时:分:秒） */
-function fmtStamp(ms: number): string {
-  const d = new Date(ms)
-  const p2 = (n: number) => String(n).padStart(2, '0')
-  return `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
-}
-
-
-
 /**
- * 游标状态同步。游标读数**不在工具条上显示**了（占地方、和点表/图例重复）：
- * 值看点表里那一行（蓝底），时间看图上竖线的标签与「⋯ → 跳到时刻」框。
+ * 游标状态同步。游标读数不在工具条上重复显示：
+ * 值看点表里那一行，时间看图上竖线和「时刻」框。
  */
 function syncCursor(): void {
   const at = trendHistoryCursorOf(props.widgetId)
@@ -278,21 +359,7 @@ function clearCursor(): void {
   after()
 }
 
-async function copyCursor(): Promise<void> {
-  const text = trendHistoryCursorText(props.widgetId, props.tagIds, (tagId, value) =>
-    fmtNumber(tagId, value),
-  )
-  if (!text) return
-  try {
-    await navigator.clipboard.writeText(text)
-    ElMessage.success('读数已复制')
-  } catch {
-    ElMessage.warning('复制失败，请手动选择文本')
-  }
-}
-
 function sync(): void {
-  preset.value = props.preset || '-1h'
   interval.value = trendHistoryIntervalOf(props.widgetId)
   follow.value = trendHistoryFollowOf(props.widgetId)
   notice.value = trendHistoryNoticeOf(props.widgetId)
@@ -364,12 +431,20 @@ onMounted(() => {
     showTable.value = trendHistoryTableVisibleOf(props.widgetId)
   })
   window.addEventListener('keydown', onKeydown)
-  if (typeof ResizeObserver !== 'undefined' && root.value) {
-    observer = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect?.width ?? 0
-      if (w > 0) measured.value = w
+  document.addEventListener('pointerdown', onDocPointerDown, true)
+  relayout(true)
+  if (typeof ResizeObserver !== 'undefined' && rootEl.value) {
+    rootObserver = new ResizeObserver((entries) => {
+      const w = Math.round(entries[0]?.contentRect.width ?? 0)
+      if (w > 0 && w !== lastRootWidth) {
+        lastRootWidth = w
+        // 画布缩放只改外框宽：走宽度缓存，同步收起，不闪一整排按钮
+        relayout()
+      } else {
+        reportBarHeight()
+      }
     })
-    observer.observe(root.value)
+    rootObserver.observe(rootEl.value)
   }
 })
 onBeforeUnmount(() => {
@@ -382,37 +457,27 @@ onBeforeUnmount(() => {
   offTable?.()
   offTable = null
   window.removeEventListener('keydown', onKeydown)
-  observer?.disconnect()
-  observer = null
+  document.removeEventListener('pointerdown', onDocPointerDown, true)
+  rootObserver?.disconnect()
+  rootObserver = null
   forgetTrendToolbar(props.widgetId)
 })
-
-watch(
-  () => props.width,
-  (w) => {
-    if (typeof w === 'number' && w > 0 && !observer) measured.value = w
-  },
-)
 
 watch(
   () => props.tagIds.join(','),
   () => syncCursor(),
 )
 
-/** 打开「⋯」面板时先把起止时间对齐成真实窗口，避免拿旧值去拼新的区间 */
-watch(showMore, (open) => {
-  if (open) syncRangeFields()
-})
+watch(
+  () => `${alarmBands.value.length > 0}|${props.fullscreenSupported !== false}`,
+  () => {
+    cachedGroupWs = null
+    relayout(true)
+  },
+)
 
 function after(): void {
   emit('change')
-}
-
-function applyPreset(): void {
-  // 选到"自定义区间"（当前就是这个状态）时什么都不做：窗口保持用户自己定的那一段
-  if (preset.value === CUSTOM_PRESET) return
-  setTrendHistoryPreset(props.widgetId, preset.value)
-  after()
 }
 
 /**
@@ -440,11 +505,6 @@ function shift(dir: -1 | 1): void {
 
 function zoom(factor: number): void {
   zoomTrendHistoryWindow(props.widgetId, factor, cursorAt.value ?? undefined)
-  after()
-}
-
-function toggleFollow(v: boolean | string | number): void {
-  setTrendHistoryFollow(props.widgetId, Boolean(v))
   after()
 }
 
@@ -487,7 +547,6 @@ function exportCsv(): void {
 const SHORTCUTS: Array<{ key: string; text: string }> = [
   { key: '开始/结束', text: '起止时间各自一个输入框（秒精度）→ 改完自动查，或点「搜索」重查一遍' },
   { key: '时刻', text: '看某一个瞬间 → 游标跳过去（不在起止区间里会自动把窗口挪过去）' },
-  { key: '跟随', text: '默认关闭：区间是一次查询的快照；勾上才随时间滚动并按 10s 刷新' },
   { key: '← / →', text: '游标按采样点前后移动' },
   { key: '+ / -', text: '以游标为中心放大 / 缩小时间窗' },
   { key: 'Esc', text: '清除游标（最大化时退出最大化）' },
@@ -498,249 +557,178 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
 </script>
 
 <template>
-  <div ref="root" class="trend-toolbar" @pointerenter="markActive">
-    <div
-      class="trend-bar"
-      :class="{ 'is-narrow': !showRange }"
-      @pointerdown.stop
-      @mousedown.stop
-      @click.stop="markActive"
-      @dblclick.stop
-      @wheel.stop
-    >
-      <!-- ① 时间：区间快捷 -->
-      <el-select
-        v-model="preset"
-        size="small"
-        class="w-preset"
-        :teleported="false"
-        :disabled="!canEdit()"
-        @change="applyPreset"
+  <div ref="rootEl" class="trend-toolbar" @pointerenter="markActive">
+    <!-- 同一套控件渲染两份：条上放得下的显示在条上，放不下的显示在「…」弹出面板里 -->
+    <template v-for="place in PLACES" :key="place">
+      <div
+        v-if="place === 'bar' || (showMore && hasOverflow)"
+        class="trend-bar"
+        :class="place === 'bar' ? 'is-main' : 'more-panel'"
+        @pointerdown.stop
+        @mousedown.stop
+        @click.stop="markActive"
+        @dblclick.stop
+        @wheel.stop
       >
-        <el-option v-for="item in presetOptions" :key="item.id" :label="item.label" :value="item.id" />
-      </el-select>
-
-      <!-- ② 时间：起止时间 + 搜索（宽图元常驻，窄图元并进「⋯」） -->
-      <template v-if="showRange">
-        <span class="divider" />
-        <span class="time-label">开始</span>
-        <el-date-picker
-          v-model="fromAt"
-          type="datetime"
-          size="small"
-          class="w-datetime"
-          format="MM-DD HH:mm:ss"
-          placeholder="开始时间"
-          :clearable="false"
-          :teleported="false"
-          :disabled="!canEdit()"
-          @focus="beginEditField('from')"
-          @blur="endEditField"
-          @change="applyRange()"
-        />
-        <span class="time-label">结束</span>
-        <el-date-picker
-          v-model="toAt"
-          type="datetime"
-          size="small"
-          class="w-datetime"
-          format="MM-DD HH:mm:ss"
-          placeholder="结束时间"
-          :clearable="false"
-          :teleported="false"
-          :disabled="!canEdit()"
-          @focus="beginEditField('to')"
-          @blur="endEditField"
-          @change="applyRange()"
-        />
-        <el-button
-          size="small"
-          :disabled="!canEdit()"
-          title="按这对起止时间查询（重新拉一次数据）"
-          @click="applyRange(true)"
-        >搜索</el-button>
-      </template>
-
-      <!-- ③ 导航：平移一个窗口 / 跟随 / 刷新 / 点表 -->
-      <span class="divider" />
-      <el-button-group>
-        <el-button
-          size="small"
-          :icon="DArrowLeft"
-          :disabled="!canEdit()"
-          title="前移一个窗口"
-          @click="shift(-1)"
-        />
-        <el-button
-          size="small"
-          :icon="DArrowRight"
-          :disabled="!canEdit()"
-          title="后移一个窗口"
-          @click="shift(1)"
-        />
-      </el-button-group>
-      <el-checkbox
-        v-if="showFollow"
-        :model-value="follow"
-        size="small"
-        :disabled="!canEdit()"
-        :title="follow ? '勾选：区间随时间滚动 + 10s 自动刷新' : '未勾选：区间固定为一次查询的快照'"
-        @update:model-value="toggleFollow"
-      >跟随</el-checkbox>
-      <el-button
-        size="small"
-        :icon="Refresh"
-        :title="follow ? '重新查询当前窗口' : '重新查询（回到最新）'"
-        @click="refresh"
-      >刷新</el-button>
-      <el-button
-        size="small"
-        :type="showTable ? 'primary' : 'default'"
-        :icon="Memo"
-        title="图下数据表（与游标联动、可导出）"
-        @click="toggleTable"
-      >表</el-button>
-
-      <!-- ④ 工具：其余控件一律收进「⋯」 -->
-      <el-popover
-        v-model:visible="showMore"
-        :teleported="false"
-        :width="330"
-        trigger="click"
-        placement="bottom-end"
-        popper-class="trend-more-popper"
-      >
-        <template #reference>
+        <!-- 时间：起止 + 搜索 / 刷新 -->
+        <span v-show="groupInPlace(0, place)" class="tb-group" data-tg>
+          <span v-if="place === 'more'" class="group-label">{{ GROUPS[0].label }}</span>
+          <span class="tb-item">
+            <span class="time-label">开始</span>
+            <el-date-picker
+              v-model="fromAt"
+              type="datetime"
+              size="small"
+              class="w-datetime"
+              format="MM-DD HH:mm:ss"
+              placeholder="开始时间"
+              :clearable="false"
+              :teleported="false"
+              :disabled="!canEdit()"
+              @focus="beginEditField('from')"
+              @blur="endEditField"
+              @change="applyRange()"
+            />
+          </span>
+          <span class="tb-item">
+            <span class="time-label">结束</span>
+            <el-date-picker
+              v-model="toAt"
+              type="datetime"
+              size="small"
+              class="w-datetime"
+              format="MM-DD HH:mm:ss"
+              placeholder="结束时间"
+              :clearable="false"
+              :teleported="false"
+              :disabled="!canEdit()"
+              @focus="beginEditField('to')"
+              @blur="endEditField"
+              @change="applyRange()"
+            />
+          </span>
           <el-button
             size="small"
-            :icon="Operation"
-            :type="showMore ? 'primary' : 'default'"
-            title="更多：起止时间 / 时刻 / 采样间隔 / 缩放 / 导出 / 最大化 / 快捷键"
+            :icon="Search"
+            :disabled="!canEdit()"
+            title="搜索：按这对起止时间查询"
+            @click="applyRange(true)"
           />
-        </template>
-        <div class="more-panel">
-          <div class="more-head">当前区间 {{ rangeText }}</div>
+          <el-button
+            size="small"
+            :icon="Refresh"
+            :title="follow ? '刷新：重新查询当前窗口' : '刷新：重新查询（回到最新）'"
+            @click="refresh"
+          />
+        </span>
 
-          <template v-if="!showRange">
-            <div class="more-title">起止时间</div>
-            <label class="more-row">
-              <span>开始</span>
-              <el-date-picker
-                v-model="fromAt"
-                type="datetime"
-                size="small"
-                style="width: 100%"
-                format="MM-DD HH:mm:ss"
-                placeholder="开始时间"
-                :clearable="false"
-                :teleported="false"
-                :disabled="!canEdit()"
-                @focus="beginEditField('from')"
-                @blur="endEditField"
-                @change="applyRange()"
-              />
-            </label>
-            <label class="more-row">
-              <span>结束</span>
-              <el-date-picker
-                v-model="toAt"
-                type="datetime"
-                size="small"
-                style="width: 100%"
-                format="MM-DD HH:mm:ss"
-                placeholder="结束时间"
-                :clearable="false"
-                :teleported="false"
-                :disabled="!canEdit()"
-                @focus="beginEditField('to')"
-                @blur="endEditField"
-                @change="applyRange()"
-              />
-            </label>
-            <el-button size="small" :disabled="!canEdit()" @click="applyRange(true)">按起止查询</el-button>
-          </template>
+        <!-- 浏览：前移后移 / 放大缩小 / 点表 -->
+        <span v-show="groupInPlace(1, place)" class="tb-group" data-tg>
+          <span v-if="place === 'more'" class="group-label">{{ GROUPS[1].label }}</span>
+          <el-button-group>
+            <el-button
+              size="small"
+              :icon="DArrowLeft"
+              :disabled="!canEdit()"
+              title="前移一个窗口"
+              @click="shift(-1)"
+            />
+            <el-button
+              size="small"
+              :icon="DArrowRight"
+              :disabled="!canEdit()"
+              title="后移一个窗口"
+              @click="shift(1)"
+            />
+          </el-button-group>
+          <el-button size="small" :icon="ZoomIn" :disabled="!canEdit()" title="放大：缩小时间跨度（看得更细）" @click="zoom(0.5)" />
+          <el-button size="small" :icon="ZoomOut" :disabled="!canEdit()" title="缩小：放大时间跨度（看得更久）" @click="zoom(2)" />
+          <el-button
+            size="small"
+            :type="showTable ? 'primary' : 'default'"
+            :icon="Memo"
+            title="点表：图下数据表（与游标联动、可导出）"
+            @click="toggleTable"
+          />
+        </span>
 
-          <div class="more-title">时刻与采样</div>
-          <label class="more-row top">
-            <span>跳到时刻（看某一个瞬间）</span>
+        <!-- 定位：跳到某一刻 / 聚合间隔 -->
+        <span v-show="groupInPlace(2, place)" class="tb-group" data-tg>
+          <span v-if="place === 'more'" class="group-label">{{ GROUPS[2].label }}</span>
+          <span class="tb-item">
+            <span class="time-label">时刻</span>
             <el-date-picker
               v-model="jumpAt"
               type="datetime"
               size="small"
-              style="width: 100%"
+              class="w-datetime"
               format="MM-DD HH:mm:ss"
-              placeholder="选择 / 输入一个时刻"
+              placeholder="跳到某一刻"
               :clearable="false"
               :teleported="false"
               :disabled="!canEdit()"
               @change="jumpToTime"
             />
-          </label>
-          <label class="more-row">
-            <span>采样间隔</span>
+          </span>
+          <span class="tb-item">
+            <span class="time-label">间隔</span>
             <el-select
               v-model="interval"
               size="small"
+              class="w-interval"
               :teleported="false"
               :disabled="!canEdit()"
               @change="applyInterval"
             >
               <el-option v-for="item in TREND_INTERVALS" :key="item.id" :label="item.label" :value="item.id" />
             </el-select>
-          </label>
-          <div v-if="!showFollow" class="more-row">
-            <el-checkbox
-              :model-value="follow"
-              size="small"
-              :disabled="!canEdit()"
-              @update:model-value="toggleFollow"
-            >跟随最新（随时间滚动 + 10s 刷新）</el-checkbox>
-          </div>
+          </span>
+        </span>
 
-          <div class="more-title">时间窗</div>
-          <div class="more-btns">
-            <el-button size="small" :icon="ZoomIn" :disabled="!canEdit()" title="缩小跨度（看得更细）" @click="zoom(0.5)">
-              放大范围
-            </el-button>
-            <el-button size="small" :icon="ZoomOut" :disabled="!canEdit()" title="放大跨度（看得更久）" @click="zoom(2)">
-              缩小范围
-            </el-button>
-          </div>
+        <!-- 工具：导出 / 报警 / 最大化 / 快捷键 -->
+        <span v-show="groupInPlace(3, place)" class="tb-group" data-tg>
+          <span v-if="place === 'more'" class="group-label">{{ GROUPS[3].label }}</span>
+          <el-button size="small" :icon="Download" title="导出 CSV" @click="exportCsv" />
+          <el-button
+            v-if="alarmBands.length"
+            size="small"
+            type="danger"
+            plain
+            :icon="Bell"
+            :title="`跳到报警（共 ${alarmBands.length} 处）`"
+            @click="jumpToFirstAlarm"
+          />
+          <el-button
+            v-if="fullscreenSupported !== false"
+            size="small"
+            :icon="fullscreen ? ScaleToOriginal : FullScreen"
+            :title="fullscreen ? '还原' : '最大化'"
+            @click="emit('toggleFullscreen')"
+          />
+          <el-button
+            size="small"
+            :icon="QuestionFilled"
+            :type="showHelp ? 'primary' : 'default'"
+            title="快捷键"
+            @click="toggleHelp"
+          />
+        </span>
 
-          <div class="more-title">读数与导出</div>
-          <div class="more-btns">
-            <el-button size="small" :icon="CopyDocument" :disabled="cursorAt == null" @click="copyCursor">
-              复制读数
-            </el-button>
-            <el-button size="small" :icon="Close" :disabled="cursorAt == null" @click="clearCursor">
-              清除游标
-            </el-button>
-            <el-button size="small" @click="exportCsv">导出 CSV</el-button>
-            <el-button v-if="alarmBands.length" size="small" type="danger" plain @click="jumpToFirstAlarm">
-              跳到报警 {{ alarmBands.length }} 处
-            </el-button>
-          </div>
-
-          <div class="more-title">窗口</div>
-          <div class="more-btns">
-            <el-button
-              v-if="fullscreenSupported !== false"
-              size="small"
-              :icon="fullscreen ? ScaleToOriginal : FullScreen"
-              @click="emit('toggleFullscreen')"
-            >{{ fullscreen ? '退出最大化' : '最大化查看' }}</el-button>
-            <el-button size="small" @click="showMore = false; showHelp = true">快捷键提示</el-button>
-          </div>
-        </div>
-      </el-popover>
-
-      <!-- 错误/空态提示比读数重要：排在伸缩空位之前，先给它地方 -->
-      <span v-if="notice" class="notice" :class="notice.kind">{{ notice.text }}</span>
-
-      <span class="spacer" />
-
-      <span v-if="showAggHint && aggWindow && interval === 'auto'" class="hint">按 {{ aggWindow }} 平均</span>
-    </div>
+        <template v-if="place === 'bar'">
+          <el-button
+            v-if="hasOverflow"
+            size="small"
+            class="more-btn"
+            :icon="MoreFilled"
+            :type="showMore ? 'primary' : 'default'"
+            title="更多"
+            @click="showMore = !showMore"
+          />
+          <span v-if="notice" class="notice" :class="notice.kind">{{ notice.text }}</span>
+          <span v-if="aggWindow && interval === 'auto'" class="hint">按 {{ aggWindow }} 平均</span>
+        </template>
+      </div>
+    </template>
 
     <!-- 快捷键提示：从「⋯」或按 ? 打开，Esc 关闭 -->
     <div v-if="showHelp" class="shortcuts" @pointerdown.stop @wheel.stop>
@@ -761,59 +749,113 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
 .trend-toolbar {
   position: relative;
   width: 100%;
-  height: 100%;
+  height: auto;
 }
 
 .trend-bar {
   display: flex;
   flex-direction: row;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 4px;
   width: 100%;
-  height: 100%;
+  height: auto;
   box-sizing: border-box;
-  padding: 1px 4px;
+  padding: 2px 4px;
   overflow: visible;
   pointer-events: auto;
-  background: rgba(11, 18, 32, 0.92);
-  border-bottom: 1px solid #1e3a5f;
+  background: transparent;
+  border-bottom: none;
+}
+/* 重测各组宽度时临时挡住溢出，避免「先全展开再收」被看见 */
+.trend-bar.is-measuring {
+  overflow: hidden;
+}
+/* 「…」弹出面板：贴在工具条下方右侧，收进来的组一组一行 */
+.trend-bar.more-panel {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 5;
+  width: auto;
+  max-width: 100%;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 4px 6px;
+  background: rgba(11, 18, 32, 0.97);
+  border: 1px solid #1e3a5f;
+  border-top: none;
+  border-radius: 0 0 4px 4px;
+}
+.tb-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+/* 条上组与组之间的竖线 */
+.is-main .tb-group + .tb-group {
+  margin-left: 3px;
+  padding-left: 7px;
+  border-left: 1px solid #24344f;
+}
+.more-panel .tb-group {
+  flex-wrap: wrap;
+}
+.group-label {
+  flex: 0 0 auto;
+  width: 28px;
+  color: #64748b;
+  font-size: 11px;
+}
+.tb-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+.more-btn {
+  flex: 0 0 auto;
 }
 .trend-bar :deep(.el-input__wrapper),
-.trend-bar :deep(.el-range-editor) {
-  --el-input-bg-color: #0b1220;
+.trend-bar :deep(.el-range-editor),
+.trend-bar :deep(.el-select__wrapper) {
+  --el-input-bg-color: transparent;
   --el-input-text-color: #e2e8f0;
   --el-input-border-color: #334155;
-  --el-fill-color-blank: #0b1220;
+  --el-fill-color-blank: transparent;
+  background-color: transparent;
   height: 22px;
   font-size: 12px;
+}
+.trend-bar.is-main :deep(.el-button:not(.el-button--primary):not(.el-button--danger)) {
+  --el-button-bg-color: transparent;
+  --el-button-hover-bg-color: rgba(148, 163, 184, 0.16);
+  --el-button-border-color: #334155;
+  background-color: transparent;
 }
 .trend-bar :deep(.el-range-input) {
   color: #e2e8f0;
   font-size: 11px;
 }
+.trend-bar :deep(.el-button) {
+  flex: 0 0 auto;
+}
 .trend-bar :deep(.el-button + .el-button) {
   margin-left: 0;
 }
-/* 成组之间的竖线：把"时间 / 导航 / 工具"三组分清楚 */
-.divider {
-  flex: 0 0 auto;
-  width: 1px;
-  height: 14px;
-  margin: 0 3px;
-  background: #24344f;
-}
-.w-preset {
-  width: 104px;
+/* MM-DD HH:mm:ss 刚好放得下；日历图标去掉省宽度，点输入框照样弹出日历 */
+.trend-bar :deep(.w-datetime) {
+  --el-date-editor-width: 108px;
+  width: 108px;
   flex: 0 0 auto;
 }
-.trend-bar.is-narrow .w-preset {
-  /* 起止时间收进「⋯」后条上只有区间快捷，窄一点更省地方 */
-  width: 84px;
+.trend-bar :deep(.w-datetime .el-input__prefix) {
+  display: none;
 }
-.w-datetime {
-  /* 起止各一个：MM-DD HH:mm:ss 要放得下（含日历图标） */
-  width: 138px;
-  flex: 0 0 auto;
+.trend-bar :deep(.w-datetime .el-input__wrapper) {
+  padding: 0 6px;
 }
 .time-label {
   flex: 0 0 auto;
@@ -821,22 +863,9 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   font-size: 11px;
   white-space: nowrap;
 }
-.w-jump {
-  /* 手动选一个时刻（秒精度）；在「⋯」面板里占满整行 */
-  width: 100%;
-}
-.w-interval {
-  width: 88px;
+.trend-bar :deep(.w-interval) {
+  width: 72px;
   flex: 0 0 auto;
-}
-.w-pagesize {
-  width: 92px;
-  flex: 0 0 auto;
-}
-
-.spacer {
-  flex: 1 1 0;
-  min-width: 0;
 }
 /* 快捷键提示面板：贴在图元左上角，不抢图内的鼠标 */
 .shortcuts {
@@ -875,51 +904,6 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   border-radius: 3px;
   padding: 0 4px;
   text-align: center;
-}
-/* 「⋯」面板：分组标题 + 一行一个控件 */
-.more-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.more-head {
-  color: #93c5fd;
-  font-size: 11px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.more-title {
-  margin-top: 2px;
-  padding-top: 4px;
-  border-top: 1px solid #1e293b;
-  color: #64748b;
-  font-size: 11px;
-}
-.more-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  font-size: 12px;
-  color: #cbd5e1;
-}
-.more-row.top {
-  flex-direction: column;
-  align-items: stretch;
-  gap: 3px;
-}
-.more-row :deep(.el-select) {
-  width: 118px;
-}
-.more-row :deep(.el-date-editor) {
-  width: 100%;
-  max-width: 100%;
-}
-.more-btns {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
 }
 
 .hint {

@@ -61,6 +61,7 @@ import {
   locateObject3d,
   walkObject3dTree,
 } from '@/shared/project/object3dTree'
+import { libraryPlaceSize } from '@/shared/library/materials'
 import { clonePlain } from '@/shared/utils/clonePlain'
 
 const HISTORY_LIMIT = 50
@@ -500,7 +501,11 @@ export const useProjectStore = defineStore('project', () => {
     gizmoMode3d.value = mode
   }
 
-  function addWidget(type: BuiltinWidgetType, at?: { x: number; y: number }): Widget2D | null {
+  function addWidget(
+    type: BuiltinWidgetType,
+    at?: { x: number; y: number },
+    overrides?: Partial<Pick<Widget2D, 'name' | 'props' | 'style'>>,
+  ): Widget2D | null {
     const page = activePage2d.value
     if (!page) return null
     if (type === 'scene3d' && (page.usage === 'object3d-panel' || isPanelEditMode())) return null
@@ -509,7 +514,7 @@ export const useProjectStore = defineStore('project', () => {
       if (!obj) return null
       pushHistory()
       const list = ensurePanelWidgetsList(obj)
-      const widget = createWidget2D(type)
+      const widget = createWidget2D(type, overrides)
       const pw = obj.panel?.width ?? 400
       const ph = obj.panel?.height ?? 280
       if (at) {
@@ -529,7 +534,7 @@ export const useProjectStore = defineStore('project', () => {
     pushHistory()
     const layer = ensureDefaultLayer(page)
     if (layer.locked) return null
-    const widget = createWidget2D(type)
+    const widget = createWidget2D(type, overrides)
     if (at) {
       widget.transform.x = at.x
       widget.transform.y = at.y
@@ -1509,6 +1514,34 @@ export const useProjectStore = defineStore('project', () => {
       {
         name: resource.name,
         props: { resourceId: resource.id, src: resolveResourceUrl(resource.path) },
+      },
+      { recordHistory: false },
+    )
+    return widget
+  }
+
+  function addLibraryImage(
+    spec: { name: string; src: string; width: number; height: number },
+    at?: { x: number; y: number },
+  ): Widget2D | null {
+    const page = activePage2d.value
+    if (!page) return null
+    const size = libraryPlaceSize(spec.width, spec.height)
+    const pos = at
+      ? { x: at.x - size.width / 2, y: at.y - size.height / 2 }
+      : {
+          x: Math.max(0, page.width / 2 - size.width / 2),
+          y: Math.max(0, page.height / 2 - size.height / 2),
+        }
+    const widget = addWidget('image', pos)
+    if (!widget) return null
+    updateWidget(
+      widget.id,
+      {
+        name: spec.name,
+        transform: { ...widget.transform, width: size.width, height: size.height },
+        props: { resourceId: '', src: spec.src },
+        style: { fill: 'transparent', strokeWidth: 0 },
       },
       { recordHistory: false },
     )
@@ -2812,6 +2845,7 @@ log('script ready · ' + (context.trigger || 'try'))
     saveAs,
     addImageResource,
     addImageWidgetFromFile,
+    addLibraryImage,
     removeResource,
     cleanupOrphanResources,
     replaceResourceFile,

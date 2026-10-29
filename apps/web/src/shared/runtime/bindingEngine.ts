@@ -15,7 +15,9 @@ import type {
   TrendCurve,
   Widget2D,
 } from '@web-scada/core'
-import { formatBoolText, parseSeries, trendCurves, trendCurveTagIds } from '@web-scada/core'
+import { chartSliceTagIds, chartSlices, formatBoolText, parseSeries, trendCurves, trendCurveTagIds } from '@web-scada/core'
+import { echartItems, echartTagIds } from '@/shared/echart/content'
+import { formatTagNumber } from '@/shared/runtime/tagDisplay'
 import { clonePlain } from '@/shared/utils/clonePlain'
 import { useTagStore } from '@/stores/tag'
 import { formatActiveAlarmItems, formatAlarmHistoryItems } from '@/shared/runtime/alarmText'
@@ -51,11 +53,18 @@ function matchColorRange(
   value: TagValue['value'],
   range: AnimationLinkColor['ranges'][number],
 ): boolean {
-  if (range.equals !== undefined) return value === range.equals
+  if (range.equals !== undefined) {
+    const eq = value === range.equals
+    return range.notEquals ? !eq : eq
+  }
   const num = asNumber(value)
   if (num === null) return false
-  if (range.min !== undefined && num < range.min) return false
-  if (range.max !== undefined && num > range.max) return false
+  if (range.min !== undefined) {
+    if (range.minExclusive ? num <= range.min : num < range.min) return false
+  }
+  if (range.max !== undefined) {
+    if (range.maxExclusive ? num >= range.max : num > range.max) return false
+  }
   return range.min !== undefined || range.max !== undefined
 }
 
@@ -67,22 +76,20 @@ function formatValue(
   v: TagValue['value'],
   format?: string,
   labels?: { onText?: string; offText?: string },
+  tagId?: string,
 ): string {
   if (v === null || v === undefined) return '--'
-  if (format === 'bool' || (typeof v === 'boolean' && !format?.startsWith('fixed:'))) {
+  if (format === 'bool' || typeof v === 'boolean') {
     const text = formatBoolText(
       v,
       labels,
       format === 'bool' ? { on: 'ON', off: 'OFF' } : { on: 'true', off: 'false' },
     )
     if (text != null) return text
-    if (format === 'bool') return v ? 'ON' : 'OFF'
+    if (format === 'bool' || typeof v === 'boolean') return v ? 'ON' : 'OFF'
   }
-  if (format?.startsWith('fixed:')) {
-    const digits = Number(format.split(':')[1] || 1)
-    const n = asNumber(v)
-    return n === null ? String(v) : n.toFixed(digits)
-  }
+  const n = asNumber(v)
+  if (n !== null) return formatTagNumber(n, tagId ?? '')
   return String(v)
 }
 
@@ -91,6 +98,7 @@ function applyValueToWidget(
   v: TagValue['value'],
   format?: string,
   labels?: { onText?: string; offText?: string },
+  tagId?: string,
 ): void {
   if (widget.type === 'tank') {
     const n = asNumber(v)
@@ -124,7 +132,7 @@ function applyValueToWidget(
   } else if (widget.type === 'list' || widget.type === 'alarm') {
     widget.props = { ...widget.props, items: String(v ?? '') }
   } else {
-    widget.props = { ...widget.props, text: formatValue(v, format, labels) }
+    widget.props = { ...widget.props, text: formatValue(v, format, labels, tagId) }
   }
 }
 
@@ -191,6 +199,25 @@ const TREND_KEEP_ALIVE_MS = 3000
 
 /** 每条曲线各自的"最后一次入队的采样时间戳"（key = 图元 id | 变量 id） */
 const trendIngestStamp = new Map<string, number>()
+
+/** 折线、面积图：每个绑定变量按自己的采样进缓冲，渲染时各自一条曲线。 */
+function feedEchartCurves(
+  widget: Widget2D,
+  getTag: (tagId: string) => TagValue | undefined,
+): void {
+  const variant = String(widget.props.variant || '')
+  if (!variant.startsWith('line') && !variant.startsWith('area')) return
+  const items = echartItems(widget.props)
+  if (!items?.some((item) => item.tagId)) return
+  const curves: TrendCurve[] = []
+  const seen = new Set<string>()
+  for (const item of items) {
+    if (!item.tagId || seen.has(item.tagId)) continue
+    seen.add(item.tagId)
+    curves.push({ tagId: item.tagId, label: item.label })
+  }
+  feedTrendCurves({ ...widget, props: { ...widget.props, curves, maxPoints: 60 } }, getTag)
+}
 
 /** 实时趋势多曲线：每条曲线按自己的采样时间戳入队（同一次求值重复跑不会重复进点） */
 function feedTrendCurves(
@@ -410,11 +437,11 @@ function applyAnimationLink(
     case 'valueOut': {
       if (trendCurvesTakeOver(widget)) break
       if (applyTrendLiveSample(widget, tag)) break
-      applyValueToWidget(widget, tag.value, link.format ?? 'fixed:1', boolLabels(tag.tagId))
+      applyValueToWidget(widget, tag.value, link.format, boolLabels(tag.tagId), tag.tagId)
       break
     }
     case 'textOut': {
-      widget.props = { ...widget.props, text: formatValue(tag.value, link.format, boolLabels(tag.tagId)) }
+      widget.props = { ...widget.props, text: formatValue(tag.value, link.format, boolLabels(tag.tagId), tag.tagId) }
       break
     }
     case 'valueIn':
@@ -446,12 +473,12 @@ function applyPropBinding(
   const v = tag.value
   switch (binding.prop) {
     case 'text':
-      widget.props = { ...widget.props, text: formatValue(v, binding.format, boolLabels(tag.tagId)) }
+      widget.props = { ...widget.props, text: formatValue(v, binding.format, boolLabels(tag.tagId), tag.tagId) }
       break
     case 'value':
       if (trendCurvesTakeOver(widget)) break
       if (applyTrendLiveSample(widget, tag)) break
-      applyValueToWidget(widget, v, binding.format)
+      applyValueToWidget(widget, v, binding.format, boolLabels(tag.tagId), tag.tagId)
       break
     case 'fill':
     case 'color':
@@ -675,6 +702,45 @@ export function resolveWidgetVisual(
     }
   }
 
+  if (widget.type === 'pie' || widget.type === 'bar') {
+    const slices = chartSlices(widget.props).map((slice) => {
+      if (!slice.tagId) return slice
+      const tag = getTag(slice.tagId)
+      if (!tag || tag.quality === 'Bad' || tag.quality === 'Offline') return slice
+      const n = asNumber(tag.value)
+      if (n === null) return slice
+      return { ...slice, value: n }
+    })
+    widget.props = { ...widget.props, slices }
+  }
+
+  if (widget.type === 'echart') {
+    feedEchartCurves(widget, getTag)
+    const items = echartItems(widget.props)
+    if (items) {
+      const next = items.map((item) => {
+        let value = item.value
+        let x = item.x
+        if (item.tagId) {
+          const tag = getTag(item.tagId)
+          if (tag && tag.quality !== 'Bad' && tag.quality !== 'Offline') {
+            const n = asNumber(tag.value)
+            if (n !== null) value = n
+          }
+        }
+        if (item.xTagId) {
+          const tag = getTag(item.xTagId)
+          if (tag && tag.quality !== 'Bad' && tag.quality !== 'Offline') {
+            const n = asNumber(tag.value)
+            if (n !== null) x = n
+          }
+        }
+        return x === item.x && value === item.value ? item : { ...item, value, x }
+      })
+      widget.props = { ...widget.props, items: next }
+    }
+  }
+
   return { widget, blink: flags.blink, quality }
 }
 
@@ -685,6 +751,8 @@ export function collectPageTagIds(page: { layers: Array<{ widgets: Widget2D[] }>
     // 趋势图元的多曲线变量存在 props.curves 里（不在 bindings/animationLinks 中），必须一起订阅，
     // 否则 WS 不会推这些变量，曲线会一直是空的且不报错。
     for (const tagId of trendCurveTagIds(w.props)) ids.add(tagId)
+    for (const tagId of chartSliceTagIds(w.props)) ids.add(tagId)
+    for (const tagId of echartTagIds(w.props)) ids.add(tagId)
     for (const b of w.bindings ?? []) ids.add(b.tagId)
     for (const a of w.animations ?? []) ids.add(a.tagId)
     for (const link of w.animationLinks ?? []) ids.add(link.tagId)
@@ -887,7 +955,7 @@ export function createAnimationLink(
         direction: 'start',
       } satisfies AnimationLinkRange
     case 'valueOut':
-      return { ...base, type, format: 'fixed:1' } satisfies AnimationLinkTextOut
+      return { ...base, type } satisfies AnimationLinkTextOut
     case 'textOut':
       return { ...base, type, format: undefined } satisfies AnimationLinkTextOut
     case 'valueIn':

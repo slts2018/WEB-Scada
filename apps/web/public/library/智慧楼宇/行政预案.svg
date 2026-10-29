@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="48px" height="48px" viewBox="0 0 48 48" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <title>icon_行政预案</title>
+    <defs>
+        <polygon id="path-1" points="0 0 48 0 48 48 0 48"></polygon>
+    </defs>
+    <g id="大屏可视化-案例" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+        <g id="智慧楼宇" transform="translate(-1546.000000, -300.000000)">
+            <g id="编组-13备份-17" transform="translate(1514.000000, 104.000000)">
+                <g id="编组-22备份-3" transform="translate(16.000000, 180.000000)">
+                    <g id="icon_行政预案" transform="translate(16.000000, 16.000000)">
+                        <mask id="mask-2" fill="white">
+                            <use xlink:href="#path-1"></use>
+                        </mask>
+                        <use id="矩形" fill-opacity="0.08" fill="#33EAFF" fill-rule="nonzero" xlink:href="#path-1"></use>
+                        <g id="边缘装饰线" mask="url(#mask-2)">
+                            <path d="M38.4,0 L48,0 L48,9.6 M48,38.4 L48,48 L38.4,48 M9.6,48 L0,48 L0,38.4 M0,9.6 L0,0 L9.6,0" id="形状" stroke="#33EAFF" stroke-width="2" opacity="0.300000012" fill-rule="nonzero"></path>
+                            <g id="矩形-2" fill="#33EAFF">
+                                <rect id="矩形" x="0" y="0" width="2" height="2"></rect>
+                                <rect id="矩形" x="46" y="0" width="2" height="2"></rect>
+                                <rect id="矩形" x="0" y="46" width="2" height="2"></rect>
+                                <rect id="矩形" x="46" y="46" width="2" height="2"></rect>
+                            </g>
+                        </g>
+                        <g id="编组" mask="url(#mask-2)">
+                            <g transform="translate(8.000000, 8.000000)">
+                                <polygon id="Fill-1" points="0 32 32 32 32 0 0 0"></polygon>
+                                <g id="编组" stroke-width="1" fill-rule="evenodd" transform="translate(2.000000, 3.000200)">
+                                    <path d="M14,12 C21.6275135,12 27.8303272,18.0997392 27.996578,25.6873544 L28,26 L0,26 C0,18.268 6.268,12 14,12 Z M14,14 C8.16634483,14 3.29270927,18.1839084 2.21898764,23.7080344 L2.166,24 L13.579,24 L12.247,22.2274 L12.833,15.2274 L15.167,15.2274 L15.753,22.2274 L14.422,24 L25.834,24 C24.878,18.332 19.936,14 14,14 Z M14,0 C17.314,0 20,2.686 20,6 C20,9.314 17.314,12 14,12 C10.686,12 8,9.314 8,6 C8,2.686 10.686,0 14,0 Z M14,2 C11.794,2 10,3.794 10,6 C10,8.206 11.794,10 14,10 C16.206,10 18,8.206 18,6 C18,3.794 16.206,2 14,2 Z" id="形状结合" fill="#33EAFF"></path>
+                                </g>
+                            </g>
+                        </g>
+                    </g>
+                </g>
+            </g>
+        </g>
+    </g>
+</svg>

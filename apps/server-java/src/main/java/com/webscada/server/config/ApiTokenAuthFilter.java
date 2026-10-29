@@ -57,7 +57,7 @@ public class ApiTokenAuthFilter extends OncePerRequestFilter {
     if ("/api/publishes".equals(pathname)
         || "/api/publishes/latest".equals(pathname)
         || pathname.matches("^/api/publishes/[^/]+$")) return true;
-    if ("/api/devices".equals(pathname)) return true;
+    if ("/api/devices".equals(pathname) || "/api/devices/status".equals(pathname)) return true;
     if ("/api/settings/database".equals(pathname)) return true;
     return false;
   }

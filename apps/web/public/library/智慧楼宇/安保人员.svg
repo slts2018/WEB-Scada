@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="48px" height="48px" viewBox="0 0 48 48" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <title>icon_安保人员</title>
+    <defs>
+        <polygon id="path-1" points="0 0 48 0 48 48 0 48"></polygon>
+    </defs>
+    <g id="大屏可视化-案例" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+        <g id="智慧楼宇" transform="translate(-247.000000, -196.000000)">
+            <g id="编组-13备份-16" transform="translate(40.000000, 104.000000)">
+                <g id="编组-22备份-4" transform="translate(191.000000, 76.000000)">
+                    <g id="icon_安保人员" transform="translate(16.000000, 16.000000)">
+                        <mask id="mask-2" fill="white">
+                            <use xlink:href="#path-1"></use>
+                        </mask>
+                        <use id="矩形" fill-opacity="0.08" fill="#FF9F40" fill-rule="nonzero" xlink:href="#path-1"></use>
+                        <g id="边缘装饰线" mask="url(#mask-2)">
+                            <path d="M38.4,0 L48,0 L48,9.6 M48,38.4 L48,48 L38.4,48 M9.6,48 L0,48 L0,38.4 M0,9.6 L0,0 L9.6,0" id="形状" stroke="#FF9F40" stroke-width="2" opacity="0.300000012" fill-rule="nonzero"></path>
+                            <g id="矩形-2" fill="#FF9F40">
+                                <rect id="矩形" x="0" y="0" width="2" height="2"></rect>
+                                <rect id="矩形" x="46" y="0" width="2" height="2"></rect>
+                                <rect id="矩形" x="0" y="46" width="2" height="2"></rect>
+                                <rect id="矩形" x="46" y="46" width="2" height="2"></rect>
+                            </g>
+                        </g>
+                        <g id="编组" mask="url(#mask-2)">
+                            <g transform="translate(8.000000, 8.000000)">
+                                <polygon id="Fill-1" points="0 32 32 32 32 0 0 0"></polygon>
+                                <g id="编组" stroke-width="1" fill-rule="evenodd" transform="translate(3.999200, 2.000000)">
+                                    <path d="M12.1772029,1.05410347 L23,4.71726037 L23,17.7835336 C20.3944253,23.3845915 13.6444627,26.3431279 12.1396125,26.9446467 C10.7183522,26.4942957 4.49493495,24.2064454 1,17.7502508 L1,17.7502508 L1,4.72417503 L12.1772029,1.05410347 Z" id="Stroke-2" stroke="#FF9F40" stroke-width="2"></path>
+                                    <polygon id="Fill-4" fill="#FF9F40" points="16.0008 14.4986 13.0008 14.4986 13.0008 17.4986 11.0008 17.4986 11.0008 14.4986 8.0008 14.4986 8.0008 12.4986 11.0008 12.4986 11.0008 9.4986 13.0008 9.4986 13.0008 12.4986 16.0008 12.4986"></polygon>
+                                </g>
+                            </g>
+                        </g>
+                    </g>
+                </g>
+            </g>
+        </g>
+    </g>
+</svg>

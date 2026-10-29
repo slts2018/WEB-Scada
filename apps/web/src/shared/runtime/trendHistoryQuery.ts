@@ -11,18 +11,48 @@ import { apiQueryTagHistory } from '@/shared/api/client'
  * 和工程配置无关（同 trendSeries / trendZoomOf 的做法）。
  */
 
-/** 历史趋势图元顶部工具栏的高度（页面坐标，与 trendChartLayout 预留的空位一致） */
+/** 图表内部再让出的一行高度（页面坐标）。HTML 工具条本身在图元顶部，不占这行。 */
 export const TREND_TOOLBAR_H = 26
+
+/** 工具条还没量到高度时，先按一行让出位置 */
+export const TREND_TOOLBAR_ROW = 30
+
+const measuredToolbarH = new Map<string, number>()
+const toolbarHeightListeners = new Set<() => void>()
+
+export function trendToolbarMeasuredHeight(widgetId: string): number | undefined {
+  return measuredToolbarH.get(widgetId)
+}
+
+/** 工具条把自己折行后的高度报上来，图表和定位框跟这个数对齐 */
+export function setTrendToolbarMeasuredHeight(widgetId: string, height: number): void {
+  const next = Math.max(0, Math.ceil(height))
+  if ((measuredToolbarH.get(widgetId) ?? 0) === next) return
+  if (next <= 0) measuredToolbarH.delete(widgetId)
+  else measuredToolbarH.set(widgetId, next)
+  for (const fn of toolbarHeightListeners) fn()
+}
+
+export function onTrendToolbarHeight(listener: () => void): () => void {
+  toolbarHeightListeners.add(listener)
+  return () => toolbarHeightListeners.delete(listener)
+}
 
 /** 工具栏在图元内的位置，换算到定位父元素的像素坐标（与 historySearchClientRect 同一套做法） */
 export function trendToolbarClientRect(
   point: (p: { x: number; y: number }) => { x: number; y: number },
-  widget: { transform: { width: number; height: number } },
+  widget: { id?: string; transform: { width: number; height: number } },
   origin = { x: 0, y: 0 },
 ) {
   const top = 2
+  const p0 = point({ x: 0, y: 0 })
+  const py = point({ x: 0, y: 100 })
+  const scaleY = Math.hypot(py.x - p0.x, py.y - p0.y) / 100 || 1
+  const measured = widget.id ? trendToolbarMeasuredHeight(widget.id) : undefined
+  const screenH = measured && measured > 0 ? measured : TREND_TOOLBAR_ROW
+  const localH = screenH / scaleY
   const p1 = point({ x: 6, y: top })
-  const p2 = point({ x: Math.max(12, widget.transform.width - 6), y: top + TREND_TOOLBAR_H - 4 })
+  const p2 = point({ x: Math.max(12, widget.transform.width - 6), y: top + localH })
   return {
     x: origin.x + Math.min(p1.x, p2.x),
     y: origin.y + Math.min(p1.y, p2.y),
@@ -430,8 +460,7 @@ export function trendHistoryPresetOf(widgetId: string): string {
 
 /**
  * 当前窗口是不是"用户自己指定的绝对区间"（起止时间 / 缩放 / 平移 / 报警跳转）。
- * 是的话工具条上的区间下拉要显示"自定义区间"，否则会让人以为还在按预设（比如"最近1小时"）取数，
- * 而实际窗口是另一段绝对时间。
+ * 这种窗口刷新时原样重查，不会被预设（比如"最近1小时"）盖掉。
  */
 export function trendHistoryIsManualWindow(widgetId: string): boolean {
   const w = widgets.get(widgetId)

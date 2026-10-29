@@ -5,6 +5,10 @@ import {
   liveSeriesOf,
   liveTrendTimes,
 } from '@/shared/runtime/trendSeries'
+import { isMapPreset } from '@/shared/echart/catalog'
+import { echartAxisFont, echartBoundOf, echartSignature, type EchartBound } from '@/shared/echart/content'
+import { ensureGeo, geoReady } from '@/shared/echart/geo'
+import { renderEchart } from '@/shared/echart/render'
 import { useProjectStore } from '@/stores/project'
 import { useTagStore } from '@/stores/tag'
 import {
@@ -26,11 +30,15 @@ import {
   type TrendLegendLayout,
 } from '@/shared/konva/trendLegendLayout'
 import {
+  formatTrendNumber,
   parseListItems,
   parseSeries,
   resolveTrendRange,
   trendCurveColor,
   trendCurves,
+  barWidthOf,
+  chartSlices,
+  type ChartSlice,
   type TrendCurve,
   type Widget2D,
 } from '@web-scada/core'
@@ -38,6 +46,7 @@ import { HISTORY_FILTER_HEIGHT, HISTORY_PAGER_HEIGHT, alarmHistoryWindow, histor
 import { trendHistoryRangeText, trendHistoryWindowOf } from '@/shared/runtime/trendHistoryQuery'
 import { trendHistoryTableVisibleOf } from '@/shared/runtime/trendHistoryTable'
 import { trendHistoryCursorOf, trendHistoryCursorReadout } from '@/shared/runtime/trendHistoryCursor'
+import { formatTagNumber, tagDisplayFormat, widgetValueTagId } from '@/shared/runtime/tagDisplay'
 import { alarmLimitsOf, ensureAlarmLimits } from '@/shared/runtime/trendAlarmLimits'
 import { ensureTrendAlarmBands, trendAlarmBandsOf } from '@/shared/runtime/trendAlarmEvents'
 
@@ -49,6 +58,25 @@ function num(style: Record<string, unknown>, key: string, fallback: number) {
 function str(style: Record<string, unknown>, key: string, fallback: string) {
   const v = style[key]
   return typeof v === 'string' ? v : fallback
+}
+
+/** 趋势 / 报警的旧默认底色，以及显式透明，都画成透明。自定义颜色仍保留。 */
+const LEGACY_PANEL_FILL = new Set(['#0b1220', '#140f0f', '#0c121b'])
+
+function panelFill(style: Record<string, unknown>, fallback: string): string {
+  const raw = str(style, 'fill', fallback).trim()
+  const key = raw.toLowerCase()
+  if (
+    !key ||
+    key === 'transparent' ||
+    key === 'none' ||
+    key === 'rgba(0,0,0,0)' ||
+    key === fallback.toLowerCase() ||
+    LEGACY_PANEL_FILL.has(key)
+  ) {
+    return 'rgba(0,0,0,0)'
+  }
+  return raw
 }
 
 /** 根据 Widget2D 创建对应 Konva 节点（含 Group 包装，统一 transform） */
@@ -361,7 +389,6 @@ export function buildTrendSpec(opts: {
 }): TrendChartSpec {
   const {
     widget,
-    curves,
     hidden,
     fallbackSeries,
     isHistory,
@@ -375,6 +402,7 @@ export function buildTrendSpec(opts: {
     scale,
     native,
   } = opts
+  const curves = withTagDisplay(opts.curves)
   const rangeLabel = [rangeText, demoData ? '示例数据' : ''].filter(Boolean).join(' · ')
   const legacyTagId = curves[0]?.tagId ?? ''
   const legacyHistorySeries = isHistory
@@ -434,17 +462,18 @@ export function buildTrendSpec(opts: {
     : alignSeriesTimeWindow(series)
   const zoom = trendZoomOf(widget.id)
 
-  // 单曲线自动用图元量程；多曲线默认自动缩放，
-  // 但在属性里手动填了 min/max 就当“锁定量程”用（趋势不会跳来跳去）
   // 点表开着（只有原生路径铺得下/挂得住点表）：图例与滑块让位给它
   const tableOpen =
     isHistory && native === true && widget.type === 'trendHistory' && trendHistoryTableVisibleOf(widget.id)
 
-  const single = series.length === 1
-  const manual = Number.isFinite(Number(widget.props.min)) || Number.isFinite(Number(widget.props.max))
-  const useManual = single || manual
-  const min = useManual ? Number(widget.props.min) : Number.NaN
-  const max = useManual ? Number(widget.props.max) : Number.NaN
+  // 实时 / 历史趋势：纵轴跟着当前画出来的曲线走（最小～最大），不再用图元上默认的 0～100。
+  // 被图例点掉的曲线不参与。堆叠图仍交给图表按累加值缩放。
+  const valueRange =
+    widget.props.chartStack === true
+      ? null
+      : liveTrendValueRange(legendOff?.length ? series.filter((item) => !legendOff.includes(item.name)) : series)
+  const min = valueRange ? valueRange.min : Number.NaN
+  const max = valueRange ? valueRange.max : Number.NaN
   const spec: TrendChartSpec = {
     width,
     height,
@@ -474,7 +503,7 @@ export function buildTrendSpec(opts: {
     legendOff,
     series,
     theme: {
-      background: str(style, 'fill', '#0b1220'),
+      background: panelFill(style, '#0b1220'),
       textColor: str(style, 'textColor', '#94a3b8'),
       gridColor: str(style, 'gridColor', '#1e293b'),
       fontSize,
@@ -483,6 +512,38 @@ export function buildTrendSpec(opts: {
 
   return spec
 }
+
+/** 把跨度收成 1/2/5×10ⁿ，纵轴刻度才不会出现 64.408 这种标签。 */
+function niceTrendStep(span: number): number {
+  const raw = span / 5
+  if (!Number.isFinite(raw) || raw <= 0) return 1
+  const exp = Math.floor(Math.log10(raw))
+  const base = 10 ** exp
+  const frac = raw / base
+  const nice = frac >= Math.sqrt(50) ? 10 : frac >= Math.sqrt(10) ? 5 : frac >= Math.sqrt(2) ? 2 : 1
+  return nice * base
+}
+
+/** 趋势纵轴：可见曲线的最小、最大值，向外取整并留一点边。 */
+function liveTrendValueRange(series: TrendChartSeries[]): { min: number; max: number } | null {
+  let lo = Infinity
+  let hi = -Infinity
+  for (const item of series) {
+    for (const value of item.points) {
+      if (typeof value !== 'number' || !Number.isFinite(value)) continue
+      if (value < lo) lo = value
+      if (value > hi) hi = value
+    }
+  }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null
+  const span = hi - lo
+  const pad = span > 0 ? span * 0.08 : Math.max(Math.abs(lo) * 0.1, 1)
+  const step = niceTrendStep(Math.max(span, pad * 2))
+  const min = Math.floor((lo - pad) / step) * step
+  const max = Math.ceil((hi + pad) / step) * step
+  return max > min ? { min, max } : { min: lo - step, max: hi + step }
+}
+
 /**
  * 原生叠层（HTML 活控件）用：按图元当前数据组装规格。
  * 尺寸用**屏幕尺寸**、scale=1（不再超采样），字号按页面缩放一起放大，跟页面其它图元一致。
@@ -558,6 +619,14 @@ function historyAlarmBandsOf(widget: Widget2D, curves: TrendCurve[]): Array<{ fr
     : undefined
 }
 
+/** 曲线读数跟变量走：单位和小数位不看图元上旧的那一份。 */
+function withTagDisplay(curves: TrendCurve[]): TrendCurve[] {
+  return curves.map((curve) => {
+    const format = tagDisplayFormat(curve.tagId)
+    return { ...curve, unit: format.unit, decimals: format.decimals }
+  })
+}
+
 /** 开关量 / 字符串量 → 阶梯画（拿不到元数据就当数值处理） */
 function seriesStepOf(tagId: string): boolean {
   try {
@@ -600,7 +669,7 @@ export function buildTrendChartImage(widget: Widget2D): HTMLCanvasElement | null
   const legendFont = Math.max(10, Math.round(chartFont * 0.7))
   // 图例占几行由排版算出来：绘图区高度随之让出来（图例里带当前值，宽度会变）
   const legendLayout = trendLegendLayout({
-    curves,
+    curves: withTagDisplay(curves),
     hidden: hiddenCurveIds(widget),
     width,
     height,
@@ -780,7 +849,7 @@ function trendShapeKey(widget: Widget2D): string {
     trendCurves(widget.props)
       .map(
         (curve) =>
-          `${curve.tagId}|${curve.label ?? ''}|${curve.color ?? ''}|${curve.unit ?? ''}|${curve.decimals ?? ''}`,
+          `${curve.tagId}|${curve.label ?? ''}|${curve.color ?? ''}|${tagDisplayFormat(curve.tagId).unit ?? ''}|${tagDisplayFormat(curve.tagId).decimals ?? ''}`,
       )
       .join(','),
     [...hiddenCurveIds(widget)].sort().join(','),
@@ -823,7 +892,8 @@ function refreshTrendShape(shape: Konva.Group, widget: Widget2D): boolean {
       const index = Number(text.getAttr('legendIndex') ?? -1)
       const curve = curves[index]
       if (!curve) return
-      const next = formatLegendValue(values(curve), { unit: curve.unit, decimals: curve.decimals })
+      const format = tagDisplayFormat(curve.tagId)
+      const next = formatLegendValue(values(curve), format)
       if (text.text() !== next) {
         text.text(next)
         dirty = true
@@ -863,12 +933,189 @@ function isDemoTrendData(widget: Widget2D, liveLen: number): boolean {
   return parseSeries(widget.props.series).length > 0
 }
 
+function sliceNumberText(slice: ChartSlice): string {
+  return slice.tagId ? formatTagNumber(slice.value, slice.tagId) : formatTrendNumber(slice.value)
+}
+
+/** 饼图 / 柱状图。绑了变量时，数值已由 resolveWidgetVisual 换成当前值。 */
+function buildCategoryChart(widget: Widget2D, width: number, height: number, opacity: number): Konva.Group {
+  const style = widget.style
+  const g = new Konva.Group({ name: 'shape' })
+  const slices = chartSlices(widget.props)
+  g.add(
+    new Konva.Rect({
+      width,
+      height,
+      fill: str(style, 'fill', '#0f172a'),
+      stroke: str(style, 'stroke', '#334155'),
+      strokeWidth: num(style, 'strokeWidth', 1),
+      cornerRadius: num(style, 'cornerRadius', 8),
+      opacity,
+    }),
+  )
+  const title = String(widget.props.title ?? '')
+  const font = Math.max(10, num(style, 'fontSize', 12))
+  const textColor = str(style, 'textColor', '#e2e8f0')
+  if (title) {
+    g.add(
+      new Konva.Text({
+        x: 10,
+        y: 6,
+        width: Math.max(20, width - 20),
+        text: title,
+        fill: textColor,
+        fontSize: font,
+        listening: false,
+      }),
+    )
+  }
+  const legendRows = slices.length ? Math.ceil(slices.length / 2) : 0
+  const legendH = legendRows ? legendRows * (font + 6) + 8 : 0
+  const top = title ? font + 14 : 8
+  const plotH = Math.max(24, height - top - legendH)
+
+  if (!slices.length) {
+    g.add(
+      new Konva.Text({
+        x: 8,
+        y: height / 2 - 8,
+        width: Math.max(20, width - 16),
+        align: 'center',
+        text: '未配置',
+        fill: '#94a3b8',
+        fontSize: font,
+        listening: false,
+      }),
+    )
+    return g
+  }
+
+  if (widget.type === 'pie') {
+    const cx = width / 2
+    const cy = top + plotH / 2
+    const r = Math.max(10, Math.min(width, plotH) * 0.36)
+    const total = slices.reduce((sum, slice) => sum + Math.max(0, slice.value), 0)
+    if (total <= 0) {
+      g.add(new Konva.Circle({ x: cx, y: cy, radius: r, stroke: '#334155', strokeWidth: 8, listening: false }))
+    } else {
+      let rotation = -90
+      slices.forEach((slice, i) => {
+        const part = Math.max(0, slice.value)
+        if (part <= 0) return
+        const angle = (part / total) * 360
+        g.add(
+          new Konva.Wedge({
+            x: cx,
+            y: cy,
+            radius: r,
+            angle,
+            rotation,
+            fill: slice.color || trendCurveColor(i),
+            stroke: '#0b1220',
+            strokeWidth: 1,
+            listening: false,
+          }),
+        )
+        rotation += angle
+      })
+    }
+  } else {
+    const maxV = Math.max(...slices.map((slice) => Math.max(0, slice.value)), 1)
+    const inset = 12
+    const plotW = Math.max(8, width - inset * 2)
+    const slotW = plotW / slices.length
+    const barW = Math.min(barWidthOf(widget.props), Math.max(2, slotW * 0.9))
+    const baseY = top + plotH - font - 4
+    const barMaxH = Math.max(8, baseY - top - font)
+    slices.forEach((slice, i) => {
+      const part = Math.max(0, slice.value)
+      const h = (part / maxV) * barMaxH
+      const slotX = inset + i * slotW
+      const x = slotX + (slotW - barW) / 2
+      const y = baseY - h
+      g.add(
+        new Konva.Rect({
+          x,
+          y,
+          width: barW,
+          height: Math.max(part > 0 ? 2 : 1, h),
+          fill: slice.color || trendCurveColor(i),
+          cornerRadius: 2,
+          listening: false,
+        }),
+      )
+      g.add(
+        new Konva.Text({
+          x: slotX,
+          y: Math.max(top, y - font - 1),
+          width: slotW,
+          align: 'center',
+          text: sliceNumberText(slice),
+          fill: textColor,
+          fontSize: Math.max(9, font - 2),
+          listening: false,
+        }),
+      )
+      g.add(
+        new Konva.Text({
+          x: slotX,
+          y: baseY + 2,
+          width: slotW,
+          align: 'center',
+          text: slice.label || `${i + 1}`,
+          fill: '#94a3b8',
+          fontSize: Math.max(9, font - 2),
+          ellipsis: true,
+          wrap: 'none',
+          listening: false,
+        }),
+      )
+    })
+  }
+
+  const colW = (width - 16) / 2
+  slices.forEach((slice, i) => {
+    const col = i % 2
+    const row = Math.floor(i / 2)
+    const x = 8 + col * colW
+    const y = height - legendH + 4 + row * (font + 6)
+    g.add(
+      new Konva.Rect({
+        x,
+        y: y + 3,
+        width: 8,
+        height: 8,
+        fill: slice.color || trendCurveColor(i),
+        cornerRadius: 2,
+        listening: false,
+      }),
+    )
+    g.add(
+      new Konva.Text({
+        x: x + 12,
+        y,
+        width: Math.max(20, colW - 16),
+        text: `${slice.label || `项${i + 1}`}  ${sliceNumberText(slice)}`,
+        fill: textColor,
+        fontSize: Math.max(9, font - 1),
+        ellipsis: true,
+        wrap: 'none',
+        listening: false,
+      }),
+    )
+  })
+  return g
+}
+
 function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
   const { width, height } = widget.transform
   const style = widget.style
   const opacity = num(style, 'opacity', 1)
 
   switch (widget.type) {
+    case 'pie':
+    case 'bar':
+      return buildCategoryChart(widget, width, height, opacity)
     case 'circle': {
       return new Konva.Ellipse({
         name: 'shape',
@@ -918,17 +1165,39 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
       })
     }
     case 'text': {
-      return new Konva.Text({
-        name: 'shape',
-        width,
-        height,
-        text: String(widget.props.text ?? '文本'),
-        fill: str(style, 'fill', '#e8eaed'),
-        fontSize: num(style, 'fontSize', 20),
-        align: str(style, 'align', 'left') as 'left' | 'center' | 'right',
-        verticalAlign: 'middle',
-        opacity,
-      })
+      // 外框至少包住整行字。高度若小于字号，选中框会变成一条线从字中间穿过去。
+      const fitted = textBoxSize(widget)
+      const boxW = fitted.width
+      const boxH = fitted.height
+      const g = new Konva.Group({ name: 'shape' })
+      const stroke = typeof style.stroke === 'string' && style.stroke ? style.stroke : ''
+      g.add(
+        new Konva.Rect({
+          name: 'text-box',
+          width: boxW,
+          height: boxH,
+          // 近乎透明，整框仍可点；完全透明时 Konva 点不中空白处
+          fill: 'rgba(0,0,0,0.004)',
+          stroke: stroke || undefined,
+          strokeWidth: stroke ? num(style, 'strokeWidth', 1) : 0,
+          opacity,
+        }),
+      )
+      g.add(
+        new Konva.Text({
+          name: 'text-label',
+          width: boxW,
+          height: boxH,
+          text: String(widget.props.text ?? '文本'),
+          fill: str(style, 'fill', '#e8eaed'),
+          fontSize: num(style, 'fontSize', 20),
+          align: str(style, 'align', 'left') as 'left' | 'center' | 'right',
+          verticalAlign: 'middle',
+          listening: false,
+          opacity,
+        }),
+      )
+      return g
     }
     case 'button': {
       const g = new Konva.Group({ name: 'shape' })
@@ -963,7 +1232,7 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
         new Konva.Rect({
           width,
           height,
-          fill: '#111827',
+          fill: str(style, 'fill', '#111827'),
           stroke: str(style, 'stroke', '#3d4454'),
           strokeWidth: num(style, 'strokeWidth', 1),
           opacity,
@@ -1160,11 +1429,10 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
     }
     case 'value': {
       const g = new Konva.Group({ name: 'shape' })
-      const decimals = Number(widget.props.decimals ?? 1)
       const raw = widget.props.value
       const numVal = typeof raw === 'number' ? raw : Number(raw)
       const display = Number.isFinite(numVal)
-        ? numVal.toFixed(Math.max(0, Math.min(6, decimals)))
+        ? formatTagNumber(numVal, widgetValueTagId(widget))
         : String(raw ?? '--')
       const unit = String(widget.props.unit ?? '')
       g.add(
@@ -1266,6 +1534,10 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
       }
       const rowH = Math.max(18, Number(widget.props.rowHeight ?? 28))
       const isAlarm = widget.type === 'alarm' || isHistory
+      const panelBg = isAlarm
+        ? panelFill(style, isHistory ? '#0c121b' : '#140f0f')
+        : str(style, 'fill', '#0f172a')
+      const panelClear = panelBg === 'rgba(0,0,0,0)'
       const title = String(
         widget.props.title ?? (widget.type === 'alarm' ? '实时报警' : isHistory ? '历史报警' : ''),
       )
@@ -1274,7 +1546,7 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
         new Konva.Rect({
           width,
           height,
-          fill: str(style, 'fill', isHistory ? '#0c121b' : isAlarm ? '#140f0f' : '#0f172a'),
+          fill: panelBg,
           stroke: str(style, 'stroke', isHistory ? '#1e3a5f' : isAlarm ? '#7f1d1d' : '#334155'),
           strokeWidth: num(style, 'strokeWidth', 1),
           cornerRadius: num(style, 'cornerRadius', 6),
@@ -1305,7 +1577,7 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
             y,
             width: Math.max(8, width - 8),
             height: HISTORY_FILTER_HEIGHT,
-            fill: '#0b1220',
+            fill: panelClear ? 'rgba(0,0,0,0)' : '#0b1220',
             stroke: '#1e293b',
             strokeWidth: 1,
             cornerRadius: 3,
@@ -1347,8 +1619,9 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
             y,
             width: width - 2,
             height: rowH,
-            fill:
-              i % 2 === 1
+            fill: panelClear
+              ? 'rgba(0,0,0,0.001)'
+              : i % 2 === 1
                 ? str(style, 'rowAlt', isHistory ? '#111827' : isAlarm ? '#1c1212' : '#111827')
                 : 'rgba(0,0,0,0.001)',
             listening: Boolean(alarmId) || rowAt != null,
@@ -1402,7 +1675,7 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
             y: height - 4 - HISTORY_PAGER_HEIGHT,
             width: Math.max(8, width - 8),
             height: HISTORY_PAGER_HEIGHT,
-            fill: '#0b1220',
+            fill: panelClear ? 'rgba(0,0,0,0)' : '#0b1220',
             stroke: '#1e293b',
             strokeWidth: 1,
             cornerRadius: 3,
@@ -1434,7 +1707,7 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
       const legendFont = Math.max(10, Math.round(chartFont * 0.7))
       // 图例排版：几条曲线占几行由字体和宽度决定，绘图区高度随之让出来
       const legendLayout = trendLegendLayout({
-        curves,
+        curves: withTagDisplay(curves),
         hidden: hiddenCurveIds(widget),
         width,
         height,
@@ -1460,7 +1733,7 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
         new Konva.Rect({
           width,
           height,
-          fill: str(style, 'fill', isTrend ? '#0b1220' : '#0f172a'),
+          fill: isTrend ? panelFill(style, '#0b1220') : str(style, 'fill', '#0f172a'),
           stroke: str(style, 'stroke', isHistory ? '#3f2e12' : isTrend ? '#1e3a5f' : '#334155'),
           strokeWidth: num(style, 'strokeWidth', 1),
           cornerRadius: num(style, 'cornerRadius', 6),
@@ -1701,6 +1974,7 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
         }),
       )
       const unit = String(widget.props.unit ?? '')
+      const valueText = Number.isFinite(value) ? formatTagNumber(value, widgetValueTagId(widget)) : String(widget.props.value ?? '')
       g.add(
         new Konva.Text({
           y: 8,
@@ -1716,7 +1990,7 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
         new Konva.Text({
           y: cy + 8,
           width,
-          text: unit ? `${value}${unit}` : String(value),
+          text: unit ? `${valueText}${unit}` : valueText,
           align: 'center',
           fill: str(style, 'valueColor', '#38bdf8'),
           fontSize: num(style, 'fontSize', 18),
@@ -1744,6 +2018,40 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
         childNode.draggable(false)
         childNode.listening(false)
         g.add(childNode)
+      }
+      return g
+    }
+    case 'echart': {
+      const g = new Konva.Group({ name: 'shape' })
+      const variant = String(widget.props.variant || 'line-basic')
+      const bound = echartPaintBound(widget)
+      const sig = `${echartSignature(bound)}|ax${echartAxisFont(widget.props)}`
+      g.setAttr('echartSize', `${variant}|${Math.round(width)}|${Math.round(height)}`)
+      g.setAttr('echartSig', sig)
+      g.add(
+        new Konva.Rect({
+          name: 'hit',
+          width,
+          height,
+          fill: '#0b1220',
+          stroke: '#1e293b',
+          strokeWidth: 1,
+          cornerRadius: 6,
+        }),
+      )
+      const paint = () => {
+        const canvas = renderEchart(variant, width, height, false, echartPaintBound(widget), echartAxisFont(widget.props))
+        const prev = g.findOne('.chart') as Konva.Image | null
+        if (!canvas) return
+        if (prev) prev.image(canvas)
+        else g.add(new Konva.Image({ name: 'chart', image: canvas, width, height, listening: false }))
+      }
+      paint()
+      if (isMapPreset(variant) && !geoReady()) {
+        void ensureGeo().then(() => {
+          paint()
+          g.getLayer()?.batchDraw()
+        })
       }
       return g
     }
@@ -1809,6 +2117,24 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
   }
 }
 
+/** 折线/面积把每个变量的实时采样带上，渲染时一条变量一条曲线。 */
+function echartPaintBound(widget: Widget2D): EchartBound | null {
+  const bound = echartBoundOf(widget.props)
+  if (!bound) return null
+  const variant = String(widget.props.variant || '')
+  if (!variant.startsWith('line') && !variant.startsWith('area')) return bound
+  let lineTimes: number[] | undefined
+  const lines = bound.items.map((item) => {
+    if (!item.tagId) return null
+    const samples = curveSamples(widget.id, item.tagId) ?? null
+    const times = curveTimes(widget.id, item.tagId)
+    if (times && (!lineTimes || times.length > lineTimes.length)) lineTimes = times
+    return samples
+  })
+  if (!lines.some((line) => line && line.length)) return bound
+  return { ...bound, lines, ...(lineTimes ? { lineTimes } : {}) }
+}
+
 /** 用最新 Widget 数据刷新已有节点外观与尺寸（保持选中） */
 export function syncWidgetNode(group: Konva.Group, widget: Widget2D) {
   group.position({ x: widget.transform.x, y: widget.transform.y })
@@ -1818,6 +2144,34 @@ export function syncWidgetNode(group: Konva.Group, widget: Widget2D) {
   group.visible(widget.visible !== false)
 
   const shape = group.findOne('.shape') as Konva.Group | null
+  if (shape && widget.type === 'echart') {
+    const variant = String(widget.props.variant || 'line-basic')
+    const sizeKey = `${variant}|${Math.round(widget.transform.width)}|${Math.round(widget.transform.height)}`
+    if (shape.getAttr('echartSize') === sizeKey) {
+      const bound = echartPaintBound(widget)
+      const font = echartAxisFont(widget.props)
+      const sig = `${echartSignature(bound)}|ax${font}`
+      if (shape.getAttr('echartSig') !== sig) {
+        const canvas = renderEchart(variant, widget.transform.width, widget.transform.height, false, bound, font)
+        const image = shape.findOne('.chart') as Konva.Image | null
+        if (canvas && image) image.image(canvas)
+        else if (canvas) {
+          shape.add(
+            new Konva.Image({
+              name: 'chart',
+              image: canvas,
+              width: widget.transform.width,
+              height: widget.transform.height,
+              listening: false,
+            }),
+          )
+        }
+        shape.setAttr('echartSig', sig)
+        shape.getLayer()?.batchDraw()
+      }
+      return
+    }
+  }
   // 趋势图元：结构没变就原地换图（每 tick 重建整棵节点纯属浪费，也影响点击/游标手感）
   if (
     shape &&
@@ -1831,8 +2185,59 @@ export function syncWidgetNode(group: Konva.Group, widget: Widget2D) {
   group.add(buildShape(widget))
 }
 
+/**
+ * 文字外框按当前字号包住整行字。
+ * 不能拿上一次的宽高按比例再乘：高度一旦被四舍五入成 1，再加大字号就只会把宽度越拉越长，字被裁成一条。
+ */
+export function measureTextFrame(text: string, fontSize: number): { width: number; height: number } {
+  const fs = Math.max(1, fontSize)
+  const content = text.length > 0 ? text : ' '
+  const probe = new Konva.Text({ text: content, fontSize: fs })
+  const width = Math.max(fs, Math.ceil(probe.width()) + 2)
+  const height = Math.max(Math.ceil(fs * 1.25), Math.ceil(probe.height()))
+  probe.destroy()
+  return { width, height }
+}
+
+/** 文字外框：不小于整行字，已拉大的宽高保持不动。 */
+export function textBoxSize(widget: Pick<Widget2D, 'props' | 'style' | 'transform'>): { width: number; height: number } {
+  const frame = measureTextFrame(String(widget.props.text ?? ''), num(widget.style, 'fontSize', 20))
+  return {
+    width: Math.max(frame.width, widget.transform.width || 0, 1),
+    height: Math.max(frame.height, widget.transform.height || 0, 1),
+  }
+}
+
+/** 框比字小就撑开；已经够大则不动。 */
+export function growTextFrame(widget: Widget2D): Widget2D['transform'] | null {
+  if (widget.type !== 'text') return null
+  const box = textBoxSize(widget)
+  if (widget.transform.width >= box.width - 0.5 && widget.transform.height >= box.height - 0.5) return null
+  return { ...widget.transform, width: box.width, height: box.height }
+}
+
+/**
+ * 拖拽结束时把缩放折进宽高，只做一次。
+ * 拖动过程中每一帧都折的话，同一比例会被连乘，框高很快变成一条缝，字就被裁开。
+ */
+export function bakeScaledTextBox(group: Konva.Group): void {
+  if (String(group.getAttr('widgetType') || '') !== 'text') return
+  const scaleX = group.scaleX() || 1
+  const scaleY = group.scaleY() || 1
+  if (Math.abs(scaleX - 1) < 1e-6 && Math.abs(scaleY - 1) < 1e-6) return
+  const box = group.findOne('.text-box') as Konva.Rect | null
+  const label = group.findOne('.text-label') as Konva.Text | null
+  if (!box) return
+  const width = Math.max(4, box.width() * scaleX)
+  const height = Math.max(4, box.height() * scaleY)
+  group.scale({ x: 1, y: 1 })
+  box.setAttrs({ width, height })
+  label?.setAttrs({ width, height })
+}
+
 /** 从 Konva Group 读回 transform（Transformer 后调用） */
 export function readTransformFromNode(group: Konva.Group): Widget2D['transform'] {
+  bakeScaledTextBox(group)
   const type = String(group.getAttr('widgetType') || 'rect')
   const scaleX = group.scaleX()
   const scaleY = group.scaleY()
@@ -1865,6 +2270,12 @@ export function readTransformFromNode(group: Konva.Group): Widget2D['transform']
     }
     width = Math.max(4, (maxX - minX) * scaleX)
     height = Math.max(4, (maxY - minY) * scaleY)
+  } else if (type === 'text') {
+    const box = group.findOne('.text-box') as Konva.Rect | null
+    const label = group.findOne('.text-label') as Konva.Text | null
+    const fit = measureTextFrame(label?.text() || '', label?.fontSize() || 20)
+    width = Math.max(4, (box?.width() ?? 0) * scaleX, fit.width)
+    height = Math.max(4, (box?.height() ?? 0) * scaleY, fit.height)
   } else if (shape instanceof Konva.Text || shape instanceof Konva.Rect) {
     width = Math.max(4, shape.width() * scaleX)
     height = Math.max(4, shape.height() * scaleY)

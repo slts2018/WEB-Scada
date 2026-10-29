@@ -2,6 +2,9 @@ package com.webscada.server.service;
 
 
 
+import com.webscada.server.comm.CommFacade;
+import com.webscada.server.comm.config.CommProperties;
+import com.webscada.server.comm.config.DataPoint;
 import com.webscada.server.db.InfluxHolder;
 
 import com.webscada.server.mock.MockTagData;
@@ -35,6 +38,8 @@ import java.util.Objects;
 
 import java.util.Set;
 
+import java.util.UUID;
+
 import java.util.concurrent.ConcurrentHashMap;
 
 import java.util.concurrent.ThreadLocalRandom;
@@ -42,6 +47,10 @@ import java.util.concurrent.ThreadLocalRandom;
 import org.slf4j.Logger;
 
 import org.slf4j.LoggerFactory;
+
+import org.springframework.beans.factory.ObjectProvider;
+
+import org.springframework.beans.factory.annotation.Autowired;
 
 import org.springframework.scheduling.annotation.Scheduled;
 
@@ -66,6 +75,14 @@ public class TagRuntimeService {
   private final InfluxHolder influx;
 
   private final AlarmRuntimeService alarms;
+
+  private final ObjectProvider<CommFacade> commProvider;
+
+  /** 单测直接塞入的通信入口。生产路径走 commProvider，开关关闭时为空。 */
+  private final CommFacade commOverride;
+
+  /** webscada.comm.allow-write。默认关，单测可改。 */
+  private volatile boolean commAllowWrite;
 
   private final Map<String, TagValue> values = new ConcurrentHashMap<>();
 
@@ -93,6 +110,8 @@ public class TagRuntimeService {
 
 
 
+  @Autowired
+
   public TagRuntimeService(
 
       TagFileStore tagStore,
@@ -103,7 +122,43 @@ public class TagRuntimeService {
 
       InfluxHolder influx,
 
-      AlarmRuntimeService alarms) {
+      AlarmRuntimeService alarms,
+
+      ObjectProvider<CommFacade> comm,
+
+      CommProperties commProperties) {
+
+    this(
+        tagStore,
+        deviceStore,
+        sessions,
+        influx,
+        alarms,
+        comm,
+        null,
+        commProperties != null && commProperties.isAllowWrite());
+
+  }
+
+
+
+  private TagRuntimeService(
+
+      TagFileStore tagStore,
+
+      DeviceFileStore deviceStore,
+
+      TagSessionRegistry sessions,
+
+      InfluxHolder influx,
+
+      AlarmRuntimeService alarms,
+
+      ObjectProvider<CommFacade> commProvider,
+
+      CommFacade commOverride,
+
+      boolean commAllowWrite) {
 
     this.tagStore = tagStore;
 
@@ -114,6 +169,53 @@ public class TagRuntimeService {
     this.influx = influx;
 
     this.alarms = alarms;
+
+    this.commProvider = commProvider;
+
+    this.commOverride = commOverride;
+
+    this.commAllowWrite = commAllowWrite;
+
+  }
+
+
+
+  /** 单测：内存变量表，不接存储、告警和历史。 */
+  public static TagRuntimeService memory() {
+
+    return memory(null);
+
+  }
+
+
+
+  public static TagRuntimeService memory(CommFacade comm) {
+
+    return new TagRuntimeService(null, null, null, null, null, null, comm, false);
+
+  }
+
+
+
+  void testingMetas(List<TagMeta> next) {
+
+    metas = next == null ? List.of() : List.copyOf(next);
+
+  }
+
+
+
+  void testingMcd(Set<String> ids) {
+
+    mcdDeviceIds = ids == null ? Set.of() : Set.copyOf(ids);
+
+  }
+
+
+
+  void testingAllowWrite(boolean allow) {
+
+    commAllowWrite = allow;
 
   }
 
@@ -146,6 +248,27 @@ public class TagRuntimeService {
   public boolean isMcdDriven(TagMeta meta) {
 
     return meta != null && mcdDeviceIds.contains(meta.deviceId());
+
+  }
+
+
+
+  /** deviceId 落在某条 comm 链路上。开关关闭或没有链路时为 false。 */
+  public boolean isCommDriven(TagMeta meta) {
+
+    CommFacade facade = commFacade();
+
+    return meta != null && facade != null && facade.drivesDevice(meta.deviceId());
+
+  }
+
+
+
+  private CommFacade commFacade() {
+
+    if (commOverride != null) return commOverride;
+
+    return commProvider == null ? null : commProvider.getIfAvailable();
 
   }
 
@@ -254,9 +377,14 @@ public class TagRuntimeService {
 
 
   public TagValue setTagValue(String tagId, Object value, String quality) {
+    return setTagValue(tagId, value, quality, System.currentTimeMillis());
+  }
+
+  public TagValue setTagValue(String tagId, Object value, String quality, long timestamp) {
     TagValue prev = values.get(tagId);
-    TagValue next = now(tagId, value, quality);
+    TagValue next = new TagValue(tagId, value, quality, timestamp);
     values.put(tagId, next);
+    if (alarms == null && sessions == null && influx == null) return next;
     TagMeta meta = metaOf(tagId);
     noteAlarm(meta, next);
     offerPush(meta, next, null);
@@ -272,7 +400,7 @@ public class TagRuntimeService {
 
         metas.stream().filter(m -> m.tagId().equals(tagId)).findFirst().orElse(null);
 
-    if (meta == null) {
+    if (meta == null && tagStore != null) {
 
       try {
 
@@ -320,6 +448,8 @@ public class TagRuntimeService {
 
     }
 
+    if (isCommDriven(meta)) return writeComm(meta, normalized);
+
     TagValue next = setTagValue(tagId, normalized, "Good");
 
     return WriteResult.ok(next);
@@ -328,7 +458,48 @@ public class TagRuntimeService {
 
 
 
-  @Scheduled(fixedRate = 200)
+  /** 下发现场，不写本地当前值。成功只表示驱动收下了，当前值等下一次采集。 */
+  private WriteResult writeComm(TagMeta meta, Object value) {
+
+    if (!commAllowWrite) return WriteResult.fail("comm write disabled");
+
+    CommFacade facade = commFacade();
+
+    if (facade == null) return WriteResult.fail("comm link not found");
+
+    String linkId = facade.linkIdForDevice(meta.deviceId());
+
+    if (linkId == null) return WriteResult.fail("comm link not found: " + meta.deviceId());
+
+    DataPoint point = facade.pointFor(linkId, meta.tagId());
+
+    if (point == null) return WriteResult.fail("comm point not found: " + meta.tagId());
+
+    if (!point.writableByFunction()) return WriteResult.fail("comm point function not writable");
+
+    CommFacade.WriteOutcome out =
+
+        facade.write(linkId, point.id(), value, UUID.randomUUID().toString(), 0);
+
+    if (!out.ok()) {
+
+      String category = out.category() == null ? "" : out.category();
+
+      String detail = out.message() == null ? "" : out.message();
+
+      String text = category.isEmpty() ? detail : category + ": " + detail;
+
+      return WriteResult.fail(text);
+
+    }
+
+    return WriteResult.ok(null);
+
+  }
+
+
+
+  @Scheduled(fixedRate = 50)
   public void tick() {
     long nowMs = System.currentTimeMillis();
     if (nowMs - lastDeviceRefresh > 10_000) {
@@ -340,7 +511,7 @@ public class TagRuntimeService {
     ThreadLocalRandom rnd = ThreadLocalRandom.current();
     for (TagMeta meta : metas) {
       if (!isMockDriven(meta)) continue;
-      int scan = meta.scanPeriodMs() == null ? 1000 : Math.max(200, meta.scanPeriodMs());
+      int scan = meta.scanPeriodMs() == null ? 1000 : Math.max(50, meta.scanPeriodMs());
       long scanSlot = nowMs / scan;
       Long prevScan = scanSlots.get(meta.tagId());
       if (prevScan != null && prevScan == scanSlot) continue;

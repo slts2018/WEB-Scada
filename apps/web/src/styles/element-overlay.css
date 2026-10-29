@@ -206,6 +206,41 @@
   color: var(--scada-text);
 }
 
+/* 运行端实时报警右键确认 */
+.scada-alarm-ack-menu {
+  position: fixed;
+  z-index: 40000;
+  min-width: 96px;
+  padding: 4px;
+  background: var(--scada-panel, #1e293b);
+  border: 1px solid var(--scada-border, #334155);
+  border-radius: 8px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+.scada-alarm-ack-menu__item {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 6px 12px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--scada-text, #e2e8f0);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.scada-alarm-ack-menu__item:hover:not(:disabled) {
+  background: rgba(56, 189, 248, 0.16);
+}
+
+.scada-alarm-ack-menu__item:disabled {
+  color: var(--scada-muted, #94a3b8);
+  cursor: default;
+}
+
 /* 运行端写值确认：盖过 3D/面板层 */
 .scada-message-box--top {
   z-index: 50000 !important;

@@ -11,6 +11,7 @@ public record TagMeta(
     String address,
     String dataType,
     String unit,
+    Integer decimals,
     boolean writable,
     String description,
     TagSimulation simulation,

@@ -7,18 +7,166 @@ import {
 } from '@web-scada/core'
 import { useProjectStore } from '@/stores/project'
 import { ElMessage } from 'element-plus'
+import EchartThumb from './EchartThumb.vue'
+import { ECHART_DND, ECHART_FOLDERS, ECHART_PRESETS, type EchartPreset } from '@/shared/echart/catalog'
+import {
+  MATERIAL_CATALOG,
+  MATERIAL_CATEGORY_ORDER,
+  MATERIAL_DND,
+  materialSrc,
+  type MaterialItem,
+} from '@/shared/library/materials'
 
 const DND_TYPE = 'application/x-scada-widget'
 
 const project = useProjectStore()
 const fileInput = ref<HTMLInputElement | null>(null)
-const activeTab = ref<'basic' | 'data' | 'industrial' | 'media' | 'symbol'>('basic')
+const query = ref('')
 
-const basic = computed(() => BUILTIN_WIDGETS.filter((i) => i.group === 'basic'))
-const data = computed(() => BUILTIN_WIDGETS.filter((i) => i.group === 'data'))
-const industrial = computed(() => BUILTIN_WIDGETS.filter((i) => i.group === 'industrial'))
-const media = computed(() => BUILTIN_WIDGETS.filter((i) => i.group === 'media'))
-const symbols = computed(() => project.document.symbols ?? [])
+const widgetRails = [
+  {
+    id: 'control',
+    label: '控件',
+    folders: [
+      { id: 'control-display', name: '显示', types: ['value', 'gauge'] as BuiltinWidgetType[] },
+      { id: 'control-operate', name: '操作', types: ['switch'] as BuiltinWidgetType[] },
+    ],
+  },
+  {
+    id: 'device',
+    label: '设备',
+    folders: [
+      { id: 'device-process', name: '工艺设备', types: ['valve', 'pump', 'lamp', 'tank', 'pipe'] as BuiltinWidgetType[] },
+    ],
+  },
+  {
+    id: 'chart',
+    label: '图表',
+    folders: [
+      { id: 'chart-trend', name: '趋势', types: ['trendHistory', 'trend'] as BuiltinWidgetType[] },
+      { id: 'chart-alarm', name: '报警', types: ['alarmHistory', 'alarm'] as BuiltinWidgetType[] },
+      { id: 'chart-stat', name: '统计', types: ['pie', 'bar'] as BuiltinWidgetType[] },
+    ],
+  },
+  {
+    id: 'media',
+    label: '素材',
+    folders: [{ id: 'media-all', name: '画面', types: ['image', 'scene3d'] as BuiltinWidgetType[] }],
+  },
+  {
+    id: 'shape',
+    label: '图形',
+    folders: [
+      { id: 'shape-basic', name: '基本图形', types: ['rect', 'roundRect', 'circle'] as BuiltinWidgetType[] },
+      { id: 'shape-line', name: '线条', types: ['line', 'polyline', 'polygon'] as BuiltinWidgetType[] },
+      { id: 'shape-text', name: '文字', types: ['text', 'button'] as BuiltinWidgetType[] },
+    ],
+  },
+] as const
+
+const rails = [
+  { id: 'template', label: '模板' },
+  ...widgetRails.map((item) => ({ id: item.id, label: item.label })),
+  { id: 'symbol', label: '组件' },
+] as const
+
+type RailId = (typeof rails)[number]['id']
+
+const active = ref<RailId>('shape')
+const openIds = ref<string[]>(['shape-basic'])
+
+const byType = new Map(BUILTIN_WIDGETS.map((item) => [item.type, item]))
+
+function matches(text: string, q: string) {
+  return text.toLowerCase().includes(q)
+}
+
+const visibleFolders = computed(() => {
+  const rail = widgetRails.find((item) => item.id === active.value)
+  if (!rail) return []
+  const q = query.value.trim().toLowerCase()
+  return rail.folders
+    .map((folder) => {
+      const items = folder.types
+        .map((type) => byType.get(type))
+        .filter((item): item is NonNullable<typeof item> => Boolean(item))
+      const folderHit = q && matches(folder.name, q)
+      const matched = q ? items.filter((item) => folderHit || matches(item.label, q) || matches(item.description, q)) : items
+      return {
+        ...folder,
+        items: matched,
+        open: q ? matched.length > 0 : openIds.value.includes(folder.id),
+      }
+    })
+    .filter((folder) => !q || folder.items.length > 0)
+})
+
+const templates = computed(() => {
+  const q = query.value.trim().toLowerCase()
+  return (project.document.pageTemplates ?? []).filter((item) => !q || matches(item.name, q))
+})
+
+const symbols = computed(() => {
+  const q = query.value.trim().toLowerCase()
+  return (project.document.symbols ?? []).filter((item) => !q || matches(item.name, q))
+})
+
+const echartFolders = computed(() => {
+  if (active.value !== 'chart') return []
+  const q = query.value.trim().toLowerCase()
+  return ECHART_FOLDERS.map((folder) => {
+    const id = `echart:${folder}`
+    const items = ECHART_PRESETS.filter((item) => item.folder === folder)
+    const folderHit = Boolean(q) && matches(folder, q)
+    const matched = q ? items.filter((item) => folderHit || matches(item.label, q)) : items
+    return {
+      id,
+      name: folder,
+      items: matched,
+      open: q ? matched.length > 0 : openIds.value.includes(id),
+    }
+  }).filter((folder) => !q || folder.items.length > 0)
+})
+
+const materialFolders = computed(() => {
+  if (active.value !== 'media') return []
+  const q = query.value.trim().toLowerCase()
+  const groups = new Map<string, MaterialItem[]>()
+  for (const item of MATERIAL_CATALOG) {
+    const folderHit = Boolean(q) && matches(item.category, q)
+    if (q && !folderHit && !matches(item.name, q)) continue
+    const list = groups.get(item.category)
+    if (list) list.push(item)
+    else groups.set(item.category, [item])
+  }
+  const names = [...groups.keys()].sort((a, b) => {
+    const ai = MATERIAL_CATEGORY_ORDER.indexOf(a)
+    const bi = MATERIAL_CATEGORY_ORDER.indexOf(b)
+    return (ai < 0 ? 999 : ai) - (bi < 0 ? 999 : bi)
+  })
+  return names.map((category) => {
+    const id = `mat:${category}`
+    const items = groups.get(category) ?? []
+    return {
+      id,
+      name: category,
+      items,
+      open: q ? items.length > 0 : openIds.value.includes(id),
+    }
+  })
+})
+
+function selectRail(id: RailId) {
+  active.value = id
+  const rail = widgetRails.find((item) => item.id === id)
+  if (rail && !rail.folders.some((folder) => openIds.value.includes(folder.id))) {
+    openIds.value = [rail.folders[0].id]
+  }
+}
+
+function toggleFolder(id: string) {
+  openIds.value = openIds.value.includes(id) ? openIds.value.filter((item) => item !== id) : [...openIds.value, id]
+}
 
 function add(type: BuiltinWidgetType) {
   if (!project.activePage2d) {
@@ -44,18 +192,39 @@ function add(type: BuiltinWidgetType) {
   if (!w) ElMessage.warning('当前图层已锁定，请切换图层')
 }
 
-function placeSymbol(id: string) {
+function addMaterial(item: MaterialItem) {
   if (!project.activePage2d) {
     ElMessage.warning('请先选择 2D 页面')
     return
   }
-  const w = project.placeSymbol(id)
-  if (!w) ElMessage.warning('放置失败（图层可能已锁定）')
-  else ElMessage.success('已放置符号')
+  const widget = project.addLibraryImage({
+    name: item.name,
+    src: materialSrc(item.file),
+    width: item.w,
+    height: item.h,
+  })
+  if (!widget) ElMessage.warning('当前图层已锁定，请切换图层')
 }
 
-function removeSymbol(id: string) {
-  project.removeSymbol(id)
+function onMaterialDrag(e: DragEvent, item: MaterialItem) {
+  e.dataTransfer?.setData(MATERIAL_DND, item.id)
+  e.dataTransfer?.setData(DND_TYPE, 'image')
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copy'
+}
+
+function addEchart(item: EchartPreset) {
+  if (!project.activePage2d) {
+    ElMessage.warning('请先选择 2D 页面')
+    return
+  }
+  const widget = project.addWidget('echart', undefined, { name: item.label, props: { variant: item.id } })
+  if (!widget) ElMessage.warning('当前图层已锁定，请切换图层')
+}
+
+function onEchartDrag(e: DragEvent, item: EchartPreset) {
+  e.dataTransfer?.setData(ECHART_DND, item.id)
+  e.dataTransfer?.setData(DND_TYPE, 'echart')
+  if (e.dataTransfer) e.dataTransfer.effectAllowed = 'copy'
 }
 
 function onDragStart(e: DragEvent, type: BuiltinWidgetType) {
@@ -65,6 +234,24 @@ function onDragStart(e: DragEvent, type: BuiltinWidgetType) {
   }
   e.dataTransfer?.setData(DND_TYPE, type)
   e.dataTransfer!.effectAllowed = 'copy'
+}
+
+function useTemplate(id: string) {
+  const page = project.createPageFromTemplate(id)
+  if (!page) {
+    ElMessage.warning('模板不存在')
+    return
+  }
+  ElMessage.success(`已按模板新建页面「${page.name}」`)
+}
+
+function useSymbol(id: string) {
+  if (!project.activePage2d) {
+    ElMessage.warning('请先选择 2D 页面')
+    return
+  }
+  const widget = project.placeSymbol(id)
+  if (!widget) ElMessage.warning('当前图层已锁定，请切换图层')
 }
 
 async function onFileChange(e: Event) {
@@ -91,153 +278,415 @@ async function onFileChange(e: Event) {
       @change="onFileChange"
     />
 
-    <p class="hint">拖到画布放置，或点击居中添加</p>
+    <nav class="rail" aria-label="控件分类">
+      <button
+        v-for="rail in rails"
+        :key="rail.id"
+        type="button"
+        class="rail-btn"
+        :class="{ active: active === rail.id }"
+        @click="selectRail(rail.id)"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <template v-if="rail.id === 'template'">
+            <rect x="4" y="3" width="12" height="16" rx="1.5" />
+            <path d="M8 7h6M8 11h6M8 15h4" />
+            <path d="M14 14h6v7h-6z" />
+          </template>
+          <template v-else-if="rail.id === 'shape'">
+            <rect x="4" y="4" width="7" height="7" rx="1" />
+            <rect x="13" y="4" width="7" height="7" rx="1" />
+            <rect x="4" y="13" width="7" height="7" rx="1" />
+            <circle cx="16.5" cy="16.5" r="3.2" />
+          </template>
+          <template v-else-if="rail.id === 'control'">
+            <rect x="3" y="6" width="18" height="12" rx="2" />
+            <path d="M7 12h4M14 10v4" />
+          </template>
+          <template v-else-if="rail.id === 'chart'">
+            <path d="M4 19V5M4 19h16" />
+            <path d="M8 15v-4M12 15V8M16 15v-6" />
+          </template>
+          <template v-else-if="rail.id === 'device'">
+            <path d="M12 3l7 4v6c0 4.2-3 6.8-7 8-4-1.2-7-3.8-7-8V7l7-4z" />
+          </template>
+          <template v-else-if="rail.id === 'symbol'">
+            <path d="M8 4h4v4H8zM4 12h4v4H4zM12 12h8v4h-8zM8 16l2 4h4l2-4" />
+          </template>
+          <template v-else>
+            <rect x="4" y="5" width="16" height="14" rx="2" />
+            <circle cx="9" cy="10" r="1.4" />
+            <path d="M4 16l4.5-4 3 2.5L15 11l5 5" />
+          </template>
+        </svg>
+        <span>{{ rail.label }}</span>
+      </button>
+    </nav>
 
-    <el-tabs v-model="activeTab" class="tabs" stretch>
-      <el-tab-pane label="基础" name="basic">
-        <div class="grid">
+    <div class="main">
+      <label class="search">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="11" cy="11" r="6" />
+          <path d="M16 16l4 4" />
+        </svg>
+        <input v-model="query" type="search" placeholder="搜索" />
+      </label>
+
+      <div v-if="active === 'template'" class="list">
+        <div v-if="templates.length" class="mat-grid">
           <button
-            v-for="item in basic"
-            :key="item.type"
+            v-for="item in templates"
+            :key="item.id"
             type="button"
-            class="item"
-            :class="{ 'active-tool': project.drawTool === item.type }"
-            draggable="true"
-            :title="item.description"
-            @click="add(item.type)"
-            @dragstart="onDragStart($event, item.type)"
+            class="mat-card"
+            :title="item.pageType === '3d' ? '三维页面模板' : '二维页面模板'"
+            @click="useTemplate(item.id)"
           >
-            <span class="icon" :data-type="item.type" />
-            <span>{{ item.label }}</span>
+            <span class="preview doc" />
+            <span class="name">{{ item.name }}</span>
           </button>
         </div>
-      </el-tab-pane>
-      <el-tab-pane label="数据" name="data">
-        <div class="grid">
+        <p v-else class="empty">{{ query ? '没有匹配的模板' : '还没有模板。在页面树里把页面存成模板。' }}</p>
+      </div>
+
+      <div v-else-if="active === 'symbol'" class="list">
+        <div v-if="symbols.length" class="mat-grid">
           <button
-            v-for="item in data"
-            :key="item.type"
+            v-for="item in symbols"
+            :key="item.id"
             type="button"
-            class="item"
-            draggable="true"
-            :title="item.description"
-            @click="add(item.type)"
-            @dragstart="onDragStart($event, item.type)"
+            class="mat-card"
+            title="放到当前页面"
+            @click="useSymbol(item.id)"
           >
-            <span class="icon" :data-type="item.type" />
-            <span>{{ item.label }}</span>
+            <span class="preview symbol" />
+            <span class="name">{{ item.name }}</span>
           </button>
         </div>
-      </el-tab-pane>
-      <el-tab-pane label="工业" name="industrial">
-        <div class="grid">
-          <button
-            v-for="item in industrial"
-            :key="item.type"
-            type="button"
-            class="item"
-            :class="{ 'active-tool': project.drawTool === item.type }"
-            draggable="true"
-            :title="item.description"
-            @click="add(item.type)"
-            @dragstart="onDragStart($event, item.type)"
-          >
-            <span class="icon" :data-type="item.type" />
-            <span>{{ item.label }}</span>
+        <p v-else class="empty">{{ query ? '没有匹配的组件' : '还没有组件。选中图元后用工具栏「存为符号」。' }}</p>
+      </div>
+
+      <div v-else class="list">
+        <template v-for="folder in visibleFolders" :key="folder.id">
+          <button type="button" class="folder" :class="{ open: folder.open }" @click="toggleFolder(folder.id)">
+            <span class="chevron" />
+            <span class="name">{{ folder.name }}</span>
           </button>
-        </div>
-      </el-tab-pane>
-      <el-tab-pane label="符号" name="symbol">
-        <p class="hint">选中图元后用顶栏「存为符号」保存；此处点击放置</p>
-        <div v-if="!symbols.length" class="empty">暂无符号</div>
-        <div v-else class="grid">
-          <div v-for="sym in symbols" :key="sym.id" class="symbol-card">
-            <button type="button" class="item" :title="sym.name" @click="placeSymbol(sym.id)">
-              <span class="icon symbol" />
-              <span>{{ sym.name }}</span>
+          <div v-if="folder.open" class="mat-grid">
+            <button
+              v-for="item in folder.items"
+              :key="item.type"
+              type="button"
+              class="mat-card"
+              :class="{ 'active-tool': project.drawTool === item.type }"
+              :draggable="item.type !== 'image' && !isDrawToolType(item.type)"
+              :title="item.description"
+              @click="add(item.type)"
+              @dragstart="onDragStart($event, item.type)"
+            >
+              <span class="preview"><span class="icon" :data-type="item.type" /></span>
+              <span class="name">{{ item.label }}</span>
             </button>
-            <button type="button" class="del" title="删除符号" @click="removeSymbol(sym.id)">×</button>
           </div>
-        </div>
-      </el-tab-pane>
-      <el-tab-pane label="资源" name="media">
-        <div class="grid">
-          <button
-            v-for="item in media"
-            :key="item.type"
-            type="button"
-            class="item"
-            :title="item.description"
-            @click="add(item.type)"
-          >
-            <span class="icon" :data-type="item.type" />
-            <span>{{ item.label }}</span>
-          </button>
-        </div>
-        <el-button size="small" class="full" @click="add('image')">上传图片 / SVG</el-button>
-      </el-tab-pane>
-    </el-tabs>
+        </template>
+        <template v-if="active === 'chart'">
+          <template v-for="folder in echartFolders" :key="folder.id">
+            <button type="button" class="folder" :class="{ open: folder.open }" @click="toggleFolder(folder.id)">
+              <span class="chevron" />
+              <span class="name">{{ folder.name }}</span>
+              <span class="count">{{ folder.items.length }}</span>
+            </button>
+            <div v-if="folder.open" class="mat-grid">
+              <button
+                v-for="item in folder.items"
+                :key="item.id"
+                type="button"
+                class="mat-card"
+                draggable="true"
+                :title="item.label"
+                @click="addEchart(item)"
+                @dragstart="onEchartDrag($event, item)"
+              >
+                <EchartThumb :variant="item.id" />
+                <span class="name">{{ item.label }}</span>
+              </button>
+            </div>
+          </template>
+        </template>
+        <template v-if="active === 'media'">
+          <template v-for="folder in materialFolders" :key="folder.id">
+            <button type="button" class="folder" :class="{ open: folder.open }" @click="toggleFolder(folder.id)">
+              <span class="chevron" />
+              <span class="name">{{ folder.name }}</span>
+              <span class="count">{{ folder.items.length }}</span>
+            </button>
+            <div v-if="folder.open" class="mat-grid">
+              <button
+                v-for="item in folder.items"
+                :key="item.id"
+                type="button"
+                class="mat-card"
+                draggable="true"
+                :title="item.name"
+                @click="addMaterial(item)"
+                @dragstart="onMaterialDrag($event, item)"
+              >
+                <img class="thumb" :src="materialSrc(item.file)" alt="" loading="lazy" />
+                <span class="name">{{ item.name }}</span>
+              </button>
+            </div>
+          </template>
+        </template>
+        <p v-if="!visibleFolders.length && !materialFolders.length && !echartFolders.length" class="empty">没有匹配的控件</p>
+      </div>
+    </div>
   </div>
 </template>
 
 <style scoped>
 .palette {
-  margin: 0;
-}
-
-.hint {
-  margin: 0 0 8px;
-  font-size: 11px;
-  color: var(--scada-muted);
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  margin: -8px;
+  width: calc(100% + 16px);
+  background: #12151c;
 }
 
 .hidden {
   display: none;
 }
 
-.tabs :deep(.el-tabs__header) {
-  margin: 0 0 8px;
+.rail {
+  order: 2;
+  width: 58px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 0;
+  border-left: 1px solid var(--scada-border);
+  background: #0e1116;
+  overflow: auto;
 }
 
-.tabs :deep(.el-tabs__item) {
-  font-size: 12px;
+.rail-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: 100%;
+  padding: 8px 0;
+  border: none;
+  background: transparent;
+  color: #8b95a7;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.rail-btn svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.rail-btn:hover {
+  color: #d5dbe6;
+}
+
+.rail-btn.active {
+  color: #3d8bfd;
+  background: rgba(61, 139, 253, 0.12);
+  box-shadow: inset -2px 0 0 #3d8bfd;
+}
+
+.main {
+  order: 1;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.search {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 8px;
   padding: 0 8px;
-  height: 32px;
+  height: 30px;
+  border: 1px solid #2a3140;
+  border-radius: 4px;
+  background: #0e1116;
+  color: #8b95a7;
 }
 
-.grid {
+.search svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+
+.search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--scada-text);
+  font-size: 12px;
+}
+
+.search input::-webkit-search-cancel-button {
+  appearance: none;
+}
+
+.list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0 6px 8px;
+}
+
+.folder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #c5cedb;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.folder:hover,
+.folder.open {
+  background: rgba(61, 139, 253, 0.16);
+  color: #7eb6ff;
+}
+
+.chevron {
+  width: 0;
+  height: 0;
+  flex-shrink: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 5px solid currentColor;
+  transition: transform 0.15s ease;
+}
+
+.folder.open .chevron {
+  transform: rotate(90deg);
+}
+
+.chevron.leaf {
+  border: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.7;
+}
+
+.name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.count {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 11px;
+  color: #8b95a7;
+}
+
+.mat-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  gap: 8px 6px;
+  padding: 4px 6px 10px;
 }
 
-.item {
+.mat-card {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  padding: 10px 6px;
-  border: 1px solid var(--scada-border);
-  border-radius: 8px;
-  background: #12151c;
-  color: var(--scada-text);
+  min-width: 0;
+  padding: 6px 4px 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: #c5cedb;
   cursor: grab;
-  font-size: 12px;
 }
 
-.item:active {
+.mat-card:hover,
+.mat-card.active-tool {
+  border-color: #3d8bfd;
+  background: rgba(61, 139, 253, 0.08);
+}
+
+.preview {
+  width: 100%;
+  height: 84px;
+  display: grid;
+  place-items: center;
+}
+
+.preview .icon {
+  margin: 0;
+  transform: scale(2.2);
+}
+
+.preview.doc,
+.preview.symbol {
+  width: 72%;
+  height: 64px;
+  border-radius: 4px;
+  border: 1px solid #334155;
+  background: linear-gradient(180deg, #1e293b, #0f172a);
+}
+
+.preview.symbol {
+  border-color: #3d8bfd;
+}
+
+.mat-card:active {
   cursor: grabbing;
 }
 
-.item:hover {
-  border-color: var(--scada-accent);
-  background: rgba(61, 139, 253, 0.1);
+.mat-card .thumb {
+  width: 100%;
+  height: 84px;
+  object-fit: contain;
 }
 
-.item.active-tool {
-  border-color: var(--scada-accent);
-  background: rgba(61, 139, 253, 0.18);
-  box-shadow: inset 0 0 0 1px rgba(61, 139, 253, 0.35);
+.mat-card .name {
+  width: 100%;
+  font-size: 12px;
+  text-align: center;
+}
+
+.empty {
+  margin: 16px 10px;
+  font-size: 12px;
+  color: var(--scada-muted);
 }
 
 .icon {
@@ -361,24 +810,24 @@ async function onFileChange(e: Event) {
 }
 
 .icon[data-type='trend'] {
-  background: #0b1220;
+  background: transparent;
   box-shadow: inset 0 -2px 0 #22d3ee, inset 6px -10px 0 -2px #22d3ee,
     inset 14px -5px 0 -2px #22d3ee, inset 22px -12px 0 -2px #22d3ee;
 }
 
 .icon[data-type='trendHistory'] {
-  background: #0b1220;
+  background: transparent;
   box-shadow: inset 0 -2px 0 #f59e0b, inset 6px -8px 0 -2px #f59e0b,
     inset 14px -12px 0 -2px #f59e0b, inset 22px -4px 0 -2px #f59e0b;
 }
 
 .icon[data-type='alarm'] {
-  background: linear-gradient(180deg, #7f1d1d 0 30%, #140f0f 30% 100%);
+  background: transparent;
   border: 1px solid #991b1b;
 }
 
 .icon[data-type='alarmHistory'] {
-  background: linear-gradient(180deg, #1e3a5f 0 30%, #0c121b 30% 100%);
+  background: transparent;
   border: 1px solid #334155;
 }
 
@@ -387,6 +836,21 @@ async function onFileChange(e: Event) {
   background: conic-gradient(from 180deg, #38bdf8 0 40%, #1e293b 40% 100%);
   width: 22px;
   height: 14px;
+}
+
+.icon[data-type='pie'] {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: conic-gradient(#22d3ee 0 40%, #f59e0b 40% 65%, #a78bfa 65% 85%, #34d399 85% 100%);
+}
+
+.icon[data-type='bar'] {
+  background: transparent;
+  box-shadow:
+    inset 2px -12px 0 -1px #22d3ee,
+    inset 10px -8px 0 -1px #f59e0b,
+    inset 18px -14px 0 -1px #a78bfa;
 }
 
 .icon[data-type='valve'] {
@@ -405,38 +869,12 @@ async function onFileChange(e: Event) {
   background: linear-gradient(135deg, #64748b, #334155);
 }
 
-.full {
-  width: 100%;
-  margin-top: 10px;
+.preview .icon {
+  margin: 0;
+  transform: scale(2.2);
 }
 
-.empty {
-  font-size: 12px;
-  color: var(--scada-muted);
-  padding: 8px 0;
-}
-
-.symbol-card {
-  position: relative;
-}
-
-.symbol-card .del {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  border: none;
-  background: rgba(0, 0, 0, 0.45);
-  color: #fca5a5;
-  width: 18px;
-  height: 18px;
-  border-radius: 4px;
-  cursor: pointer;
-  line-height: 1;
-  padding: 0;
-}
-
-.icon.symbol {
-  background: linear-gradient(135deg, #64748b, #3d8bfd);
-  border-radius: 4px;
+.preview .icon[data-type='valve'] {
+  transform: scale(2.2) rotate(45deg);
 }
 </style>

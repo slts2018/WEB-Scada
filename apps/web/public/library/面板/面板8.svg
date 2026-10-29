@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="100px" height="40px" viewBox="0 0 100 40" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <title>面板7</title>
+    <defs>
+        <rect id="path-1" x="0" y="0" width="100" height="40"></rect>
+        <rect id="path-3" x="3" y="3" width="94" height="34" rx="1"></rect>
+        <filter x="-3.2%" y="-8.8%" width="106.4%" height="117.6%" filterUnits="objectBoundingBox" id="filter-4">
+            <feGaussianBlur stdDeviation="3" in="SourceAlpha" result="shadowBlurInner1"></feGaussianBlur>
+            <feOffset dx="0" dy="0" in="shadowBlurInner1" result="shadowOffsetInner1"></feOffset>
+            <feComposite in="shadowOffsetInner1" in2="SourceAlpha" operator="arithmetic" k2="-1" k3="1" result="shadowInnerInner1"></feComposite>
+            <feColorMatrix values="0 0 0 0 0   0 0 0 0 0.115033195   0 0 0 0 0.34327366  0 0 0 0.5 0" type="matrix" in="shadowInnerInner1"></feColorMatrix>
+        </filter>
+    </defs>
+    <g id="大屏可视化/素材" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+        <g id="大屏可视化/素材/面板" transform="translate(-1700.000000, -965.000000)">
+            <g id="面板7" transform="translate(1700.000000, 965.000000)">
+                <mask id="mask-2" fill="white">
+                    <use xlink:href="#path-1"></use>
+                </mask>
+                <g id="矩形"></g>
+                <path d="M2,31 L2,36 C2,37.0543618 2.81587779,37.9181651 3.85073766,37.9945143 L4,38 L9,38 L9,40 L4,40 C1.790861,40 0,38.209139 0,36 L0,31 L2,31 Z M100,31 L100,36 C100,38.209139 98.209139,40 96,40 L91,40 L91,38 L96,38 C97.0543618,38 97.9181651,37.1841222 97.9945143,36.1492623 L98,36 L98,31 L100,31 Z M9,0 L9,2 L4,2 C2.9456382,2 2.08183488,2.81587779 2.00548574,3.85073766 L2,4 L2,9 L0,9 L0,4 C0,1.790861 1.790861,0 4,0 L9,0 Z M96,0 C98.209139,0 100,1.790861 100,4 L100,9 L98,9 L98,4 C98,2.9456382 97.1841222,2.08183488 96.1492623,2.00548574 L96,2 L91,2 L91,0 L96,0 Z" id="形状结合" fill="#1D78DF" mask="url(#mask-2)"></path>
+                <g id="矩形" mask="url(#mask-2)">
+                    <use fill-opacity="0.5" fill="#0A49C6" fill-rule="evenodd" xlink:href="#path-3"></use>
+                    <use fill="black" fill-opacity="1" filter="url(#filter-4)" xlink:href="#path-3"></use>
+                </g>
+                <polygon id="矩形" fill-opacity="0.8" fill="#0A49C6" mask="url(#mask-2)" points="10 1 90 1 90 3 10 3"></polygon>
+                <polygon id="矩形备份-7" fill-opacity="0.8" fill="#0A49C6" mask="url(#mask-2)" points="1 10 3 10 3 30 1 30"></polygon>
+                <polygon id="矩形备份-8" fill-opacity="0.8" fill="#0A49C6" mask="url(#mask-2)" points="97 10 99 10 99 30 97 30"></polygon>
+                <polygon id="矩形" fill-opacity="0.8" fill="#0A49C6" mask="url(#mask-2)" points="10 37 90 37 90 39 10 39"></polygon>
+            </g>
+        </g>
+    </g>
+</svg>

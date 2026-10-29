@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   createWidget2D,
   isDrawToolType,
@@ -13,16 +13,24 @@ import Konva from 'konva'
 import { createKonvaStage, type KonvaStageBundle } from '@/shared/konva/createKonvaStage'
 import {
   createWidgetNode,
+  growTextFrame,
   readTransformFromNode,
   syncWidgetNode,
 } from '@/shared/konva/widgetNodes'
+import { ECHART_DND, findEchartPreset } from '@/shared/echart/catalog'
+import { materialSrc, readMaterialDrop } from '@/shared/library/materials'
 import { useProjectStore } from '@/stores/project'
 import { useTagStore } from '@/stores/tag'
 import { collectPageTagIds, resolveWidgetVisual } from '@/shared/runtime/bindingEngine'
 import { rectsIntersect, snapTransform, snapWithGuides } from '@/shared/designer/geometry'
-import { isDesignerCanvasContext, isTypingTarget } from '@/shared/designer/designerHotkeys'
+import {
+  installPointerModifierTracker,
+  isAdditivePointer,
+  isDesignerCanvasContext,
+  isTypingTarget,
+} from '@/shared/designer/designerHotkeys'
 import { historyPagerClientRect, historySearchClientRect } from '@/shared/runtime/alarmHistoryQuery'
-import { trendToolbarClientRect } from '@/shared/runtime/trendHistoryQuery'
+import { onTrendToolbarHeight, trendToolbarClientRect } from '@/shared/runtime/trendHistoryQuery'
 import AlarmHistorySearchBar from '@/components/runtime/AlarmHistorySearchBar.vue'
 import TrendHistoryToolbar from '@/components/runtime/TrendHistoryToolbar.vue'
 import AlarmHistoryPager from '@/components/runtime/AlarmHistoryPager.vue'
@@ -38,25 +46,32 @@ const props = defineProps<{
 
 const project = useProjectStore()
 const tags = useTagStore()
+const boardEl = ref<HTMLDivElement | null>(null)
 const host = ref<HTMLDivElement | null>(null)
+const ctxEl = ref<HTMLDivElement | null>(null)
 const rulerX = ref<HTMLCanvasElement | null>(null)
 const rulerY = ref<HTMLCanvasElement | null>(null)
 const zoomPercent = ref(100)
 const handMode = ref(false)
 const ctxMenu = ref<{
   visible: boolean
+  placed: boolean
   x: number
   y: number
+  maxHeight: number
   pageX: number
   pageY: number
-}>({ visible: false, x: 0, y: 0, pageX: 0, pageY: 0 })
+}>({ visible: false, placed: false, x: 0, y: 0, maxHeight: 0, pageX: 0, pageY: 0 })
 
 let bundle: KonvaStageBundle | null = null
 let syncingFromModel = false
 let boxRect: Konva.Rect | null = null
 let boxStart: { x: number; y: number } | null = null
+let boxAdditive = false
 let dragHistoryPushed = false
 let dragOrigin: Record<string, { x: number; y: number }> = {}
+/** 多选后再点其中一个：移动超过阈值则整组拖动，否则松手收成单选 */
+let pendingSolo: { id: string; x: number; y: number } | null = null
 /** 绘制中的页面坐标点列 */
 let drawPoints: number[] = []
 let drawPreview: Konva.Line | null = null
@@ -204,7 +219,6 @@ function syncHistoryBars() {
 /** 历史趋势工具栏：与运行端同一套定位方式 */
 type TrendBar = {
   id: string
-  preset: string
   tagIds: string[]
   allowEdit: boolean
   x: number
@@ -237,7 +251,6 @@ function syncTrendBars() {
       const rect = trendToolbarClientRect((p) => node.getAbsoluteTransform().point(p), widget, origin)
       next.push({
         id: widget.id,
-        preset: String(widget.props.range ?? '-1h'),
         tagIds: trendCurves(widget.props).map((curve) => curve.tagId).filter(Boolean),
         allowEdit: widget.props.allowTimeEdit !== false,
         ...rect,
@@ -316,6 +329,12 @@ function clearWidgetNodes() {
 
 function renderAllWidgets() {
   if (!bundle) return
+  for (const layer of props.page.layers) {
+    for (const widget of layer.widgets) {
+      const next = growTextFrame(widget)
+      if (next) project.updateWidget(widget.id, { transform: next }, { recordHistory: false })
+    }
+  }
   syncingFromModel = true
   clearWidgetNodes()
   for (const layer of props.page.layers) {
@@ -695,6 +714,49 @@ function syncVertexHandles(widget: Widget2D | null) {
   bundle.widgetLayer.batchDraw()
 }
 
+function finishPendingSolo(e?: MouseEvent) {
+  const pending = pendingSolo
+  pendingSolo = null
+  if (!pending) return
+  if (e) {
+    const dx = e.clientX - pending.x
+    const dy = e.clientY - pending.y
+    if (dx * dx + dy * dy > 9) return
+  }
+  if (!project.selectedWidgetIds.includes(pending.id) || project.selectedWidgetIds.length < 2) return
+  project.selectWidget(pending.id)
+  applySelection(project.selectedWidgetIds)
+}
+
+function applyPointerSelection(id: string, evt: MouseEvent) {
+  const additive = isAdditivePointer(evt)
+  const already = project.selectedWidgetIds.includes(id)
+  if (evt.button === 2) {
+    pendingSolo = null
+    if (additive) {
+      if (!already) project.selectWidget(id, { additive: true })
+    } else if (!already) {
+      project.selectWidget(id)
+    }
+    applySelection(project.selectedWidgetIds)
+    return
+  }
+  if (evt.button !== 0) return
+  if (additive) {
+    pendingSolo = null
+    project.selectWidget(id, { additive: true })
+    applySelection(project.selectedWidgetIds)
+    return
+  }
+  if (already && project.selectedWidgetIds.length > 1) {
+    pendingSolo = { id, x: evt.clientX, y: evt.clientY }
+    return
+  }
+  pendingSolo = null
+  project.selectWidget(id)
+  applySelection(project.selectedWidgetIds)
+}
+
 function bindWidgetEvents(group: Konva.Group) {
   group.on('mousedown', (e) => {
     if (project.drawTool) {
@@ -704,26 +766,14 @@ function bindWidgetEvents(group: Konva.Group) {
       addDrawPoint(bundle.toPagePoint(pointer))
       return
     }
+    hideCtx()
     const id = String(group.getAttr('widgetId'))
-    const layer = project.findLayerOfWidget(id)
-    if (layer?.locked) {
-      e.cancelBubble = true
-      project.selectWidget(id, { additive: e.evt.shiftKey })
-      applySelection(project.selectedWidgetIds)
-      return
-    }
-    if (e.evt.button === 2) {
-      e.cancelBubble = true
-      if (!project.selectedWidgetIds.includes(id)) {
-        project.selectWidget(id)
-        applySelection(project.selectedWidgetIds)
-      }
-      return
-    }
-    if (e.evt.button !== 0) return
     e.cancelBubble = true
-    project.selectWidget(id, { additive: e.evt.shiftKey })
-    applySelection(project.selectedWidgetIds)
+    applyPointerSelection(id, e.evt)
+  })
+
+  group.on('mouseup', (e) => {
+    finishPendingSolo(e.evt)
   })
 
   group.on('dragstart', () => {
@@ -913,13 +963,14 @@ function onStagePointerDown(e: Konva.KonvaEventObject<MouseEvent>) {
   if (!pointer) return
   const pt = bundle.toPagePoint(pointer)
   boxStart = pt
+  boxAdditive = isAdditivePointer(e.evt)
   ensureBoxRect()
   if (boxRect) {
     boxRect.visible(true)
     boxRect.position({ x: pt.x, y: pt.y })
     boxRect.size({ width: 0, height: 0 })
   }
-  if (!e.evt.shiftKey) {
+  if (!boxAdditive) {
     project.selectWidget(null)
     applySelection([])
   }
@@ -947,6 +998,7 @@ function onStagePointerMove() {
 }
 
 function onStagePointerUp(e: Konva.KonvaEventObject<MouseEvent>) {
+  finishPendingSolo(e.evt)
   if (!bundle || !boxStart || !boxRect) return
   const box = {
     x: boxRect.x(),
@@ -955,7 +1007,9 @@ function onStagePointerUp(e: Konva.KonvaEventObject<MouseEvent>) {
     height: boxRect.height(),
   }
   boxRect.visible(false)
+  const additive = boxAdditive
   boxStart = null
+  boxAdditive = false
 
   if (box.width < 3 && box.height < 3) return
 
@@ -973,7 +1027,7 @@ function onStagePointerUp(e: Konva.KonvaEventObject<MouseEvent>) {
     )
     .map((w) => w.id)
 
-  if (e.evt.shiftKey) {
+  if (additive) {
     const set = new Set([...project.selectedWidgetIds, ...hit])
     project.setSelection([...set])
   } else {
@@ -984,16 +1038,47 @@ function onStagePointerUp(e: Konva.KonvaEventObject<MouseEvent>) {
 
 function onContextMenu(e: MouseEvent) {
   e.preventDefault()
-  if (!bundle || !host.value) return
-  const rect = host.value.getBoundingClientRect()
-  const pointer = { x: e.clientX - rect.left, y: e.clientY - rect.top }
+  if (!bundle || !host.value || !boardEl.value) return
+  const hostRect = host.value.getBoundingClientRect()
+  const boardRect = boardEl.value.getBoundingClientRect()
+  const pointer = { x: e.clientX - hostRect.left, y: e.clientY - hostRect.top }
   const pt = bundle.toPagePoint(pointer)
+  const x = e.clientX - boardRect.left
+  const y = e.clientY - boardRect.top
   ctxMenu.value = {
     visible: true,
-    x: e.clientX - rect.left + 24,
-    y: e.clientY - rect.top + 24,
+    placed: false,
+    x,
+    y,
+    maxHeight: 0,
     pageX: pt.x,
     pageY: pt.y,
+  }
+  void nextTick(() => placeCtxMenu(x, y))
+}
+
+/** 靠近画布底边时向上展开，避免被 overflow 和输出栏裁掉 */
+function placeCtxMenu(anchorX: number, anchorY: number) {
+  const board = boardEl.value
+  const menu = ctxEl.value
+  if (!board || !menu || !ctxMenu.value.visible) return
+  const pad = 4
+  const mw = menu.offsetWidth
+  const mh = menu.offsetHeight
+  const bw = board.clientWidth
+  const bh = board.clientHeight
+  const maxHeight = Math.max(120, bh - pad * 2)
+  let x = anchorX + 2
+  let y = anchorY + 2
+  if (x + mw > bw - pad) x = Math.max(pad, anchorX - mw - 2)
+  if (y + Math.min(mh, maxHeight) > bh - pad) y = Math.max(pad, anchorY - Math.min(mh, maxHeight) - 2)
+  if (y + Math.min(mh, maxHeight) > bh - pad) y = pad
+  ctxMenu.value = {
+    ...ctxMenu.value,
+    placed: true,
+    x,
+    y,
+    maxHeight: mh > maxHeight ? maxHeight : 0,
   }
 }
 
@@ -1004,11 +1089,29 @@ function hideCtx() {
 function onDrop(e: DragEvent) {
   e.preventDefault()
   if (!bundle || !host.value) return
-  const type = e.dataTransfer?.getData(DND_TYPE) as BuiltinWidgetType | undefined
-  if (!type || isDrawToolType(type)) return
   const rect = host.value.getBoundingClientRect()
   const pointer = { x: e.clientX - rect.left, y: e.clientY - rect.top }
   const pt = bundle.toPagePoint(pointer)
+  const variant = e.dataTransfer?.getData(ECHART_DND)
+  if (variant) {
+    const preset = findEchartPreset(variant)
+    project.addWidget(
+      'echart',
+      { x: pt.x - 210, y: pt.y - 140 },
+      { name: preset?.label ?? '图表', props: { variant } },
+    )
+    return
+  }
+  const material = readMaterialDrop(e)
+  if (material) {
+    project.addLibraryImage(
+      { name: material.name, src: materialSrc(material.file), width: material.w, height: material.h },
+      pt,
+    )
+    return
+  }
+  const type = e.dataTransfer?.getData(DND_TYPE) as BuiltinWidgetType | undefined
+  if (!type || isDrawToolType(type)) return
   const temp = createWidget2D(type)
   project.addWidget(type, {
     x: pt.x - temp.transform.width / 2,
@@ -1108,7 +1211,9 @@ watch(
   },
 )
 
+let offToolbarHeight: (() => void) | null = null
 onMounted(() => {
+  installPointerModifierTracker()
   if (!host.value) return
   bundle = createKonvaStage(host.value, props.page, {
     onViewChange: (view) => paintRulers(view),
@@ -1117,6 +1222,10 @@ onMounted(() => {
   bundle.setGridVisible(project.gridVisible)
   // 趋势图元交互（悬停读数 / 拖时间窗）只在实时预览里开，否则拖图元会被当成拖时间轴
   bundle.setChartInteraction(project.previewLive)
+  offToolbarHeight = onTrendToolbarHeight(() => {
+    syncTrendBars()
+    syncTrendCharts()
+  })
   bundle.stage.on('mousedown', onStagePointerDown)
   bundle.stage.on('mousemove', onStagePointerMove)
   bundle.stage.on('mouseup', onStagePointerUp)
@@ -1193,6 +1302,8 @@ watch(
 )
 
 onUnmounted(() => {
+  offToolbarHeight?.()
+  offToolbarHeight = null
   window.removeEventListener('keydown', onKeyDown, true)
   window.removeEventListener('mousemove', onRulerPointerMove)
   window.removeEventListener('mouseup', onRulerPointerUp)
@@ -1220,6 +1331,7 @@ defineExpose({ fitView, zoomBy, zoomExact, toggleHand, handMode })
 
 <template>
   <div
+    ref="boardEl"
     class="board"
     data-scada-canvas="2d"
     tabindex="0"
@@ -1252,7 +1364,6 @@ defineExpose({ fitView, zoomBy, zoomExact, toggleHand, handMode })
       :key="bar.id + ':toolbar'"
       class="history-search"
       :widget-id="bar.id"
-      :preset="bar.preset"
       :tag-ids="bar.tagIds"
       :allow-edit="bar.allowEdit"
       :style="{ left: bar.x + 'px', top: bar.y + 'px', width: bar.w + 'px', height: bar.h + 'px' }"
@@ -1289,8 +1400,14 @@ defineExpose({ fitView, zoomBy, zoomExact, toggleHand, handMode })
 
     <div
       v-if="ctxMenu.visible"
+      ref="ctxEl"
       class="ctx"
-      :style="{ left: ctxMenu.x + 'px', top: ctxMenu.y + 'px' }"
+      :class="{ pending: !ctxMenu.placed }"
+      :style="{
+        left: ctxMenu.x + 'px',
+        top: ctxMenu.y + 'px',
+        maxHeight: ctxMenu.maxHeight ? ctxMenu.maxHeight + 'px' : undefined,
+      }"
       @mousedown.stop
     >
       <button
@@ -1405,6 +1522,11 @@ defineExpose({ fitView, zoomBy, zoomExact, toggleHand, handMode })
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
   display: flex;
   flex-direction: column;
+  overflow-y: auto;
+}
+
+.ctx.pending {
+  visibility: hidden;
 }
 
 .ctx button {

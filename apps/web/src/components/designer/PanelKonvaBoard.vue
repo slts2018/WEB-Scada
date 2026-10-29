@@ -9,6 +9,7 @@ import type { Widget2D } from '@web-scada/core'
 import { createKonvaStage, type KonvaStageBundle } from '@/shared/konva/createKonvaStage'
 import {
   createWidgetNode,
+  growTextFrame,
   readTransformFromNode,
   syncWidgetNode,
 } from '@/shared/konva/widgetNodes'
@@ -18,6 +19,8 @@ import {
   isAdditivePointer,
 } from '@/shared/designer/designerHotkeys'
 import { PANEL_EDITOR_GRID } from '@/shared/designer/panelEditorToolbar'
+import { ECHART_DND, findEchartPreset } from '@/shared/echart/catalog'
+import { materialSrc, readMaterialDrop } from '@/shared/library/materials'
 import { useProjectStore } from '@/stores/project'
 
 const props = defineProps<{
@@ -251,6 +254,10 @@ function bindWidgetEvents(group: Konva.Group) {
 
 function renderAllWidgets() {
   if (!bundle) return
+  for (const widget of project.getActiveWidgets()) {
+    const next = growTextFrame(widget)
+    if (next) project.updateWidget(widget.id, { transform: next }, { recordHistory: false })
+  }
   syncingFromModel = true
   clearWidgetNodes()
   for (const widget of project.getActiveWidgets()) {
@@ -363,13 +370,31 @@ function onStagePointerUp() {
 function onDrop(e: DragEvent) {
   e.preventDefault()
   if (!bundle || !host.value) return
-  const type = e.dataTransfer?.getData('application/x-scada-widget')
-  if (!type || type === 'scene3d') return
   const rect = host.value.getBoundingClientRect()
   const pt = bundle.toPagePoint({
     x: e.clientX - rect.left,
     y: e.clientY - rect.top,
   })
+  const variant = e.dataTransfer?.getData(ECHART_DND)
+  if (variant) {
+    const preset = findEchartPreset(variant)
+    project.addWidget(
+      'echart',
+      { x: pt.x - 210, y: pt.y - 140 },
+      { name: preset?.label ?? '图表', props: { variant } },
+    )
+    return
+  }
+  const material = readMaterialDrop(e)
+  if (material) {
+    project.addLibraryImage(
+      { name: material.name, src: materialSrc(material.file), width: material.w, height: material.h },
+      pt,
+    )
+    return
+  }
+  const type = e.dataTransfer?.getData('application/x-scada-widget')
+  if (!type || type === 'scene3d') return
   project.addWidget(type as never, { x: pt.x, y: pt.y })
 }
 

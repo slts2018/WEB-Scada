@@ -39,3 +39,6 @@ webscada:
     timeout-ms: ${MCD4000_TIMEOUT_MS:15000}
     # 数据中台 HTTPS 证书常不被 JVM 信任；默认放行，可用 MCD4000_INSECURE_SSL=false 关闭
     insecure-ssl: ${MCD4000_INSECURE_SSL:true}
+  # 通信骨架默认关闭，避免没有链路配置时启动失败。打开后才会拉起 Supervisor。
+  comm:
+    enabled: false

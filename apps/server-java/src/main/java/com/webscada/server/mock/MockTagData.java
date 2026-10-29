@@ -13,15 +13,15 @@ public final class MockTagData {
   public static final TagMeta[] MOCK_TAGS =
       new TagMeta[] {
         new TagMeta(
-            "demo.temp", "温度", "工艺", "demo.plc", "DB1.DBD0", "float", "℃", false, null, null, null, null, null, null, null, null),
+            "demo.temp", "温度", "工艺", "demo.plc", "DB1.DBD0", "float", "℃", null, false, null, null, null, null, null, null, null, null),
         new TagMeta(
-            "demo.pressure", "压力", "工艺", "demo.plc", "DB1.DBD4", "float", "kPa", false, null, null, null, null, null, null, null, null),
+            "demo.pressure", "压力", "工艺", "demo.plc", "DB1.DBD4", "float", "kPa", null, false, null, null, null, null, null, null, null, null),
         new TagMeta(
-            "demo.pump.run", "泵运行", "设备", "demo.plc", "M0.0", "bool", null, true, null, null, null, null, null, null, null, null),
+            "demo.pump.run", "泵运行", "设备", "demo.plc", "M0.0", "bool", null, null, true, null, null, null, null, null, null, null, null),
         new TagMeta(
-            "demo.valve.open", "阀开到位", "设备", "demo.plc", "M0.1", "bool", null, true, null, null, null, null, null, null, null, null),
+            "demo.valve.open", "阀开到位", "设备", "demo.plc", "M0.1", "bool", null, null, true, null, null, null, null, null, null, null, null),
         new TagMeta(
-            "demo.level", "液位", "工艺", "demo.plc", "DB1.DBD8", "float", "%", false, null, null, null, null, null, null, null, null)
+            "demo.level", "液位", "工艺", "demo.plc", "DB1.DBD8", "float", "%", null, false, null, null, null, null, null, null, null, null)
       };
 
   public static final DeviceMeta[] MOCK_DEVICES =

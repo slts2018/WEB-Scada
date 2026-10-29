@@ -277,7 +277,7 @@ function setIn(v: 'inMin' | 'inMax', value: number | undefined) {
           <el-option
             v-for="item in tags.list"
             :key="item.meta.tagId"
-            :label="formatTagOptionLabel(item.meta, item.value?.quality)"
+            :label="formatTagOptionLabel(item.meta)"
             :value="item.meta.tagId"
           />
         </el-select>

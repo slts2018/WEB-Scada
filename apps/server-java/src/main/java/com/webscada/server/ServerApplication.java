@@ -1,5 +1,6 @@
 package com.webscada.server;
 
+import com.webscada.server.comm.config.CommProperties;
 import com.webscada.server.config.ScadaProperties;
 import com.webscada.server.db.InfluxHolder;
 import com.webscada.server.db.MysqlBootstrap;
@@ -18,7 +19,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
 
 @SpringBootApplication
 @EnableScheduling
-@EnableConfigurationProperties(ScadaProperties.class)
+@EnableConfigurationProperties({ScadaProperties.class, CommProperties.class})
 public class ServerApplication {
   private static final Logger log = LoggerFactory.getLogger(ServerApplication.class);
 

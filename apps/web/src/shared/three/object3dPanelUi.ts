@@ -13,6 +13,7 @@ import type {
   TagValue,
   Widget2D,
 } from '@web-scada/core'
+import { formatTagNumber } from '@/shared/runtime/tagDisplay'
 import {
   defaultPanelFontSize,
   panelWidgetValueTagId,
@@ -307,14 +308,11 @@ export function ensureObject3dPanelStyles() {
   if (style.textContent !== css) style.textContent = css
 }
 
-export function formatPanelTagDisplay(value: unknown): string {
+export function formatPanelTagDisplay(value: unknown, tagId = ''): string {
   if (value == null) return '--'
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) return '--'
-    const abs = Math.abs(value)
-    if (abs >= 1000 || (abs > 0 && abs < 0.01)) return value.toPrecision(4)
-    const s = value.toFixed(3)
-    return s.replace(/\.?0+$/, '')
+    return formatTagNumber(value, tagId)
   }
   if (typeof value === 'boolean') return value ? 'ON' : 'OFF'
   const s = String(value)
@@ -669,10 +667,10 @@ export function buildObject3dPanelElement(
     onDragWrite: (widgetId, axis, tagId, value) => {
       handlers.onDragWrite?.(node.id, widgetId, axis, tagId, value)
     },
-    onAlarmAck: (alarmId) => {
+    onAlarmContextMenu: (alarmId, clientX, clientY) => {
       if (handlers.designerMode) return
-      void import('@/stores/tag').then(({ useTagStore }) => {
-        void useTagStore().ackAlarm(alarmId)
+      void import('@/shared/runtime/alarmAckMenu').then(({ openRuntimeAlarmMenu }) => {
+        openRuntimeAlarmMenu(alarmId, clientX, clientY)
       })
     },
   })
@@ -731,7 +729,7 @@ export function panelValuesFromTags(
     if (widget.type === 'value') {
       const tagId = panelWidgetValueTagId(widget)
       out[widget.id] = {
-        valueText: tagId ? formatPanelTagDisplay(getTagValue(tagId)) : '--',
+        valueText: tagId ? formatPanelTagDisplay(getTagValue(tagId), tagId) : '--',
       }
       continue
     }

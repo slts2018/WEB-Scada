@@ -201,7 +201,8 @@ export function createKonvaStage(
       x: stage.x(),
       y: stage.y(),
     })
-    if (trendWidgets.length) flushTrend(false)
+    // 平移 / 缩放只改叠层位置与字号，不必每帧重灌 ECharts option（会拖慢工具条跟着动）
+    if (trendWidgets.length) flushTrend(true)
   }
 
   const applyPanState = () => {

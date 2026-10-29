@@ -11,7 +11,7 @@ import {
   chartFontSize,
   setTrendChartRendered,
 } from '@/shared/konva/widgetNodes'
-import { TREND_TOOLBAR_H } from '@/shared/runtime/trendHistoryQuery'
+import { TREND_TOOLBAR_H, TREND_TOOLBAR_ROW, trendToolbarMeasuredHeight } from '@/shared/runtime/trendHistoryQuery'
 import {
   setTrendHistoryTableHeight,
   trendHistoryTableVisibleOf,
@@ -47,19 +47,18 @@ export function syncNativeTrendCharts(opts: {
     const rect = node.getClientRect({ skipShadow: true, skipStroke: false })
     if (!Number.isFinite(rect.width) || !Number.isFinite(rect.height)) continue
     if (rect.width < 40 || rect.height < 30) continue
-    // 历史趋势顶部留出时间搜索条，避免盖住曲线
-    if (widget.type === 'trendHistory') {
-      const bar = 32
-      rect.y += bar
-      rect.height = Math.max(30, rect.height - bar)
-    }
     const pageFont = chartFontSize(
       widget,
       Math.max(20, widget.transform.width),
       Math.max(20, widget.transform.height),
     )
-    // 历史趋势的 HTML 工具栏挂在图元顶部：图表要把这一条空出来，否则会被工具栏盖住
+    // 历史趋势的 HTML 工具栏挂在图元顶部：图表要把折行后的整条空出来，否则会被按钮盖住
     const showToolbar = widget.type === 'trendHistory' && widget.props.showToolbar !== false
+    if (showToolbar) {
+      const bar = trendToolbarMeasuredHeight(widget.id) ?? TREND_TOOLBAR_ROW
+      rect.y += bar
+      rect.height = Math.max(30, rect.height - bar)
+    }
     const spec = buildTrendLiveSpec(widget, {
       width: rect.width,
       height: rect.height,

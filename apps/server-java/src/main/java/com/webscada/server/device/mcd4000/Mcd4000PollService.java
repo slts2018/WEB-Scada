@@ -5,6 +5,7 @@ import com.webscada.server.config.ScadaProperties;
 import com.webscada.server.model.DeviceMeta;
 import com.webscada.server.model.TagMeta;
 import com.webscada.server.model.TagValue;
+import com.webscada.server.service.DeviceStatusService;
 import com.webscada.server.service.TagRuntimeService;
 import com.webscada.server.store.DeviceFileStore;
 import java.time.Duration;
@@ -24,6 +25,7 @@ public class Mcd4000PollService {
 
   private final DeviceFileStore devices;
   private final TagRuntimeService runtime;
+  private final DeviceStatusService linkStatus;
   private final ScadaProperties props;
   private final ObjectMapper mapper;
   private final AtomicBoolean busy = new AtomicBoolean(false);
@@ -34,10 +36,12 @@ public class Mcd4000PollService {
   public Mcd4000PollService(
       DeviceFileStore devices,
       TagRuntimeService runtime,
+      DeviceStatusService linkStatus,
       ScadaProperties props,
       ObjectMapper mapper) {
     this.devices = devices;
     this.runtime = runtime;
+    this.linkStatus = linkStatus;
     this.props = props;
     this.mapper = mapper;
   }
@@ -72,8 +76,7 @@ public class Mcd4000PollService {
 
   private void doPoll() throws Exception {
     List<DeviceMeta> allDevices = devices.list();
-    List<TagMeta> metas = runtime.getMetas();
-    if (allDevices.isEmpty() || metas.isEmpty()) return;
+    if (allDevices.isEmpty()) return;
 
     Map<String, DeviceMeta> mcdById = new HashMap<>();
     for (DeviceMeta d : allDevices) {
@@ -85,7 +88,7 @@ public class Mcd4000PollService {
 
     // deviceId → tags with address
     Map<String, List<BoundTag>> byDevice = new HashMap<>();
-    for (TagMeta meta : metas) {
+    for (TagMeta meta : runtime.getMetas()) {
       DeviceMeta dev = mcdById.get(meta.deviceId());
       if (dev == null) continue;
       Mcd4000Channel.TagAddr addr = Mcd4000Channel.TagAddr.parse(meta.address());
@@ -94,45 +97,52 @@ public class Mcd4000PollService {
     }
 
     Mcd4000Client cli = client();
-    for (Map.Entry<String, List<BoundTag>> e : byDevice.entrySet()) {
-      DeviceMeta dev = mcdById.get(e.getKey());
-      if (dev == null) continue;
+    for (DeviceMeta dev : mcdById.values()) {
+      List<BoundTag> tags = byDevice.getOrDefault(dev.deviceId(), List.of());
       Mcd4000Channel ch = Mcd4000Channel.parse(dev.channel());
       if (ch == null) {
-        markBad(e.getValue());
+        linkStatus.report(dev.deviceId(), false, "offline", "通道无效");
+        markBad(tags);
         continue;
       }
       try {
-        List<Mcd4000Channel.TagAddr> addrs =
-            e.getValue().stream().map(BoundTag::addr).toList();
-        Map<String, Object> latest = cli.queryLatest(ch, addrs);
-        for (BoundTag bt : e.getValue()) {
-          Object raw = latest.get(Mcd4000Client.key(bt.addr.sensor(), bt.addr.field()));
-          if (raw == null) {
-            TagValue cur = runtime.getTagValue(bt.meta.tagId());
-            if (cur != null) runtime.setTagValue(bt.meta.tagId(), cur.value(), "Uncertain");
-            continue;
-          }
-          Object normalized = coerce(bt.meta.dataType(), raw);
-          if (normalized == COERCE_FAIL) {
-            runtime.setTagValue(bt.meta.tagId(), String.valueOf(raw), "Uncertain");
-          } else {
-            runtime.setTagValue(bt.meta.tagId(), normalized, "Good");
+        if (tags.isEmpty()) {
+          cli.reachable(ch.baseUrl());
+        } else {
+          List<Mcd4000Channel.TagAddr> addrs = tags.stream().map(BoundTag::addr).toList();
+          Map<String, Mcd4000Client.Point> latest = cli.queryLatest(ch, addrs);
+          for (BoundTag bt : tags) {
+            Mcd4000Client.Point point =
+                latest.get(Mcd4000Client.key(bt.addr.sensor(), bt.addr.field()));
+            if (point == null || point.value() == null) {
+              markOne(bt, "Bad");
+              continue;
+            }
+            Object normalized = coerce(bt.meta.dataType(), point.value());
+            if (normalized == COERCE_FAIL) {
+              runtime.setTagValue(bt.meta.tagId(), String.valueOf(point.value()), "Bad");
+            } else {
+              runtime.setTagValue(bt.meta.tagId(), normalized, point.quality());
+            }
           }
         }
+        linkStatus.report(dev.deviceId(), true, "online", null);
       } catch (Exception ex) {
         warn("device " + dev.deviceId() + " query failed", ex);
-        markBad(e.getValue());
+        linkStatus.report(dev.deviceId(), false, "offline", "连接失败");
+        markBad(tags);
       }
     }
   }
 
   private void markBad(List<BoundTag> tags) {
-    for (BoundTag bt : tags) {
-      TagValue cur = runtime.getTagValue(bt.meta.tagId());
-      Object v = cur != null ? cur.value() : fallback(bt.meta.dataType());
-      runtime.setTagValue(bt.meta.tagId(), v, "Bad");
-    }
+    for (BoundTag bt : tags) markOne(bt, "Bad");
+  }
+
+  private void markOne(BoundTag bt, String quality) {
+    TagValue cur = runtime.getTagValue(bt.meta.tagId());
+    Object v = cur != null ? cur.value() : fallback(bt.meta.dataType());
+    runtime.setTagValue(bt.meta.tagId(), v, quality);
   }
 
   private static final Object COERCE_FAIL = new Object();

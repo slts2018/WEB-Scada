@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="28px" height="712px" viewBox="0 0 28 712" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <title>侧边装饰2</title>
+    <g id="大屏可视化-案例" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+        <g id="智慧楼宇" transform="translate(-1462.000000, -204.000000)" stroke="#33EAFF" stroke-width="2">
+            <g id="侧边装饰2" transform="translate(1462.000000, 205.000000)">
+                <polyline id="路径" opacity="0.200000003" points="27 336 11 336 11 16 27 7.18383686e-14"></polyline>
+                <polyline id="路径备份-2" opacity="0.200000003" transform="translate(19.000000, 542.000000) scale(-1, 1) rotate(-180.000000) translate(-19.000000, -542.000000) " points="27 710 11 710 11 390 27 374"></polyline>
+                <line x1="11" y1="16" x2="27" y2="0" id="路径" opacity="0.600000024"></line>
+                <line x1="27" y1="694" x2="11" y2="710" id="路径备份-4" opacity="0.600000024" transform="translate(19.000000, 702.000000) scale(-1, 1) translate(-19.000000, -702.000000) "></line>
+                <rect id="矩形" opacity="0.200000003" x="11" y="352" width="6" height="6"></rect>
+                <line x1="21" y1="355" x2="28" y2="355" id="路径-11" opacity="0.600000024"></line>
+                <line x1="0" y1="355" x2="7" y2="355" id="路径-11备份" opacity="0.600000024"></line>
+            </g>
+        </g>
+    </g>
+</svg>

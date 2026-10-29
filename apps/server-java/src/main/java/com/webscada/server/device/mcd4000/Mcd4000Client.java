@@ -70,10 +70,23 @@ public final class Mcd4000Client {
     this.http = b.build();
   }
 
+  /** 任意 HTTP 响应都算主机可达；连接失败由调用方记为离线。 */
+  public void reachable(String baseUrl) throws Exception {
+    HttpRequest req =
+        HttpRequest.newBuilder(URI.create(baseUrl))
+            .timeout(timeout)
+            .method("GET", HttpRequest.BodyPublishers.noBody())
+            .build();
+    http.send(req, HttpResponse.BodyHandlers.discarding());
+  }
+
+  /** 一个点的值和由返回 code 决定的质量（只有 Good / Bad）。 */
+  public record Point(Object value, String quality) {}
+
   /**
-   * @return map key = sensor + "\0" + field → latest scalar/string value
+   * @return map key = sensor + "\0" + field → 最新一点。响应级 code 失败时各点质量为 Bad。
    */
-  public Map<String, Object> queryLatest(
+  public Map<String, Point> queryLatest(
       Mcd4000Channel ch, Collection<Mcd4000Channel.TagAddr> addrs) throws Exception {
     Set<String> sensors = new LinkedHashSet<>();
     Set<String> fields = new LinkedHashSet<>();
@@ -151,16 +164,43 @@ public final class Mcd4000Client {
     String raw = res.body() == null ? "" : res.body().trim();
     if (raw.isEmpty()) return Map.of();
     JsonNode root = mapper.readTree(raw);
-    return extractLatest(root);
+    return extractPoints(root);
   }
 
-  /** sensor\0field → value */
-  static Map<String, Object> extractLatest(JsonNode root) {
-    Map<String, Object> out = new HashMap<>();
+  /**
+   * 质量只看返回 code，不看数值本身。
+   * 响应包 {@code {code, data}}：0 / 200 为 Good，其它为 Bad。
+   * 点列 {@code [time, value, code]} 用第三列；没有 code 且有值视为 Good。
+   */
+  static Map<String, Point> extractPoints(JsonNode root) {
+    if (root == null || root.isNull()) return Map.of();
+    JsonNode payload = root;
+    Boolean responseOk = null;
+    if (root.isObject()) {
+      JsonNode code = first(root, "code", "Code");
+      JsonNode data = first(root, "data", "Data", "result", "Result");
+      if (code != null && !code.isNull() && data != null && (data.isObject() || data.isArray())) {
+        responseOk = isSuccessCode(code);
+        payload = data;
+      }
+    }
+    if (Boolean.FALSE.equals(responseOk)) {
+      Map<String, Point> bad = new HashMap<>();
+      for (Map.Entry<String, Point> e : readPoints(payload).entrySet()) {
+        bad.put(e.getKey(), new Point(e.getValue().value(), "Bad"));
+      }
+      return bad;
+    }
+    return readPoints(payload);
+  }
+
+  /** sensor\0field → 点。没有 code 的成功点质量为 Good。 */
+  private static Map<String, Point> readPoints(JsonNode root) {
+    Map<String, Point> out = new HashMap<>();
     if (root == null || root.isNull()) return out;
 
     // 格式 A（QueryDataByInterval / PLC / ARM）:
-    // { Sensor: { Field: [[time, value], ...] } }
+    // { Sensor: { Field: [[time, value] | [time, value, code], ...] } }
     if (root.isObject()) {
       root.fields()
           .forEachRemaining(
@@ -172,8 +212,8 @@ public final class Mcd4000Client {
                       .fields()
                       .forEachRemaining(
                           fe -> {
-                            Object v = lastPointValue(fe.getValue());
-                            if (v != null) out.put(key(sensor, fe.getKey()), v);
+                            Point p = lastPoint(fe.getValue());
+                            if (p != null) out.put(key(sensor, fe.getKey()), p);
                           });
                 }
               });
@@ -193,25 +233,82 @@ public final class Mcd4000Client {
         if (sensor.isEmpty() || !columns.isArray() || values.isEmpty()) continue;
         JsonNode lastRow = values.get(values.size() - 1);
         if (lastRow == null || !lastRow.isArray()) continue;
+        int codeCol = columnIndex(columns, "code", "Code", "quality", "Quality");
+        JsonNode rowCode = codeCol >= 0 && codeCol < lastRow.size() ? lastRow.get(codeCol) : null;
         for (int c = 1; c < columns.size() && c < lastRow.size(); c++) {
+          if (c == codeCol) continue;
           String field = columns.get(c).asText("");
+          if (field.isEmpty() || isCodeName(field)) continue;
           Object v = scalar(lastRow.get(c));
-          if (!field.isEmpty() && v != null) out.put(key(sensor, field), v);
+          if (v == null) continue;
+          String quality = rowCode != null ? (isSuccessCode(rowCode) ? "Good" : "Bad") : "Good";
+          out.put(key(sensor, field), new Point(v, quality));
         }
       }
     }
     return out;
   }
 
-  private static Object lastPointValue(JsonNode series) {
+  private static Point lastPoint(JsonNode series) {
     if (series == null || !series.isArray() || series.isEmpty()) return null;
     JsonNode last = series.get(series.size() - 1);
     if (last == null) return null;
     if (last.isArray()) {
       if (last.size() < 2) return null;
-      return scalar(last.get(1));
+      Object value = scalar(last.get(1));
+      if (value == null) return null;
+      if (last.size() >= 3 && last.get(2) != null && !last.get(2).isNull()) {
+        return new Point(value, isSuccessCode(last.get(2)) ? "Good" : "Bad");
+      }
+      return new Point(value, "Good");
     }
-    return scalar(last);
+    Object value = scalar(last);
+    return value == null ? null : new Point(value, "Good");
+  }
+
+  /** 0 / 200（含 OPC Good=192）视为好质量，其它数值 code 为坏。 */
+  static boolean isSuccessCode(JsonNode n) {
+    if (n == null || n.isNull()) return false;
+    if (n.isBoolean()) return n.booleanValue();
+    if (n.isNumber()) {
+      int c = n.intValue();
+      return c == 0 || c == 200 || c == 192;
+    }
+    if (n.isTextual()) {
+      String s = n.asText("").trim();
+      return "0".equals(s)
+          || "200".equals(s)
+          || "192".equals(s)
+          || "ok".equalsIgnoreCase(s)
+          || "success".equalsIgnoreCase(s)
+          || "good".equalsIgnoreCase(s)
+          || "true".equalsIgnoreCase(s);
+    }
+    return false;
+  }
+
+  private static JsonNode first(JsonNode obj, String... names) {
+    for (String name : names) {
+      JsonNode n = obj.get(name);
+      if (n != null && !n.isMissingNode()) return n;
+    }
+    return null;
+  }
+
+  private static int columnIndex(JsonNode columns, String... names) {
+    for (int i = 0; i < columns.size(); i++) {
+      String name = columns.get(i).asText("");
+      if (isCodeName(name)) {
+        for (String expect : names) {
+          if (expect.equalsIgnoreCase(name)) return i;
+        }
+      }
+    }
+    return -1;
+  }
+
+  private static boolean isCodeName(String name) {
+    return "code".equalsIgnoreCase(name) || "quality".equalsIgnoreCase(name);
   }
 
   private static Object scalar(JsonNode n) {

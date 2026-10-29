@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="159px" height="80px" viewBox="0 0 159 80" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <title>模块背景（青色）</title>
+    <g id="大屏可视化-案例" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+        <g id="智慧楼宇" transform="translate(-56.000000, -284.000000)" fill="#33EAFF">
+            <g id="编组-13备份-16" transform="translate(40.000000, 104.000000)">
+                <g id="模块背景（青色）" transform="translate(16.000000, 180.000000)">
+                    <rect id="矩形备份-7" opacity="0.05" x="0" y="0" width="159" height="80"></rect>
+                    <g id="编组-21" opacity="0.400000006" transform="translate(0.000000, 0.000000)">
+                        <polygon id="矩形" points="158.4 0 159 0.6 156.6 3 156 2.4"></polygon>
+                        <polygon id="矩形" transform="translate(157.500000, 78.500000) scale(1, -1) translate(-157.500000, -78.500000) " points="158.4 77 159 77.6 156.6 80 156 79.4"></polygon>
+                        <polygon id="矩形" transform="translate(1.500000, 1.500000) scale(-1, 1) translate(-1.500000, -1.500000) " points="2.4 0 3 0.6 0.6 3 0 2.4"></polygon>
+                        <polygon id="矩形" transform="translate(1.500000, 78.500000) scale(-1, -1) translate(-1.500000, -78.500000) " points="2.4 77 3 77.6 0.6 80 0 79.4"></polygon>
+                    </g>
+                </g>
+            </g>
+        </g>
+    </g>
+</svg>

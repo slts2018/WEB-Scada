@@ -2,6 +2,7 @@ package com.webscada.server.web;
 
 import com.webscada.server.model.ApiError;
 import com.webscada.server.model.DeviceMeta;
+import com.webscada.server.service.DeviceStatusService;
 import com.webscada.server.store.DeviceFileStore;
 import java.util.Map;
 import org.springframework.http.ResponseEntity;
@@ -16,14 +17,21 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 public class DeviceController {
   private final DeviceFileStore devices;
+  private final DeviceStatusService linkStatus;
 
-  public DeviceController(DeviceFileStore devices) {
+  public DeviceController(DeviceFileStore devices, DeviceStatusService linkStatus) {
     this.devices = devices;
+    this.linkStatus = linkStatus;
   }
 
   @GetMapping("/api/devices")
   public Map<String, Object> list() throws Exception {
     return Map.of("items", devices.list());
+  }
+
+  @GetMapping("/api/devices/status")
+  public Map<String, Object> status() throws Exception {
+    return Map.of("items", linkStatus.snapshot(devices.list()));
   }
 
   @PostMapping("/api/devices")

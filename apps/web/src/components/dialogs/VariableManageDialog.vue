@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
-import type { AlarmLevel, AlarmLimitCode, DeviceMeta, DeviceProtocol, SimMode, TagAlarmConfig, TagHistoryConfig, TagMeta, TagSimulation, TagValue } from '@web-scada/core'
+import type { AlarmLevel, AlarmLimitCode, DeviceLinkState, DeviceMeta, DeviceProtocol, SimMode, TagAlarmConfig, TagHistoryConfig, TagMeta, TagSimulation, TagValue } from '@web-scada/core'
 import { defaultTagSimulation, formatBoolText, simModeOptions } from '@web-scada/core'
 import HelpTip from '@/components/designer/HelpTip.vue'
 import { useTagStore } from '@/stores/tag'
@@ -49,6 +49,7 @@ const form = reactive({
   group: '',
   dataType: 'float' as TagMeta['dataType'],
   unit: '',
+  decimals: null as number | null,
   writable: false,
   deviceId: '',
   description: '',
@@ -165,8 +166,24 @@ async function refresh() {
   } catch {
     ElMessage.warning('无法连接服务端，显示本地 Mock')
   } finally {
+    await devices.refreshStatus()
     loading.value = false
   }
+}
+
+let statusTimer: ReturnType<typeof setInterval> | null = null
+
+function stopStatusPoll() {
+  if (!statusTimer) return
+  clearInterval(statusTimer)
+  statusTimer = null
+}
+
+function startStatusPoll() {
+  stopStatusPoll()
+  statusTimer = setInterval(() => {
+    void devices.refreshStatus()
+  }, 2000)
 }
 
 watch(
@@ -175,6 +192,38 @@ watch(
     if (open) void refresh()
   },
 )
+
+watch(
+  () => props.modelValue && mainTab.value === 'devices',
+  (on) => {
+    if (on) {
+      void devices.refreshStatus()
+      startStatusPoll()
+    } else {
+      stopStatusPoll()
+    }
+  },
+)
+
+onUnmounted(stopStatusPoll)
+
+function deviceStatusLabel(deviceId: string) {
+  const state = devices.statusById[deviceId]?.state
+  if (state === 'online') return '在线'
+  if (state === 'offline') return '离线'
+  if (state === 'disabled') return '停用'
+  if (state === 'unsupported') return '未接入'
+  if (state === 'unknown') return '检测中'
+  return '-'
+}
+
+function deviceStatusType(deviceId: string): 'success' | 'danger' | 'info' | 'warning' {
+  const state: DeviceLinkState | undefined = devices.statusById[deviceId]?.state
+  if (state === 'online') return 'success'
+  if (state === 'offline') return 'danger'
+  if (state === 'unknown') return 'warning'
+  return 'info'
+}
 
 function generateTagId() {
   const existing = new Set(tags.metas.map((m) => m.tagId))
@@ -216,10 +265,10 @@ function onSimTypeChange() {
   loadSimForm(null)
 }
 
-function clampMs(value: number) {
+function clampMs(value: number, min = 200) {
   const n = Number(value)
   if (!Number.isFinite(n)) return 1000
-  return Math.min(86_400_000, Math.max(200, Math.round(n)))
+  return Math.min(86_400_000, Math.max(min, Math.round(n)))
 }
 
 function loadIoForm(meta?: TagMeta | null) {
@@ -247,6 +296,13 @@ function historyPayload(): TagHistoryConfig {
     intervalMs: clampMs(io.historyIntervalMs),
     deadband: numeric ? Math.max(0, Number(io.deadband) || 0) : 0,
   }
+}
+
+/** 数值变量的小数位。空 = 自适应，用 -1 告诉服务端清掉已保存的位数。 */
+function decimalsPayload(): number {
+  if (form.dataType !== 'int' && form.dataType !== 'float') return -1
+  if (form.decimals == null || !Number.isFinite(form.decimals)) return -1
+  return Math.min(6, Math.max(0, Math.trunc(form.decimals)))
 }
 
 function displayValue(row: { meta: TagMeta; value?: TagValue }) {
@@ -283,6 +339,7 @@ function openCreate() {
   form.group = groupFilter.value.startsWith('__') ? '' : groupFilter.value
   form.dataType = 'float'
   form.unit = ''
+  form.decimals = null
   form.writable = false
   form.deviceId = devices.enabledItems[0]?.deviceId || devices.items[0]?.deviceId || ''
   form.description = ''
@@ -302,6 +359,7 @@ function openEdit(meta: TagMeta) {
   form.group = meta.group || ''
   form.dataType = meta.dataType
   form.unit = meta.unit || ''
+  form.decimals = typeof meta.decimals === 'number' && Number.isFinite(meta.decimals) ? meta.decimals : null
   form.writable = meta.writable
   form.deviceId = meta.deviceId || devices.enabledItems[0]?.deviceId || devices.items[0]?.deviceId || ''
   form.description = meta.description || ''
@@ -337,6 +395,8 @@ async function saveEditor() {
       group: (form.group ?? '').trim() || undefined,
       dataType: form.dataType,
       unit: form.unit.trim() || undefined,
+      // -1 = 清空小数位（服务端收成“按量级自适应”）。留空不传会把旧值留住。
+      decimals: decimalsPayload(),
       writable: form.writable,
       deviceId: form.deviceId.trim(),
       address: formatTagAddress(formDeviceProtocol.value, tagAddr),
@@ -344,7 +404,7 @@ async function saveEditor() {
       simulation: simulationPayload(),
       onText: form.dataType === 'bool' ? io.onText.trim() : '',
       offText: form.dataType === 'bool' ? io.offText.trim() : '',
-      scanPeriodMs: clampMs(io.scanPeriodMs),
+      scanPeriodMs: clampMs(io.scanPeriodMs, 50),
       pushEnabled: io.pushEnabled,
       pushPeriodMs: clampMs(io.pushPeriodMs),
       history: historyPayload(),
@@ -472,6 +532,7 @@ function exportCsv() {
     'group',
     'dataType',
     'unit',
+    'decimals',
     'writable',
     'deviceId',
     'address',
@@ -484,6 +545,7 @@ function exportCsv() {
       m.group ?? '',
       m.dataType,
       m.unit ?? '',
+      m.decimals ?? '',
       m.writable ? '1' : '0',
       m.deviceId,
       m.address ?? '',
@@ -505,6 +567,16 @@ function exportCsv() {
 
 function triggerImport() {
   importInput.value?.click()
+}
+
+/** CSV 没有这一列就不动原值；空单元格清成自适应。 */
+function decimalFromCsv(cells: string[], index: number): { decimals?: number } {
+  if (index < 0) return {}
+  const text = cells[index]?.trim() ?? ''
+  if (!text) return { decimals: -1 }
+  const raw = Number(text)
+  if (!Number.isFinite(raw)) return {}
+  return { decimals: Math.min(6, Math.max(0, Math.trunc(raw))) }
 }
 
 function parseCsvLine(line: string): string[] {
@@ -568,6 +640,7 @@ async function importFile(ev: Event) {
           group: cells[idx('group')]?.trim() || undefined,
           dataType: ['bool', 'int', 'float', 'string'].includes(dataType) ? dataType : 'float',
           unit: cells[idx('unit')]?.trim() || undefined,
+          ...decimalFromCsv(cells, idx('decimals')),
           writable: ['1', 'true', 'yes', '读写'].includes(
             (cells[idx('writable')] || '').trim().toLowerCase(),
           ),
@@ -919,11 +992,7 @@ async function removeAlarm(alarmId: string) {
           </el-table-column>
           <el-table-column label="质量" width="96">
             <template #default="{ row }">
-              <el-tag
-                v-if="devices.getById(row.meta.deviceId)?.protocol !== 'mcd4000'"
-                size="small"
-                :type="qualityTagType(row.value?.quality)"
-              >
+              <el-tag size="small" :type="qualityTagType(row.value?.quality)">
                 {{ row.value?.quality || '-' }}
               </el-tag>
             </template>
@@ -963,6 +1032,19 @@ async function removeAlarm(alarmId: string) {
           <el-table-column prop="channel" label="通道" min-width="140" show-overflow-tooltip />
           <el-table-column label="启用" width="70">
             <template #default="{ row }">{{ row.enabled ? '是' : '否' }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="96">
+            <template #default="{ row }">
+              <el-tooltip
+                :disabled="!devices.statusById[row.deviceId]?.message"
+                :content="devices.statusById[row.deviceId]?.message || ''"
+                placement="top"
+              >
+                <el-tag size="small" :type="deviceStatusType(row.deviceId)">
+                  {{ deviceStatusLabel(row.deviceId) }}
+                </el-tag>
+              </el-tooltip>
+            </template>
           </el-table-column>
           <el-table-column label="操作" width="120" fixed="right">
             <template #default="{ row }">
@@ -1020,6 +1102,17 @@ async function removeAlarm(alarmId: string) {
       <label>
         <span>单位</span>
         <el-input v-model="form.unit" placeholder="可选" />
+      </label>
+      <label v-if="form.dataType === 'int' || form.dataType === 'float'">
+        <span>小数位</span>
+        <el-input-number
+          :model-value="form.decimals ?? undefined"
+          :min="0"
+          :max="6"
+          controls-position="right"
+          placeholder="自动"
+          @update:model-value="(v: number | undefined) => { form.decimals = v == null || Number.isNaN(Number(v)) ? null : Number(v) }"
+        />
       </label>
       <label class="wide">
         <span class="cfg-label">
@@ -1166,9 +1259,9 @@ async function removeAlarm(alarmId: string) {
       <label>
         <span class="cfg-label">
           扫描周期（毫秒）
-          <HelpTip content="模拟设备两次采样的最小间隔。仿真周期更长时，仍按仿真周期变化。其它协议先只保存，采集仍用设备自己的轮询。" />
+          <HelpTip content="模拟设备两次采样的最小间隔，最小 50 毫秒。仿真周期更长时，数值仍按仿真周期变化。其它协议先只保存，采集仍用设备自己的轮询。" />
         </span>
-        <el-input-number v-model="io.scanPeriodMs" :min="200" :max="86400000" :step="100" controls-position="right" />
+        <el-input-number v-model="io.scanPeriodMs" :min="50" :max="86400000" :step="50" controls-position="right" />
       </label>
       <label class="wide check-row">
         <span class="cfg-label">

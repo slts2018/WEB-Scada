@@ -71,6 +71,12 @@ export interface AnimationColorRange {
   min?: number
   max?: number
   equals?: number | boolean | string
+  /** 与 equals 联用：为 true 时表示「不等于」 */
+  notEquals?: boolean
+  /** 仅 min 时：true 表示 value > min（默认 value ≥ min） */
+  minExclusive?: boolean
+  /** 仅 max 时：true 表示 value < max（默认 value ≤ max） */
+  maxExclusive?: boolean
   color: string
   blink?: boolean
 }
@@ -84,7 +90,7 @@ export interface AnimationLinkColor extends AnimationLinkBase {
 /** 数值/文本输出显示 */
 export interface AnimationLinkTextOut extends AnimationLinkBase {
   type: 'valueOut' | 'textOut'
-  /** 如 fixed:1 / bool */
+  /** bool = 显示 ON/OFF。数值小数位读变量，不再在这里配。 */
   format?: string
 }
 

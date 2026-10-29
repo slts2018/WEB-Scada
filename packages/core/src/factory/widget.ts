@@ -14,6 +14,8 @@ export type BuiltinWidgetType =
   | 'switch'
   | 'list'
   | 'chart'
+  | 'pie'
+  | 'bar'
   | 'trend'
   | 'trendHistory'
   | 'alarm'
@@ -25,6 +27,7 @@ export type BuiltinWidgetType =
   | 'tank'
   | 'pipe'
   | 'scene3d'
+  | 'echart'
   | 'group'
 
 /** 需画布交互绘制的工具（对齐 Flight 折线 / 多边形 / 管线） */
@@ -52,14 +55,14 @@ export const BUILTIN_WIDGETS: WidgetPaletteItem[] = [
   { type: 'polygon', label: '多边形', description: '封闭多边形（单击加点）', group: 'basic' },
   { type: 'text', label: '文本', description: '静态文本', group: 'basic' },
   { type: 'button', label: '按钮', description: '可点击按钮外观', group: 'basic' },
+  { type: 'trendHistory', label: '历史趋势', description: '按时间范围读取历史曲线', group: 'data' },
+  { type: 'trend', label: '实时趋势', description: '跟随当前值滚动的趋势曲线', group: 'data' },
+  { type: 'alarmHistory', label: '历史报警', description: '已发生的报警事件', group: 'data' },
+  { type: 'alarm', label: '实时报警', description: '实时报警列表', group: 'data' },
+  { type: 'pie', label: '饼图', description: '按当前值显示占比', group: 'data' },
+  { type: 'bar', label: '柱状图', description: '按当前值比较各项', group: 'data' },
   { type: 'value', label: '数值', description: '过程值显示', group: 'data' },
   { type: 'switch', label: '开关', description: '开关/切换', group: 'data' },
-  { type: 'list', label: '列表', description: '多行数据列表', group: 'data' },
-  { type: 'chart', label: '图表', description: '折线/柱状趋势', group: 'data' },
-  { type: 'trend', label: '实时趋势', description: '跟随当前值滚动的趋势曲线', group: 'industrial' },
-  { type: 'trendHistory', label: '历史趋势', description: '按时间范围读取历史曲线', group: 'industrial' },
-  { type: 'alarm', label: '实时报警', description: '实时报警列表', group: 'industrial' },
-  { type: 'alarmHistory', label: '历史报警', description: '已发生的报警事件', group: 'industrial' },
   { type: 'gauge', label: '仪表', description: '半圆/圆形仪表盘', group: 'data' },
   { type: 'image', label: '图片', description: '图片/SVG 资源', group: 'media' },
   { type: 'scene3d', label: '三维画面', description: '嵌入已制作的三维页面', group: 'media' },
@@ -183,6 +186,41 @@ const DEFAULTS: Record<BuiltinWidgetType, WidgetDefaults> = {
       rowHeight: 28,
     },
   },
+  pie: {
+    name: '饼图',
+    transform: { x: 80, y: 80, width: 280, height: 200, rotation: 0, scaleX: 1, scaleY: 1 },
+    style: {
+      fill: '#0f172a',
+      stroke: '#334155',
+      strokeWidth: 1,
+      opacity: 1,
+      cornerRadius: 8,
+      textColor: '#e2e8f0',
+      fontSize: 12,
+    },
+    props: {
+      title: '饼图',
+      slices: [{ label: '', value: 0, color: '#22d3ee' }],
+    },
+  },
+  bar: {
+    name: '柱状图',
+    transform: { x: 80, y: 80, width: 280, height: 180, rotation: 0, scaleX: 1, scaleY: 1 },
+    style: {
+      fill: '#0f172a',
+      stroke: '#334155',
+      strokeWidth: 1,
+      opacity: 1,
+      cornerRadius: 8,
+      textColor: '#e2e8f0',
+      fontSize: 12,
+    },
+    props: {
+      title: '柱状图',
+      barWidth: 28,
+      slices: [{ label: '', value: 0, color: '#22d3ee' }],
+    },
+  },
   chart: {
     name: '图表',
     transform: { x: 80, y: 80, width: 260, height: 160, rotation: 0, scaleX: 1, scaleY: 1 },
@@ -210,7 +248,7 @@ const DEFAULTS: Record<BuiltinWidgetType, WidgetDefaults> = {
     name: '实时趋势',
     transform: { x: 80, y: 80, width: 280, height: 160, rotation: 0, scaleX: 1, scaleY: 1 },
     style: {
-      fill: '#0b1220',
+      fill: 'rgba(0,0,0,0)',
       stroke: '#1e3a5f',
       strokeWidth: 1,
       opacity: 1,
@@ -233,7 +271,7 @@ const DEFAULTS: Record<BuiltinWidgetType, WidgetDefaults> = {
     name: '历史趋势',
     transform: { x: 80, y: 260, width: 320, height: 180, rotation: 0, scaleX: 1, scaleY: 1 },
     style: {
-      fill: '#0b1220',
+      fill: 'rgba(0,0,0,0)',
       stroke: '#3f2e12',
       strokeWidth: 1,
       opacity: 1,
@@ -257,7 +295,7 @@ const DEFAULTS: Record<BuiltinWidgetType, WidgetDefaults> = {
     name: '实时报警',
     transform: { x: 80, y: 80, width: 300, height: 180, rotation: 0, scaleX: 1, scaleY: 1 },
     style: {
-      fill: '#140f0f',
+      fill: 'rgba(0,0,0,0)',
       stroke: '#7f1d1d',
       strokeWidth: 1,
       opacity: 1,
@@ -279,7 +317,7 @@ const DEFAULTS: Record<BuiltinWidgetType, WidgetDefaults> = {
     name: '历史报警',
     transform: { x: 80, y: 280, width: 680, height: 248, rotation: 0, scaleX: 1, scaleY: 1 },
     style: {
-      fill: '#0c121b',
+      fill: 'rgba(0,0,0,0)',
       stroke: '#1e3a5f',
       strokeWidth: 1,
       opacity: 1,
@@ -367,6 +405,12 @@ const DEFAULTS: Record<BuiltinWidgetType, WidgetDefaults> = {
     transform: { x: 80, y: 80, width: 180, height: 40, rotation: 0, scaleX: 1, scaleY: 1 },
     style: { stroke: '#94a3b8', strokeWidth: 8, opacity: 1 },
     props: { points: [0, 20, 180, 20] },
+  },
+  echart: {
+    name: '图表',
+    transform: { x: 80, y: 80, width: 420, height: 280, rotation: 0, scaleX: 1, scaleY: 1 },
+    style: { fill: 'transparent', stroke: '#1e293b', strokeWidth: 1, opacity: 1, cornerRadius: 6 },
+    props: { variant: 'line-basic' },
   },
   group: {
     name: '组合',
@@ -483,9 +527,11 @@ export interface TrendCurve {
   /** 该曲线单独的 Y 轴量程；留空 = 按自身数据自动缩放（多曲线默认） */
   min?: number
   max?: number
-  /** 显示单位（图例 / 悬停读数 / 游标读数 / 点表 / CSV）；留空 = 不显示 */
+  /**
+   * 旧工程按曲线存的单位。显示已改读变量上的单位，新保存不再写这个字段。
+   */
   unit?: string
-  /** 显示小数位 0~6；留空 = 按量级自适应（原来的表现） */
+  /** 旧工程按曲线存的小数位。显示已改读变量上的小数位。 */
   decimals?: number
 }
 
@@ -516,6 +562,59 @@ export function formatTrendValue(value: number | null | undefined, format?: Tren
   const unit = typeof format?.unit === 'string' ? format.unit.trim() : ''
   if (text === '—' || !unit) return text
   return `${text} ${unit}`
+}
+
+/** 饼图 / 柱状图的一项。选了变量后运行时用变量当前值；value 只是设计端没开实时预览时的画面数字。 */
+export interface ChartSlice {
+  label: string
+  value: number
+  color?: string
+  tagId?: string
+}
+
+/** 一个饼图或柱状图最多几项 */
+export const CHART_SLICE_MAX = 8
+
+/** 柱状图柱宽（像素）。没填时用默认值；绘制时还会按格子收窄，避免叠在一起。 */
+export const BAR_WIDTH_DEFAULT = 28
+export const BAR_WIDTH_MIN = 4
+export const BAR_WIDTH_MAX = 160
+
+export function barWidthOf(props: Record<string, unknown> | undefined | null): number {
+  const n = Number(props?.barWidth)
+  if (!Number.isFinite(n)) return BAR_WIDTH_DEFAULT
+  return Math.max(BAR_WIDTH_MIN, Math.min(BAR_WIDTH_MAX, Math.round(n)))
+}
+
+/**
+ * 读 props.slices。空名称、未选变量的行也保留，方便内容配置里继续编辑。
+ */
+export function chartSlices(props: Record<string, unknown> | undefined | null): ChartSlice[] {
+  const raw = props?.slices
+  if (!Array.isArray(raw)) return []
+  const out: ChartSlice[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const rec = item as Record<string, unknown>
+    const label = typeof rec.label === 'string' ? rec.label : ''
+    const value = Number(rec.value)
+    const color = typeof rec.color === 'string' && rec.color.trim() ? rec.color : undefined
+    const tagId = typeof rec.tagId === 'string' ? rec.tagId.trim() : ''
+    out.push({
+      label,
+      value: Number.isFinite(value) ? value : 0,
+      ...(color ? { color } : {}),
+      ...(tagId ? { tagId } : {}),
+    })
+    if (out.length >= CHART_SLICE_MAX) break
+  }
+  return out
+}
+
+export function chartSliceTagIds(props: Record<string, unknown> | undefined | null): string[] {
+  return chartSlices(props)
+    .map((slice) => slice.tagId)
+    .filter((id): id is string => Boolean(id))
 }
 
 /** 一个趋势图元最多绑定的曲线数 */

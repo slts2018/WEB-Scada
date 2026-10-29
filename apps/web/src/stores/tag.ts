@@ -192,7 +192,7 @@ export const useTagStore = defineStore('tag', () => {
       for (const meta of metas.value) {
         if (!meta.deviceId || !mockIds.has(meta.deviceId)) continue
         if (subscribed.value.size && !subscribed.value.has(meta.tagId)) continue
-        const scan = Math.max(200, meta.scanPeriodMs ?? 1000)
+        const scan = Math.max(50, meta.scanPeriodMs ?? 1000)
         const scanSlot = Math.floor(nowMs / scan)
         if (scanSlots.get(meta.tagId) === scanSlot) continue
         scanSlots.set(meta.tagId, scanSlot)
@@ -214,7 +214,7 @@ export const useTagStore = defineStore('tag', () => {
         changed.push(meta.tagId)
       }
       if (changed.length) notify(changed)
-    }, 200)
+    }, 50)
   }
 
   async function refreshAlarmHistory() {

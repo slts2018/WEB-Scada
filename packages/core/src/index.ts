@@ -44,6 +44,13 @@ export {
   trendCurves,
   trendCurveTagIds,
   trendCurveColor,
+  chartSlices,
+  chartSliceTagIds,
+  barWidthOf,
+  CHART_SLICE_MAX,
+  BAR_WIDTH_DEFAULT,
+  BAR_WIDTH_MIN,
+  BAR_WIDTH_MAX,
   resolveTrendRange,
   formatTrendNumber,
   formatTrendValue,
@@ -56,6 +63,7 @@ export type {
   WidgetPaletteItem,
   TrendCurve,
   TrendValueFormat,
+  ChartSlice,
 } from './factory/widget'
 export {
   createObject3D,

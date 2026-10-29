@@ -8,6 +8,7 @@
  */
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { formatTrendValue, type TrendValueFormat } from '@web-scada/core'
+import { tagDisplayFormat } from '@/shared/runtime/tagDisplay'
 import { onTrendHistoryCursor, trendHistoryCursorOf } from '@/shared/runtime/trendHistoryCursor'
 import {
   TREND_TABLE_PAGE_SIZES,
@@ -29,7 +30,7 @@ export interface TrendTableCurve {
 
 const props = defineProps<{
   widgetId: string
-  /** 曲线的单位 / 小数位（表头与数值按它显示） */
+  /** 曲线列表（单位和小数位从变量读） */
   curves?: TrendTableCurve[]
 }>()
 
@@ -41,7 +42,8 @@ const wrap = ref<HTMLDivElement | null>(null)
 const formatOf = computed(() => {
   const map = new Map<string, TrendValueFormat>()
   for (const curve of props.curves ?? []) {
-    map.set(curve.tagId, { unit: curve.unit, decimals: curve.decimals })
+    if (!curve.tagId) continue
+    map.set(curve.tagId, tagDisplayFormat(curve.tagId))
   }
   return map
 })

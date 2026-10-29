@@ -2,7 +2,7 @@
  * 3D 面板（跟镜头 HTML 面板）里的历史趋势工具条。
  *
  * 为什么单独挂一层：面板内容是 Konva 画的（`panelKonvaRuntime`），工具栏是 Vue 组件，
- * 直接复用 2D 画面上那一份 `TrendHistoryToolbar`（区间 / 缩放 / 跟随 / 采样间隔 / 点表 /
+ * 直接复用 2D 画面上那一份 `TrendHistoryToolbar`（起止时间 / 缩放 / 跟随 / 采样间隔 / 点表 /
  * 导出 / 快捷键提示全都有），位置仍按图元矩形算 —— 面板里 Konva 是 1:1 像素，
  * 所以矩形就是面板内的 CSS 像素，不用再做缩放换算。
  *
@@ -38,7 +38,6 @@ interface PanelTrendTable {
 
 interface PanelTrendBar {
   id: string
-  preset: string
   tagIds: string[]
   curves: Array<{ tagId: string; label?: string; unit?: string; decimals?: number }>
   allowEdit: boolean
@@ -101,7 +100,6 @@ export function mountPanelTrendToolbars(
       }
       next.push({
         id: widget.id,
-        preset: String(widget.props.range ?? '-1h'),
         tagIds: curves.map((curve) => curve.tagId).filter(Boolean),
         curves: curves.map((curve) => ({
           tagId: curve.tagId,
@@ -120,7 +118,7 @@ export function mountPanelTrendToolbars(
       next
         .map(
           (bar) =>
-            `${bar.id}:${Math.round(bar.x)},${Math.round(bar.y)},${Math.round(bar.w)},${Math.round(bar.h)},${bar.preset},${bar.tagIds.join('+')}`,
+            `${bar.id}:${Math.round(bar.x)},${Math.round(bar.y)},${Math.round(bar.w)},${Math.round(bar.h)},${bar.tagIds.join('+')}`,
         )
         .join('|') +
       '##' +
@@ -146,7 +144,6 @@ export function mountPanelTrendToolbars(
           h(TrendHistoryToolbar, {
             key: bar.id,
             widgetId: bar.id,
-            preset: bar.preset,
             tagIds: bar.tagIds,
             curves: bar.curves,
             allowEdit: bar.allowEdit,

@@ -113,13 +113,29 @@ function mapRange(
 
 function matchColorRange(
   value: TagValue['value'],
-  range: { min?: number; max?: number; equals?: number | boolean | string; color: string; blink?: boolean },
+  range: {
+    min?: number
+    max?: number
+    equals?: number | boolean | string
+    notEquals?: boolean
+    minExclusive?: boolean
+    maxExclusive?: boolean
+    color: string
+    blink?: boolean
+  },
 ): boolean {
-  if (range.equals !== undefined) return value === range.equals
+  if (range.equals !== undefined) {
+    const eq = value === range.equals
+    return range.notEquals ? !eq : eq
+  }
   const num = asNumber(value)
   if (num === null) return false
-  if (range.min !== undefined && num < range.min) return false
-  if (range.max !== undefined && num > range.max) return false
+  if (range.min !== undefined) {
+    if (range.minExclusive ? num <= range.min : num < range.min) return false
+  }
+  if (range.max !== undefined) {
+    if (range.maxExclusive ? num >= range.max : num > range.max) return false
+  }
   return range.min !== undefined || range.max !== undefined
 }
 

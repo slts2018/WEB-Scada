@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="48px" height="48px" viewBox="0 0 48 48" version="1.1" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+    <title>icon_摄像头</title>
+    <defs>
+        <polygon id="path-1" points="0 0 48 0 48 48 0 48"></polygon>
+    </defs>
+    <g id="大屏可视化-案例" stroke="none" stroke-width="1" fill="none" fill-rule="evenodd">
+        <g id="智慧楼宇" transform="translate(-72.000000, -196.000000)">
+            <g id="编组-13备份-16" transform="translate(40.000000, 104.000000)">
+                <g id="编组-22备份" transform="translate(16.000000, 76.000000)">
+                    <g id="icon_摄像头" transform="translate(16.000000, 16.000000)">
+                        <mask id="mask-2" fill="white">
+                            <use xlink:href="#path-1"></use>
+                        </mask>
+                        <use id="矩形" fill-opacity="0.08" fill="#FF9F40" fill-rule="nonzero" xlink:href="#path-1"></use>
+                        <g id="边缘装饰线" mask="url(#mask-2)">
+                            <path d="M38.4,0 L48,0 L48,9.6 M48,38.4 L48,48 L38.4,48 M9.6,48 L0,48 L0,38.4 M0,9.6 L0,0 L9.6,0" id="形状" stroke="#FF9F40" stroke-width="2" opacity="0.300000012" fill-rule="nonzero"></path>
+                            <g id="矩形-2" fill="#FF9F40">
+                                <rect id="矩形" x="0" y="0" width="2" height="2"></rect>
+                                <rect id="矩形" x="46" y="0" width="2" height="2"></rect>
+                                <rect id="矩形" x="0" y="46" width="2" height="2"></rect>
+                                <rect id="矩形" x="46" y="46" width="2" height="2"></rect>
+                            </g>
+                        </g>
+                        <g id="编组" mask="url(#mask-2)">
+                            <g transform="translate(8.000000, 8.000000)">
+                                <polygon id="Fill-1" fill="none" points="0 31.9986001 31.9986001 31.9986001 31.9986001 0 0 0"></polygon>
+                                <path d="M0,23.99895 L21.9990375,23.99895 L21.9990375,7.99965002 L0,7.99965002 L0,23.99895 Z M1.9999125,21.9990375 L19.999125,21.9990375 L19.999125,9.99956252 L1.9999125,9.99956252 L1.9999125,21.9990375 Z M23.9983501,13.9993875 L23.9983501,17.9992125 L32,22.0010375 L32,9.99956252 L23.9983501,13.9993875 Z M26.0002625,16.7632666 L26.0002625,15.2353335 L30.0000875,13.235421 L30.0000875,18.7631791 L26.0002625,16.7632666 Z" id="形状结合" fill="#FF9F40" fill-rule="evenodd"></path>
+                            </g>
+                        </g>
+                    </g>
+                </g>
+            </g>
+        </g>
+    </g>
+</svg>

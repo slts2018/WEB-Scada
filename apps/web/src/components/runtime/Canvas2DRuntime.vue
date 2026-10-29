@@ -11,6 +11,7 @@ import type {
 } from '@web-scada/core'
 import { trendCurves } from '@web-scada/core'
 import { createRuntimeStage, type RuntimeStageBundle } from '@/shared/konva/createRuntimeStage'
+import { openRuntimeAlarmMenu } from '@/shared/runtime/alarmAckMenu'
 import {
   collectPageTagIds,
   isWidgetRuntimeEnabled,
@@ -25,7 +26,7 @@ import WriteTagDialog from '@/components/dialogs/WriteTagDialog.vue'
 import Canvas3DRuntime from '@/components/runtime/Canvas3DRuntime.vue'
 import { object3dTreeSignature } from '@/shared/project/object3dTree'
 import { historyPagerClientRect, historySearchClientRect } from '@/shared/runtime/alarmHistoryQuery'
-import { trendToolbarClientRect } from '@/shared/runtime/trendHistoryQuery'
+import { onTrendToolbarHeight, trendToolbarClientRect } from '@/shared/runtime/trendHistoryQuery'
 import {
   onWidgetFullscreenChange,
   setWidgetFullscreen,
@@ -70,6 +71,7 @@ let removeListener: (() => void) | null = null
 let stopSchedules: (() => void) | null = null
 let offFullscreen: (() => void) | null = null
 let offTrendTable: (() => void) | null = null
+let offToolbarHeight: (() => void) | null = null
 /** valueChange 上一帧采样 */
 const lastTagSnapshot = new Map<string, string>()
 
@@ -161,7 +163,6 @@ let trendTableSignature: string | null = null
 
 type TrendBar = {
   id: string
-  preset: string
   tagIds: string[]
   /** 每曲线的显示格式（单位 / 小数位，属性面板配的） */
   curves: Array<{ tagId: string; label?: string; unit?: string; decimals?: number }>
@@ -263,7 +264,6 @@ function syncTrendBars() {
       const curves = trendCurves(widget.props)
       next.push({
         id: widget.id,
-        preset: String(widget.props.range ?? '-1h'),
         tagIds: curves.map((curve) => curve.tagId).filter(Boolean),
         curves: curves.map((curve) => ({
           tagId: curve.tagId,
@@ -379,11 +379,18 @@ function syncScene3dOverlays() {
     return
   }
   const next: Scene3dSlot[] = []
-  let paintOrder = 0
   const focusId = widgetFullscreenId()
-  for (const widget of allWidgets(props.page)) {
-    paintOrder += 1
-    if (widget.type !== 'scene3d' || widget.visible === false) continue
+  const painted: Widget2D[] = []
+  for (const layer of props.page.layers) {
+    if (!layer.visible) continue
+    for (const widget of layer.widgets) {
+      if (widget.visible === false) continue
+      painted.push(widget)
+    }
+  }
+  for (let i = 0; i < painted.length; i++) {
+    const widget = painted[i]!
+    if (widget.type !== 'scene3d') continue
     // 最大化某个图元时，其余图元（含三维）都不显示
     if (focusId) continue
     const page3d = resolveScene3dPage(String(widget.props.page3dId || ''))
@@ -395,13 +402,61 @@ function syncScene3dOverlays() {
       widgetId: widget.id,
       page: page3d,
       interactive,
-      // 可交互：盖过 .host(z=10000)，否则模型点选进不了 WebGL（Konva 热区/转发不可靠）
-      // 仅展示：仍垫在 Konva 下作背景
-      zIndex: interactive ? 10000 + paintOrder : paintOrder,
+      // 垫在 Konva 下面。图元层按顺序挖洞后，排在后面的图元盖住三维，其余地方露出模型。
+      zIndex: i + 1,
       rect,
     })
   }
   scene3dSlots.value = next
+}
+
+function paintIndexOf(widgetId: string): number {
+  let index = 0
+  for (const layer of props.page.layers) {
+    if (!layer.visible) continue
+    for (const widget of layer.widgets) {
+      if (widget.visible === false) continue
+      if (widget.id === widgetId) return index
+      index += 1
+    }
+  }
+  return -1
+}
+
+function widgetIdFromHit(node: { id?: () => string; getAttr?: (key: string) => unknown; getParent?: () => unknown } | null): string | null {
+  let current = node
+  while (current) {
+    const attr = current.getAttr?.('widgetId')
+    if (typeof attr === 'string' && attr) return attr
+    const id = current.id?.()
+    if (id && bundle?.getSourceWidget(id)) return id
+    current = current.getParent?.() as typeof current
+  }
+  return null
+}
+
+/** 指针在三维的可见区域时，让开 Konva，事件落到下面的 WebGL。 */
+function routeScene3dPointer(event: PointerEvent) {
+  const hostEl = host.value
+  if (!hostEl || !bundle) return
+  const box = hostEl.getBoundingClientRect()
+  const x = event.clientX - box.left
+  const y = event.clientY - box.top
+  let scene: Scene3dSlot | null = null
+  for (const slot of scene3dSlots.value) {
+    const r = slot.rect
+    if (x >= r.x && x <= r.x + r.width && y >= r.y && y <= r.y + r.height) scene = slot
+  }
+  if (!scene?.interactive) {
+    hostEl.style.pointerEvents = 'auto'
+    return
+  }
+  const hit = bundle.stage.getIntersection({ x, y })
+  const hitId = widgetIdFromHit(hit)
+  const hitIndex = hitId ? paintIndexOf(hitId) : -1
+  const sceneIndex = paintIndexOf(scene.widgetId)
+  const widgetCoversScene = hitIndex > sceneIndex
+  hostEl.style.pointerEvents = widgetCoversScene ? 'auto' : 'none'
 }
 
 function tagSnapshot(tagId: string): string {
@@ -659,10 +714,8 @@ onMounted(() => {
     onDragWrite: (id, axis, tagId, value) => {
       void handleDragWrite(id, axis, tagId, value)
     },
-    onAlarmAck: (alarmId) => {
-      void tags.ackAlarm(alarmId).then((res) => {
-        if (!res.ok) ElMessage.error(res.message)
-      })
+    onAlarmContextMenu: (alarmId, clientX, clientY) => {
+      openRuntimeAlarmMenu(alarmId, clientX, clientY)
     },
     onHistoryRowPick,
   }, { chartInteraction: true })
@@ -670,6 +723,10 @@ onMounted(() => {
     syncScene3dOverlays()
     syncHistoryBars()
     syncTrendBars()
+  })
+  offToolbarHeight = onTrendToolbarHeight(() => {
+    syncTrendBars()
+    bundle?.syncOverlays()
   })
   setupSubscription(props.page)
   offFullscreen = onWidgetFullscreenChange(syncFullscreen)
@@ -711,6 +768,8 @@ watch(
 )
 
 onUnmounted(() => {
+  offToolbarHeight?.()
+  offToolbarHeight = null
   firePageTrigger('unload')
   offFullscreen?.()
   offFullscreen = null
@@ -738,11 +797,12 @@ onUnmounted(() => {
   }
   bundle?.dispose()
   bundle = null
+  if (host.value) host.value.style.pointerEvents = ''
 })
 </script>
 
 <template>
-  <div class="runtime-board">
+  <div class="runtime-board" @pointermove="routeScene3dPointer">
     <div ref="host" class="host" />
     <AlarmHistorySearchBar
       v-for="bar in historyBars"
@@ -758,7 +818,6 @@ onUnmounted(() => {
       class="history-search"
       :class="{ 'is-maximized': bar.fullscreen }"
       :widget-id="bar.id"
-      :preset="bar.preset"
       :tag-ids="bar.tagIds"
       :curves="bar.curves"
       :allow-edit="bar.allowEdit"
@@ -857,7 +916,7 @@ onUnmounted(() => {
 
 .scene3d-overlay {
   position: absolute;
-  /* zIndex 由 slot 写入：可交互 > host(10000)，仅展示 < host */
+  /* 垫在 .host 下面，由挖洞露出；zIndex 只用于多个三维互相遮挡 */
   z-index: 1;
   overflow: hidden;
   pointer-events: auto;

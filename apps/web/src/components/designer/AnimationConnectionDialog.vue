@@ -254,6 +254,85 @@ function updateRangeField(
   updateActiveLink({ [key]: Number(value) || 0 })
 }
 
+/** 颜色分段条件：比较符 + 单个值（落到 equals / min / max） */
+type ColorCompareOp = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte'
+
+const COLOR_COMPARE_OPS: { value: ColorCompareOp; label: string }[] = [
+  { value: 'eq', label: '等于' },
+  { value: 'neq', label: '不等于' },
+  { value: 'gt', label: '大于' },
+  { value: 'gte', label: '大于等于' },
+  { value: 'lt', label: '小于' },
+  { value: 'lte', label: '小于等于' },
+]
+
+function parseColorCompareValue(raw: string): number | boolean | string | undefined {
+  const v = raw.trim()
+  if (v === '') return undefined
+  if (v === 'true') return true
+  if (v === 'false') return false
+  const n = Number(v)
+  return Number.isNaN(n) ? v : n
+}
+
+function colorRangeOp(range: AnimationColorRange): ColorCompareOp {
+  if (range.equals !== undefined) return range.notEquals ? 'neq' : 'eq'
+  if (range.min !== undefined && range.max === undefined) return range.minExclusive ? 'gt' : 'gte'
+  if (range.max !== undefined && range.min === undefined) return range.maxExclusive ? 'lt' : 'lte'
+  // 旧数据同时有 min/max：编辑时按「大于等于 min」展示，改条件会收成单值
+  if (range.min !== undefined) return range.minExclusive ? 'gt' : 'gte'
+  if (range.max !== undefined) return range.maxExclusive ? 'lt' : 'lte'
+  return 'eq'
+}
+
+function colorRangeValueText(range: AnimationColorRange): string {
+  if (range.equals !== undefined) return String(range.equals)
+  const op = colorRangeOp(range)
+  if ((op === 'gt' || op === 'gte') && range.min !== undefined) return String(range.min)
+  if ((op === 'lt' || op === 'lte') && range.max !== undefined) return String(range.max)
+  return ''
+}
+
+function colorRangeFromOp(
+  op: ColorCompareOp,
+  value: number | boolean | string | undefined,
+  base: Pick<AnimationColorRange, 'color' | 'blink'>,
+): AnimationColorRange {
+  const next: AnimationColorRange = { color: base.color, blink: base.blink }
+  if (value === undefined) {
+    if (op === 'eq' || op === 'neq') next.equals = true
+    else if (op === 'gt' || op === 'gte') next.min = 0
+    else next.max = 0
+    if (op === 'neq') next.notEquals = true
+    if (op === 'gt') next.minExclusive = true
+    if (op === 'lt') next.maxExclusive = true
+    return next
+  }
+  if (op === 'eq') {
+    next.equals = value
+    return next
+  }
+  if (op === 'neq') {
+    next.equals = value
+    next.notEquals = true
+    return next
+  }
+  const num = typeof value === 'number' ? value : Number(value)
+  const n = Number.isFinite(num) ? num : 0
+  if (op === 'gt') {
+    next.min = n
+    next.minExclusive = true
+  } else if (op === 'gte') {
+    next.min = n
+  } else if (op === 'lt') {
+    next.max = n
+    next.maxExclusive = true
+  } else {
+    next.max = n
+  }
+  return next
+}
+
 function updateColorRange(index: number, next: Partial<AnimationColorRange>) {
   const link = ensureLink()
   if (!link || (link.type !== 'colorFill' && link.type !== 'colorStroke' && link.type !== 'colorFill2'))
@@ -262,12 +341,45 @@ function updateColorRange(index: number, next: Partial<AnimationColorRange>) {
   updateActiveLink({ ranges })
 }
 
+/** 整行重写条件字段，避免旧的 equals/min/max 残留 */
+function replaceColorRange(index: number, next: AnimationColorRange) {
+  const link = ensureLink()
+  if (!link || (link.type !== 'colorFill' && link.type !== 'colorStroke' && link.type !== 'colorFill2'))
+    return
+  updateActiveLink({ ranges: link.ranges.map((r, i) => (i === index ? next : r)) })
+}
+
+function setColorRangeOp(index: number, op: ColorCompareOp) {
+  const link = ensureLink()
+  if (!link || (link.type !== 'colorFill' && link.type !== 'colorStroke' && link.type !== 'colorFill2'))
+    return
+  const cur = link.ranges[index]
+  if (!cur) return
+  const value = parseColorCompareValue(colorRangeValueText(cur))
+  replaceColorRange(index, colorRangeFromOp(op, value, { color: cur.color, blink: cur.blink }))
+}
+
+function setColorRangeValue(index: number, raw: string) {
+  const link = ensureLink()
+  if (!link || (link.type !== 'colorFill' && link.type !== 'colorStroke' && link.type !== 'colorFill2'))
+    return
+  const cur = link.ranges[index]
+  if (!cur) return
+  replaceColorRange(
+    index,
+    colorRangeFromOp(colorRangeOp(cur), parseColorCompareValue(raw), {
+      color: cur.color,
+      blink: cur.blink,
+    }),
+  )
+}
+
 function addColorRange() {
   const link = ensureLink()
   if (!link || (link.type !== 'colorFill' && link.type !== 'colorStroke' && link.type !== 'colorFill2'))
     return
   updateActiveLink({
-    ranges: [...link.ranges, { min: 0, max: 50, color: '#3d8bfd', blink: false }],
+    ranges: [...link.ranges, { equals: 0, color: '#3d8bfd', blink: false }],
   })
 }
 
@@ -282,7 +394,7 @@ function addBinding() {
   const tagId = tags.metas[0]?.tagId
   if (!target.value || !tagId) return
   const prop: BindableProp = is3d.value ? 'color' : 'text'
-  patchBindings([...target.value.bindings, createBinding(prop, tagId, is3d.value ? undefined : 'fixed:1')])
+  patchBindings([...target.value.bindings, createBinding(prop, tagId)])
 }
 
 function updateBinding(index: number, next: Partial<PropBinding>) {
@@ -480,7 +592,7 @@ function outLabel(type: AnimationLinkType): string {
               <el-option
                 v-for="item in tags.list"
                 :key="item.meta.tagId"
-                :label="formatTagOptionLabel(item.meta, item.value?.quality)"
+                :label="formatTagOptionLabel(item.meta)"
                 :value="item.meta.tagId"
               />
             </el-select>
@@ -547,7 +659,7 @@ function outLabel(type: AnimationLinkType): string {
                   <el-option
                     v-for="item in tags.list.filter((t) => t.meta.writable)"
                     :key="item.meta.tagId"
-                    :label="formatTagOptionLabel(item.meta, item.value?.quality)"
+                    :label="formatTagOptionLabel(item.meta)"
                     :value="item.meta.tagId"
                   />
                 </el-select>
@@ -643,7 +755,7 @@ function outLabel(type: AnimationLinkType): string {
               <el-option
                 v-for="item in tags.list"
                 :key="item.meta.tagId"
-                :label="formatTagOptionLabel(item.meta, item.value?.quality)"
+                :label="formatTagOptionLabel(item.meta)"
                 :value="item.meta.tagId"
               />
             </el-select>
@@ -742,45 +854,28 @@ function outLabel(type: AnimationLinkType): string {
               <el-button size="small" @click="addColorRange">插入行</el-button>
             </div>
             <div v-for="(r, i) in activeLink.ranges" :key="i" class="card col">
-              <div class="row">
-                <span>等于</span>
+              <div class="row range-row">
+                <el-select
+                  size="small"
+                  class="op-select"
+                  popper-class="anim-connection-select-dropdown"
+                  :model-value="colorRangeOp(r)"
+                  @update:model-value="(v: ColorCompareOp) => setColorRangeOp(i, v)"
+                >
+                  <el-option
+                    v-for="opt in COLOR_COMPARE_OPS"
+                    :key="opt.value"
+                    :label="opt.label"
+                    :value="opt.value"
+                  />
+                </el-select>
                 <el-input
                   size="small"
-                  style="width: 72px"
-                  :model-value="r.equals === undefined ? '' : String(r.equals)"
-                  placeholder="可选"
-                  @update:model-value="
-                    (v: string) =>
-                      updateColorRange(i, {
-                        equals:
-                          v === ''
-                            ? undefined
-                            : v === 'true'
-                              ? true
-                              : v === 'false'
-                                ? false
-                                : Number.isNaN(Number(v))
-                                  ? v
-                                  : Number(v),
-                      })
-                  "
+                  class="value-input"
+                  :model-value="colorRangeValueText(r)"
+                  placeholder="值"
+                  @update:model-value="(v: string) => setColorRangeValue(i, v)"
                 />
-                <span>min</span>
-                <el-input-number
-                  size="small"
-                  controls-position="right"
-                  :model-value="r.min"
-                  @update:model-value="(v: number | undefined) => updateColorRange(i, { min: v ?? undefined })"
-                />
-                <span>max</span>
-                <el-input-number
-                  size="small"
-                  controls-position="right"
-                  :model-value="r.max"
-                  @update:model-value="(v: number | undefined) => updateColorRange(i, { max: v ?? undefined })"
-                />
-              </div>
-              <div class="row">
                 <span>颜色</span>
                 <el-color-picker
                   size="small"
@@ -805,12 +900,10 @@ function outLabel(type: AnimationLinkType): string {
                 size="small"
                 clearable
                 popper-class="anim-connection-select-dropdown"
-                :model-value="activeLink.format"
+                :model-value="activeLink.format?.startsWith('fixed:') ? '' : activeLink.format"
                 @update:model-value="(v: string) => updateActiveLink({ format: v || undefined })"
               >
-                <el-option label="默认" value="" />
-                <el-option label="一位小数" value="fixed:1" />
-                <el-option label="两位小数" value="fixed:2" />
+                <el-option label="按变量小数位" value="" />
                 <el-option label="布尔 ON/OFF" value="bool" />
               </el-select>
             </label>
@@ -979,12 +1072,20 @@ function outLabel(type: AnimationLinkType): string {
   gap: 4px;
   font-size: 12px;
   color: var(--scada-muted);
+  min-width: 0;
+}
+
+.field :deep(.el-select),
+.field :deep(.el-input) {
+  width: 100%;
+  max-width: 420px;
 }
 
 .field-row {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
+  grid-template-columns: 160px 160px;
+  gap: 12px 16px;
+  justify-content: start;
 }
 
 .card {
@@ -1010,6 +1111,20 @@ function outLabel(type: AnimationLinkType): string {
   flex-wrap: wrap;
 }
 
+.range-row {
+  flex-wrap: wrap;
+}
+
+.op-select {
+  width: 108px;
+  flex: 0 0 108px;
+}
+
+.value-input {
+  width: 96px;
+  flex: 0 0 96px;
+}
+
 .empty {
   font-size: 12px;
   color: var(--scada-muted);
@@ -1027,7 +1142,12 @@ function outLabel(type: AnimationLinkType): string {
 }
 
 :deep(.el-input-number) {
+  width: 108px;
+}
+
+.field :deep(.el-input-number) {
   width: 100%;
+  max-width: 160px;
 }
 </style>
 

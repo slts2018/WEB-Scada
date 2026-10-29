@@ -27,8 +27,8 @@ export interface RuntimeStageHandlers {
   /** @deprecated 请用 onWidgetEvent；保留兼容 */
   onWidgetClick?: (widgetId: string, events: EventBinding[]) => void
   onAnimationInput?: (widgetId: string) => void
-  /** 实时报警行被点击，确认这一条 */
-  onAlarmAck?: (alarmId: string) => void
+  /** 实时报警行右键：弹出确认菜单（坐标为视口坐标） */
+  onAlarmContextMenu?: (alarmId: string, clientX: number, clientY: number) => void
   /** 历史报警行被点击：反向联动到历史趋势（跳到这一条的时刻） */
   onHistoryRowPick?: (widgetId: string, at: number, tagId?: string) => void
   onDragWrite?: (
@@ -174,14 +174,15 @@ export function createRuntimeStage(
     repaint: () => syncTrendOverlays(),
   })
 
-  /** 同步原生 ECharts：位置、数据，以及位图是否还要画 */
-  const syncTrendOverlays = () => {
+  /** 同步原生 ECharts：位置、数据，以及位图是否还要画。layoutOnly = 只改位置尺寸（视口变化） */
+  const syncTrendOverlays = (layoutOnly = false) => {
     syncNativeTrendCharts({
       stage,
       widgetLayer,
       widgets: allWidgetsOf().map((widget) => sourceWidgetOf(widget.id) ?? widget),
       overlay: trendLiveOverlay,
       interactive: overlayInteractive,
+      layoutOnly,
     })
   }
   const fitToView = () => {
@@ -196,8 +197,8 @@ export function createRuntimeStage(
     })
     stage.batchDraw()
     viewChangeListener?.()
-    // 视图变了：原生叠层的位置/字号跟着重算
-    syncTrendOverlays()
+    // 视图变了：只改叠层位置/字号，不重灌曲线数据
+    syncTrendOverlays(true)
   }
 
   /**
@@ -243,7 +244,7 @@ export function createRuntimeStage(
     })
     stage.batchDraw()
     viewChangeListener?.()
-    syncTrendOverlays()
+    syncTrendOverlays(true)
   }
 
   const setFocusWidget = (widgetId: string | null) => {
@@ -390,10 +391,7 @@ export function createRuntimeStage(
       e.cancelBubble = true
       if (spacePressed) return
       const alarmId = e.target?.getAttr?.('alarmId')
-      if (alarmWidget && alarmId) {
-        handlers.onAlarmAck?.(String(alarmId))
-        return
-      }
+      if (alarmWidget && alarmId) return
       // 历史报警：行上带"事件时刻"，点了就把同一画面的历史趋势跳过去
       if (historyWidget) {
         const at = Number(e.target?.getAttr?.('alarmAt'))
@@ -410,11 +408,22 @@ export function createRuntimeStage(
       if (spacePressed || !interactive) return
       emitClickOrDbl('dblclick')
     })
+    if (alarmWidget) {
+      node.on('contextmenu', (e) => {
+        e.cancelBubble = true
+        if (spacePressed) return
+        const alarmId = e.target?.getAttr?.('alarmId')
+        if (!alarmId) return
+        e.evt?.preventDefault?.()
+        const evt = e.evt as MouseEvent | undefined
+        handlers.onAlarmContextMenu?.(String(alarmId), evt?.clientX ?? 0, evt?.clientY ?? 0)
+      })
+    }
   }
 
   /**
-   * scene3d 挖洞必须在背景层：与图元同层时 destination-out 会抹掉
-   * 排在 scene3d 之前的兄弟图元，运行时看起来像「窜位」。
+   * 背景挖洞：页底色让开，底下的三维 HTML 才能露出来。
+   * 图元层再按绘制顺序挖一次：只抹掉排在三维前面的图元，后面的图元随后画上，盖住三维。
    */
   const syncScene3dHole = (widget: Widget2D) => {
     const holeId = `scene3d-hole:${widget.id}`
@@ -437,6 +446,7 @@ export function createRuntimeStage(
           fill: '#000',
           globalCompositeOperation: 'destination-out',
           listening: false,
+          perfectDrawEnabled: false,
         }),
       )
       bgLayer.add(hole)
@@ -451,6 +461,38 @@ export function createRuntimeStage(
         child.height(height)
       }
     }
+  }
+
+  /** 图元层上的挖洞，必须插在「后面的图元」之前。 */
+  const syncScene3dCover = (widget: Widget2D) => {
+    const coverId = `scene3d-cover:${widget.id}`
+    let cover = widgetLayer.findOne(`#${coverId}`) as Konva.Rect | null
+    if (widget.visible === false) {
+      cover?.destroy()
+      return
+    }
+    const { x, y, width, height, rotation } = widget.transform
+    if (!cover) {
+      cover = new Konva.Rect({
+        id: coverId,
+        name: 'scene3d-cover',
+        fill: '#000',
+        globalCompositeOperation: 'destination-out',
+        listening: false,
+        perfectDrawEnabled: false,
+      })
+      widgetLayer.add(cover)
+    }
+    cover.setAttrs({
+      x,
+      y,
+      width,
+      height,
+      rotation,
+      scaleX: widget.transform.scaleX ?? 1,
+      scaleY: widget.transform.scaleY ?? 1,
+      visible: focusId == null || focusId === widget.id,
+    })
   }
 
   /**
@@ -515,6 +557,7 @@ export function createRuntimeStage(
         if (widget.visible === false) continue
         if (widget.type === 'scene3d') {
           syncScene3dHole(widget)
+          syncScene3dCover(widget)
           const node = createScene3dRuntimeNode(widget)
           bindNodeEvents(node, widget)
           widgetLayer.add(node)
@@ -538,6 +581,7 @@ export function createRuntimeStage(
       if (!node) {
         if (visual.visible === false) return
         syncScene3dHole(visual)
+        syncScene3dCover(visual)
         const created = createScene3dRuntimeNode(visual)
         bindNodeEvents(created, source ?? visual)
         widgetLayer.add(created)
@@ -548,6 +592,7 @@ export function createRuntimeStage(
       if (visual.visible === false) {
         node.visible(false)
         syncScene3dHole(visual)
+        syncScene3dCover(visual)
         bgLayer.batchDraw()
         widgetLayer.batchDraw()
         return
@@ -565,6 +610,7 @@ export function createRuntimeStage(
         }
       }
       syncScene3dHole(visual)
+      syncScene3dCover(visual)
       bgLayer.batchDraw()
       widgetLayer.batchDraw()
       return

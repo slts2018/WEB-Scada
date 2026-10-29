@@ -51,12 +51,13 @@ public class TagFileStore {
         raw.address(),
         raw.dataType(),
         raw.unit(),
+        clampDecimals(raw.decimals()),
         raw.writable(),
         raw.description(),
         raw.simulation(),
         blankToNull(raw.onText()),
         blankToNull(raw.offText()),
-        clampPeriod(raw.scanPeriodMs()),
+        clampScan(raw.scanPeriodMs()),
         raw.pushEnabled(),
         clampPeriod(raw.pushPeriodMs()),
         normalizeHistory(raw.history()));
@@ -69,7 +70,7 @@ public class TagFileStore {
         .jdbc()
         .query(
             """
-            SELECT tag_id, name, tag_group, device_id, address, data_type, unit, writable, description, simulation_json,
+            SELECT tag_id, name, tag_group, device_id, address, data_type, unit, decimals, writable, description, simulation_json,
                    on_text, off_text, scan_period_ms, push_enabled, push_period_ms, history_json
             FROM tags ORDER BY tag_group IS NULL, tag_group ASC, tag_id ASC
             """,
@@ -83,6 +84,7 @@ public class TagFileStore {
                         blankToNull(rs.getString("address")),
                         rs.getString("data_type"),
                         blankToNull(rs.getString("unit")),
+                        clampDecimals(readInt(rs, "decimals")),
                         rs.getBoolean("writable"),
                         blankToNull(rs.getString("description")),
                         readSimulation(rs.getString("simulation_json")),
@@ -141,9 +143,9 @@ public class TagFileStore {
         .update(
             """
             INSERT INTO tags
-              (tag_id, name, tag_group, device_id, address, data_type, unit, writable, description, simulation_json,
+              (tag_id, name, tag_group, device_id, address, data_type, unit, decimals, writable, description, simulation_json,
                on_text, off_text, scan_period_ms, push_enabled, push_period_ms, history_json, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
               name = VALUES(name),
               tag_group = VALUES(tag_group),
@@ -151,6 +153,7 @@ public class TagFileStore {
               address = VALUES(address),
               data_type = VALUES(data_type),
               unit = VALUES(unit),
+              decimals = VALUES(decimals),
               writable = VALUES(writable),
               description = VALUES(description),
               simulation_json = VALUES(simulation_json),
@@ -169,6 +172,7 @@ public class TagFileStore {
             next.address(),
             next.dataType(),
             next.unit(),
+            next.decimals(),
             next.writable() ? 1 : 0,
             next.description(),
             writeSimulation(next.simulation()),
@@ -264,6 +268,18 @@ public class TagFileStore {
     int interval = history.intervalMs() == null ? 1000 : Math.max(200, Math.min(history.intervalMs(), 86_400_000));
     double band = history.deadband() == null ? 0 : Math.max(0, history.deadband());
     return new TagHistory(true, mode, interval, band);
+  }
+
+  /** 负数表示清空（界面留空 = 按量级自适应）。0～6 以外的值夹紧。 */
+  private static Integer clampDecimals(Integer n) {
+    if (n == null) return null;
+    if (n < 0) return null;
+    return Math.min(6, n);
+  }
+
+  private static Integer clampScan(Integer ms) {
+    if (ms == null) return null;
+    return Math.max(50, Math.min(ms, 86_400_000));
   }
 
   private static Integer clampPeriod(Integer ms) {
