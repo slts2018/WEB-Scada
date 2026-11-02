@@ -39,6 +39,16 @@ webscada:
     timeout-ms: ${MCD4000_TIMEOUT_MS:15000}
     # 数据中台 HTTPS 证书常不被 JVM 信任；默认放行，可用 MCD4000_INSECURE_SSL=false 关闭
     insecure-ssl: ${MCD4000_INSECURE_SSL:true}
+  # 设备协议 modbus_tcp：按变量 address 轮询，写入 Tag 运行时（变量表实时值）
+  modbus:
+    enabled: ${MODBUS_ENABLED:true}
+    poll-ms: ${MODBUS_POLL_MS:1000}
+    unit-id: ${MODBUS_UNIT_ID:1}
+    connect-timeout-ms: ${MODBUS_CONNECT_TIMEOUT_MS:2000}
+    response-timeout-ms: ${MODBUS_RESPONSE_TIMEOUT_MS:2000}
+    low-word-first: ${MODBUS_LOW_WORD_FIRST:true}
+    # 逐点成功 DEBUG；掉线/写值/点失败仍走 INFO/WARN
+    trace: ${MODBUS_TRACE:false}
   # 通信骨架默认关闭，避免没有链路配置时启动失败。打开后才会拉起 Supervisor。
   comm:
     enabled: false

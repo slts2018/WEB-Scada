@@ -386,6 +386,27 @@ export async function apiDeleteDevice(deviceId: string): Promise<void> {
   await request(`/devices/${encodeURIComponent(deviceId)}`, { method: 'DELETE' })
 }
 
+/** 一次性连通性探测（按当前表单协议/通道，无需先保存） */
+export async function apiTestDeviceConnection(input: {
+  protocol: DeviceMeta['protocol']
+  channel?: string
+  deviceId?: string
+}): Promise<{ ok: boolean; message: string }> {
+  return request('/devices/test-connection', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+}
+
+/** 立即对全部可探测设备做连通性检测，并返回状态快照 */
+export async function apiProbeDevicesNow(): Promise<{
+  ok: boolean
+  probed: number
+  items: DeviceLinkStatus[]
+}> {
+  return request('/devices/probe-now', { method: 'POST' })
+}
+
 export async function apiWriteTag(
   tagId: string,
   value: boolean | number | string | null,

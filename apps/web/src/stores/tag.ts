@@ -14,6 +14,7 @@ import {
 } from '@web-scada/core'
 import { useDeviceStore } from './device'
 import {
+  ApiError,
   apiCreateTag,
   apiDeleteTag,
   apiListActiveAlarms,
@@ -139,8 +140,13 @@ export const useTagStore = defineStore('tag', () => {
         const res = await apiWriteTag(tagId, value)
         if (res.value) applyValues([res.value])
         return { ok: res.ok, message: res.ok ? '写值成功' : res.message }
-      } catch {
-        return { ok: false, message: '写值请求失败' }
+      } catch (e) {
+        const body = e instanceof ApiError ? e.body : undefined
+        const fromBody =
+          body && typeof body === 'object' && body !== null && 'message' in body
+            ? String((body as { message: unknown }).message || '').trim()
+            : ''
+        return { ok: false, message: fromBody || '写值请求失败' }
       }
     }
 
@@ -275,28 +281,38 @@ export const useTagStore = defineStore('tag', () => {
     }
 
     void hydrateFromServer().then((ok) => {
+      if (!wantLive) return
       if (!ok) {
         stopHistoryPoll()
         startMockStream()
         return
       }
+      // 并发 hydrate 时可能已有连接，避免再建一条并在错误 socket 上 send
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        startHistoryPoll()
+        return
+      }
       startHistoryPoll()
+      let socket: WebSocket
       try {
-        ws = new WebSocket(tagsWebSocketUrl())
+        socket = new WebSocket(tagsWebSocketUrl())
       } catch {
         startMockStream()
         return
       }
+      ws = socket
 
-      ws.onopen = () => {
+      socket.onopen = () => {
+        if (ws !== socket || socket.readyState !== WebSocket.OPEN) return
         connected.value = true
         mode.value = 'live'
         if (subscribed.value.size) {
-          ws?.send(JSON.stringify({ type: 'subscribe', tagIds: [...subscribed.value] }))
+          socket.send(JSON.stringify({ type: 'subscribe', tagIds: [...subscribed.value] }))
         }
       }
 
-      ws.onmessage = (ev) => {
+      socket.onmessage = (ev) => {
+        if (ws !== socket) return
         try {
           const msg = JSON.parse(String(ev.data)) as {
             type: string
@@ -334,16 +350,18 @@ export const useTagStore = defineStore('tag', () => {
         }
       }
 
-      ws.onclose = () => {
-        connected.value = false
-        ws = null
+      socket.onclose = () => {
+        if (ws === socket) {
+          connected.value = false
+          ws = null
+        }
         if (!wantLive) return
         reconnectTimer = setTimeout(() => {
           if (wantLive) connectRealtime()
         }, 2000)
       }
 
-      ws.onerror = () => {
+      socket.onerror = () => {
         // onclose will handle reconnect / fallback
       }
     })

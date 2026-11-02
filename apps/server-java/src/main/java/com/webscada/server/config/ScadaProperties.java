@@ -8,6 +8,7 @@ public class ScadaProperties {
   private final Influx influx = new Influx();
   private final Auth auth = new Auth();
   private final Mcd4000 mcd4000 = new Mcd4000();
+  private final Modbus modbus = new Modbus();
 
   public Mysql getMysql() {
     return mysql;
@@ -23,6 +24,10 @@ public class ScadaProperties {
 
   public Mcd4000 getMcd4000() {
     return mcd4000;
+  }
+
+  public Modbus getModbus() {
+    return modbus;
   }
 
   public static class Mysql {
@@ -218,6 +223,75 @@ public class ScadaProperties {
 
     public void setInsecureSsl(boolean insecureSsl) {
       this.insecureSsl = insecureSsl;
+    }
+  }
+
+  /** 设备协议 modbus_tcp：按变量 address 轮询/写值 */
+  public static class Modbus {
+    private boolean enabled = true;
+    private long pollMs = 1000;
+    private int unitId = 1;
+    private int connectTimeoutMs = 2000;
+    private int responseTimeoutMs = 2000;
+    /** true=低字在前（协议20040401 V0 示例）；false=高字在前 */
+    private boolean lowWordFirst = true;
+    /** true 时打 DEBUG 逐点成功摘要（默认关，避免刷屏） */
+    private boolean trace = false;
+
+    public boolean isEnabled() {
+      return enabled;
+    }
+
+    public void setEnabled(boolean enabled) {
+      this.enabled = enabled;
+    }
+
+    public long getPollMs() {
+      return pollMs;
+    }
+
+    public void setPollMs(long pollMs) {
+      this.pollMs = pollMs;
+    }
+
+    public int getUnitId() {
+      return unitId;
+    }
+
+    public void setUnitId(int unitId) {
+      this.unitId = unitId;
+    }
+
+    public int getConnectTimeoutMs() {
+      return connectTimeoutMs;
+    }
+
+    public void setConnectTimeoutMs(int connectTimeoutMs) {
+      this.connectTimeoutMs = connectTimeoutMs;
+    }
+
+    public int getResponseTimeoutMs() {
+      return responseTimeoutMs;
+    }
+
+    public void setResponseTimeoutMs(int responseTimeoutMs) {
+      this.responseTimeoutMs = responseTimeoutMs;
+    }
+
+    public boolean isLowWordFirst() {
+      return lowWordFirst;
+    }
+
+    public void setLowWordFirst(boolean lowWordFirst) {
+      this.lowWordFirst = lowWordFirst;
+    }
+
+    public boolean isTrace() {
+      return trace;
+    }
+
+    public void setTrace(boolean trace) {
+      this.trace = trace;
     }
   }
 }

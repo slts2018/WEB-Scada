@@ -2,8 +2,11 @@ package com.webscada.server.web;
 
 import com.webscada.server.model.ApiError;
 import com.webscada.server.model.DeviceMeta;
+import com.webscada.server.service.DeviceConnectionProbeService;
+import com.webscada.server.service.DeviceConnectivityMonitor;
 import com.webscada.server.service.DeviceStatusService;
 import com.webscada.server.store.DeviceFileStore;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -18,10 +21,18 @@ import org.springframework.web.bind.annotation.RestController;
 public class DeviceController {
   private final DeviceFileStore devices;
   private final DeviceStatusService linkStatus;
+  private final DeviceConnectionProbeService probe;
+  private final DeviceConnectivityMonitor monitor;
 
-  public DeviceController(DeviceFileStore devices, DeviceStatusService linkStatus) {
+  public DeviceController(
+      DeviceFileStore devices,
+      DeviceStatusService linkStatus,
+      DeviceConnectionProbeService probe,
+      DeviceConnectivityMonitor monitor) {
     this.devices = devices;
     this.linkStatus = linkStatus;
+    this.probe = probe;
+    this.monitor = monitor;
   }
 
   @GetMapping("/api/devices")
@@ -32,6 +43,38 @@ public class DeviceController {
   @GetMapping("/api/devices/status")
   public Map<String, Object> status() throws Exception {
     return Map.of("items", linkStatus.snapshot(devices.list()));
+  }
+
+  /** 立即对全部可探测设备做连通性检测，并返回最新状态快照。 */
+  @PostMapping("/api/devices/probe-now")
+  public Map<String, Object> probeNow() throws Exception {
+    int probed = monitor.probeAll();
+    Map<String, Object> out = new LinkedHashMap<>();
+    out.put("ok", true);
+    out.put("probed", probed);
+    out.put("items", linkStatus.snapshot(devices.list()));
+    return out;
+  }
+
+  /** 按表单中的协议/通道做一次性连通性探测（可不先保存设备）。 */
+  @PostMapping("/api/devices/test-connection")
+  public ResponseEntity<?> testConnection(@RequestBody Map<String, Object> body) {
+    if (body == null || body.get("protocol") == null) {
+      return ResponseEntity.badRequest().body(ApiError.of("invalid_device_body"));
+    }
+    String protocol = String.valueOf(body.get("protocol"));
+    String channel = body.get("channel") == null ? "" : String.valueOf(body.get("channel"));
+    Map<String, Object> result = probe.probe(protocol, channel);
+    Object deviceIdRaw = body.get("deviceId");
+    if (deviceIdRaw != null) {
+      String deviceId = String.valueOf(deviceIdRaw).trim();
+      if (!deviceId.isEmpty() && DeviceConnectivityMonitor.isProbeable(protocol)) {
+        boolean ok = Boolean.TRUE.equals(result.get("ok"));
+        String message = result.get("message") == null ? null : String.valueOf(result.get("message"));
+        linkStatus.report(deviceId, ok, ok ? "online" : "offline", message);
+      }
+    }
+    return ResponseEntity.ok(result);
   }
 
   @PostMapping("/api/devices")
@@ -88,6 +131,7 @@ public class DeviceController {
       if (!devices.delete(deviceId)) {
         return ResponseEntity.status(404).body(ApiError.of("device_not_found"));
       }
+      linkStatus.clear(deviceId);
       return ResponseEntity.ok(Map.of("ok", true));
     } catch (IllegalStateException e) {
       return ResponseEntity.status(503)

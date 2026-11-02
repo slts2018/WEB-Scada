@@ -7,7 +7,14 @@ import HelpTip from '@/components/designer/HelpTip.vue'
 import { useTagStore } from '@/stores/tag'
 import { useDeviceStore } from '@/stores/device'
 import { qualityTagType } from '@/shared/runtime/tagLabel'
-import { ApiError, apiCreateAlarm, apiDeleteAlarm, apiListAlarms, apiUpdateAlarm } from '@/shared/api/client'
+import {
+  ApiError,
+  apiCreateAlarm,
+  apiDeleteAlarm,
+  apiListAlarms,
+  apiTestDeviceConnection,
+  apiUpdateAlarm,
+} from '@/shared/api/client'
 import {
   emptyConnFields,
   formatDeviceChannel,
@@ -41,6 +48,7 @@ const editorTab = ref<'basic' | 'sim' | 'alarm' | 'history'>('basic')
 const editingId = ref<string | null>(null)
 const deviceEditorOpen = ref(false)
 const editingDeviceId = ref<string | null>(null)
+const testingConnection = ref(false)
 const importInput = ref<HTMLInputElement | null>(null)
 
 const form = reactive({
@@ -197,7 +205,7 @@ watch(
   () => props.modelValue && mainTab.value === 'devices',
   (on) => {
     if (on) {
-      void devices.refreshStatus()
+      void devices.probeNow()
       startStatusPoll()
     } else {
       stopStatusPoll()
@@ -212,7 +220,7 @@ function deviceStatusLabel(deviceId: string) {
   if (state === 'online') return '在线'
   if (state === 'offline') return '离线'
   if (state === 'disabled') return '停用'
-  if (state === 'unsupported') return '未接入'
+  if (state === 'unsupported') return '不支持'
   if (state === 'unknown') return '检测中'
   return '-'
 }
@@ -387,6 +395,21 @@ async function saveEditor() {
     ElMessage.warning('必须绑定设备')
     return
   }
+  if (formDeviceProtocol.value === 'modbus_tcp') {
+    const off = tagAddr.mbOffset.trim()
+    if (off && !/^\d+$/.test(off)) {
+      ElMessage.warning('字地址须为 0～65535 的整数')
+      return
+    }
+    const bit = tagAddr.mbBit.trim()
+    if (bit) {
+      const n = Number(bit)
+      if (!Number.isInteger(n) || n < 0 || n > 15) {
+        ElMessage.warning('位号须为 0～15（空表示读整字）')
+        return
+      }
+    }
+  }
   saving.value = true
   try {
     const payload: TagMeta = {
@@ -461,6 +484,41 @@ function openEditDevice(meta: DeviceMeta) {
   deviceEditorOpen.value = true
 }
 
+async function testDeviceConnection() {
+  if (deviceForm.protocol === 'mock') {
+    ElMessage.success('Mock 设备无需网络连接')
+    return
+  }
+  if (deviceForm.protocol === 'other') {
+    ElMessage.warning('该协议不支持测试连接')
+    return
+  }
+  const channel = formatDeviceChannel(deviceForm.protocol, deviceConn)
+  if (!channel) {
+    ElMessage.warning('请先填写连接信息')
+    return
+  }
+  testingConnection.value = true
+  try {
+    const res = await apiTestDeviceConnection({
+      protocol: deviceForm.protocol,
+      channel,
+      deviceId: deviceForm.deviceId.trim() || undefined,
+    })
+    if (res.ok) ElMessage.success(res.message || '连接成功')
+    else ElMessage.error(res.message || '连接失败')
+    await devices.refreshStatus()
+  } catch (e) {
+    const msg =
+      e instanceof ApiError && e.body && typeof e.body === 'object' && 'error' in e.body
+        ? String((e.body as { error?: string }).error)
+        : '测试连接失败（请确认后端已重启）'
+    ElMessage.error(msg)
+  } finally {
+    testingConnection.value = false
+  }
+}
+
 async function saveDeviceEditor() {
   if (!deviceForm.name.trim()) {
     ElMessage.warning('名称必填')
@@ -486,6 +544,7 @@ async function saveDeviceEditor() {
       await devices.createDevice(payload)
       ElMessage.success('已新建设备')
     }
+    void devices.probeNow()
     deviceEditorOpen.value = false
   } catch {
     ElMessage.error('保存失败')
@@ -1018,8 +1077,18 @@ async function removeAlarm(alarmId: string) {
           <el-tag size="small" :type="devices.mode === 'live' ? 'success' : 'warning'">
             {{ devices.mode === 'live' ? '服务端' : '本地 Mock' }}
           </el-tag>
-          <span class="hint">设备元数据存 MySQL；真采集协议对接见后续 IO 阶段</span>
+          <span class="hint">
+            状态：在线/离线由后台自动探测（约 15 秒）；Mock 恒在线；MCD4000 走采集轮询
+          </span>
           <div class="spacer" />
+          <el-button
+            size="small"
+            :loading="devices.probing"
+            :disabled="devices.mode !== 'live'"
+            @click="devices.probeNow()"
+          >
+            立即检测
+          </el-button>
           <el-button size="small" :loading="loading" @click="refresh">刷新</el-button>
           <el-button size="small" type="primary" @click="openCreateDevice">新建设备</el-button>
         </div>
@@ -1145,12 +1214,12 @@ async function removeAlarm(alarmId: string) {
         </label>
       </template>
 
-      <!-- Modbus TCP -->
-      <template v-else-if="formDeviceProtocol === 'modbus_tcp'">
+      <!-- Modbus TCP：与检测柜一致，字地址 或 字地址.位号（三栏同一行） -->
+      <div v-else-if="formDeviceProtocol === 'modbus_tcp'" class="wide mb-addr-row">
         <label>
           <span class="cfg-label">
             寄存器区
-            <HelpTip content="线圈/离散输入/输入寄存器/保持寄存器。" />
+            <HelpTip content="现场柜侧 DI/DO 位通常用 Holding Register；Coil / Discrete 仅在设备按区映射时使用。" />
           </span>
           <el-select v-model="tagAddr.mbArea">
             <el-option
@@ -1163,12 +1232,19 @@ async function removeAlarm(alarmId: string) {
         </label>
         <label>
           <span class="cfg-label">
-            偏移地址
-            <HelpTip content="从 0 起的偏移；保存为 holding:0 这类格式。" />
+            字地址
+            <HelpTip content="保持寄存器字偏移，从 0 起。例：DI0 整字填 144。保存为 holding:144。" />
           </span>
-          <el-input v-model="tagAddr.mbOffset" placeholder="如 0 / 8" />
+          <el-input v-model="tagAddr.mbOffset" placeholder="如 144" />
         </label>
-      </template>
+        <label>
+          <span class="cfg-label">
+            位号（可选）
+            <HelpTip content="空=读整字。填 0～15 表示字内某一 bit（与检测柜 144.1 相同）。例：DI0 第2位 → 字 144、位 1，保存 holding:144.1。" />
+          </span>
+          <el-input v-model="tagAddr.mbBit" placeholder="空=整字；0～15" maxlength="2" />
+        </label>
+      </div>
 
       <!-- OPC UA -->
       <template v-else-if="formDeviceProtocol === 'opcua'">
@@ -1521,7 +1597,7 @@ async function removeAlarm(alarmId: string) {
       <label class="wide">
         <span class="cfg-label">
           协议
-          <HelpTip content="Mock / MCD4000 已接运行时取值；Modbus/OPC/MQTT/HTTP 目前仅保存连接元数据。" />
+          <HelpTip content="列表状态会自动探测连通性。Mock/MCD4000 另有运行时取值；Modbus 等协议的变量采集仍待 Comm 接入。" />
         </span>
         <el-select
           :model-value="deviceForm.protocol"
@@ -1679,6 +1755,13 @@ async function removeAlarm(alarmId: string) {
       </label>
     </div>
     <template #footer>
+      <el-button
+        :loading="testingConnection"
+        :disabled="deviceForm.protocol === 'other'"
+        @click="testDeviceConnection"
+      >
+        测试连接
+      </el-button>
       <el-button @click="deviceEditorOpen = false">取消</el-button>
       <el-button type="primary" :loading="saving" @click="saveDeviceEditor">保存</el-button>
     </template>
@@ -1768,6 +1851,22 @@ async function removeAlarm(alarmId: string) {
 .form > .wide,
 .form > .proto-alert {
   grid-column: 1 / -1;
+}
+
+.mb-addr-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.8fr) minmax(0, 0.8fr);
+  gap: 12px;
+  align-items: end;
+}
+
+.mb-addr-row > label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--scada-muted);
+  min-width: 0;
 }
 
 .hidden-file {

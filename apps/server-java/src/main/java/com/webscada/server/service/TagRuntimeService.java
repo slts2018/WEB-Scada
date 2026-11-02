@@ -6,6 +6,7 @@ import com.webscada.server.comm.CommFacade;
 import com.webscada.server.comm.config.CommProperties;
 import com.webscada.server.comm.config.DataPoint;
 import com.webscada.server.db.InfluxHolder;
+import com.webscada.server.device.modbus.ModbusTagIo;
 
 import com.webscada.server.mock.MockTagData;
 
@@ -78,6 +79,8 @@ public class TagRuntimeService {
 
   private final ObjectProvider<CommFacade> commProvider;
 
+  private final ObjectProvider<ModbusTagIo> modbusIoProvider;
+
   /** 单测直接塞入的通信入口。生产路径走 commProvider，开关关闭时为空。 */
   private final CommFacade commOverride;
 
@@ -126,6 +129,8 @@ public class TagRuntimeService {
 
       ObjectProvider<CommFacade> comm,
 
+      ObjectProvider<ModbusTagIo> modbusIo,
+
       CommProperties commProperties) {
 
     this(
@@ -135,6 +140,7 @@ public class TagRuntimeService {
         influx,
         alarms,
         comm,
+        modbusIo,
         null,
         commProperties != null && commProperties.isAllowWrite());
 
@@ -156,6 +162,8 @@ public class TagRuntimeService {
 
       ObjectProvider<CommFacade> commProvider,
 
+      ObjectProvider<ModbusTagIo> modbusIoProvider,
+
       CommFacade commOverride,
 
       boolean commAllowWrite) {
@@ -171,6 +179,8 @@ public class TagRuntimeService {
     this.alarms = alarms;
 
     this.commProvider = commProvider;
+
+    this.modbusIoProvider = modbusIoProvider;
 
     this.commOverride = commOverride;
 
@@ -191,7 +201,7 @@ public class TagRuntimeService {
 
   public static TagRuntimeService memory(CommFacade comm) {
 
-    return new TagRuntimeService(null, null, null, null, null, null, comm, false);
+    return new TagRuntimeService(null, null, null, null, null, null, null, comm, false);
 
   }
 
@@ -230,9 +240,20 @@ public class TagRuntimeService {
 
 
   public List<TagValue> getCurrentValues() {
-
+    reconcileValuesWithTypes();
     return new ArrayList<>(values.values());
+  }
 
+  /** 已有运行时值与 meta.dataType 不一致时重置为类型默认值。 */
+  private void reconcileValuesWithTypes() {
+    for (TagMeta meta : metas) {
+      if (meta == null || meta.tagId() == null) continue;
+      TagValue cur = values.get(meta.tagId());
+      if (cur == null) continue;
+      if (!valueCompatible(meta.dataType(), cur.value())) {
+        values.put(meta.tagId(), now(meta.tagId(), defaultValueForType(meta.dataType()), "Good"));
+      }
+    }
   }
 
 
@@ -307,33 +328,18 @@ public class TagRuntimeService {
     }
 
     for (TagMeta meta : metas) {
-
-      if (!values.containsKey(meta.tagId())) {
-
+      TagValue cur = values.get(meta.tagId());
+      if (cur == null) {
         TagValue initial = seed.get(meta.tagId());
-
-        if (initial != null) values.put(meta.tagId(), initial);
-
-        else {
-
-          Object fallback =
-
-              switch (meta.dataType()) {
-
-                case "bool" -> false;
-
-                case "string" -> "";
-
-                default -> 0;
-
-              };
-
-          values.put(meta.tagId(), now(meta.tagId(), fallback, "Good"));
-
+        if (initial != null && valueCompatible(meta.dataType(), initial.value())) {
+          values.put(meta.tagId(), initial);
+        } else {
+          values.put(meta.tagId(), now(meta.tagId(), defaultValueForType(meta.dataType()), "Good"));
         }
-
+      } else if (!valueCompatible(meta.dataType(), cur.value())) {
+        // 类型变更后丢弃旧运行时值，避免 float 仍显示 true/false
+        values.put(meta.tagId(), now(meta.tagId(), defaultValueForType(meta.dataType()), "Good"));
       }
-
     }
 
     values.keySet().removeIf(id -> metas.stream().noneMatch(m -> m.tagId().equals(id)));
@@ -450,10 +456,36 @@ public class TagRuntimeService {
 
     if (isCommDriven(meta)) return writeComm(meta, normalized);
 
+    if (isModbusDriven(meta)) {
+      WriteResult modbusOut = writeModbus(meta, normalized);
+      if (!modbusOut.ok()) return modbusOut;
+      TagValue next = setTagValue(tagId, normalized, "Good");
+      return WriteResult.ok(next);
+    }
+
     TagValue next = setTagValue(tagId, normalized, "Good");
 
     return WriteResult.ok(next);
 
+  }
+
+  private boolean isModbusDriven(TagMeta meta) {
+    if (meta == null || modbusIoProvider == null) return false;
+    ModbusTagIo io = modbusIoProvider.getIfAvailable();
+    return io != null && io.drivesDevice(meta.deviceId());
+  }
+
+  private WriteResult writeModbus(TagMeta meta, Object value) {
+    ModbusTagIo io = modbusIoProvider == null ? null : modbusIoProvider.getIfAvailable();
+    if (io == null) return WriteResult.fail("modbus io unavailable");
+    try {
+      io.write(meta, value); // 内部已打 write ok/fail 日志
+      return WriteResult.ok(null);
+    } catch (Exception e) {
+      io.invalidateOnError(meta.deviceId(), e);
+      String msg = e.getMessage() == null ? e.toString() : e.getMessage();
+      return WriteResult.fail("modbus write failed: " + msg);
+    }
   }
 
 
@@ -703,7 +735,27 @@ public class TagRuntimeService {
 
   }
 
+  /** 运行时值是否与元数据 dataType 一致（改类型后需重置）。 */
+  static boolean valueCompatible(String dataType, Object value) {
+    if (value == null) return false;
+    String dt = dataType == null ? "" : dataType;
+    return switch (dt) {
+      case "bool" -> value instanceof Boolean;
+      case "int", "float" -> value instanceof Number;
+      case "string" -> value instanceof String;
+      default -> true;
+    };
+  }
 
+  static Object defaultValueForType(String dataType) {
+    String dt = dataType == null ? "" : dataType;
+    return switch (dt) {
+      case "bool" -> false;
+      case "string" -> "";
+      case "float" -> 0.0;
+      default -> 0; // int 及其他数值
+    };
+  }
 
   private static boolean toBool(Object v) {
 
