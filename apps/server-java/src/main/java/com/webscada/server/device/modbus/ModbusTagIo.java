@@ -5,14 +5,14 @@ import com.webscada.server.model.DeviceMeta;
 import com.webscada.server.model.TagMeta;
 import com.webscada.server.service.DeviceStatusService;
 import com.webscada.server.store.DeviceFileStore;
+import java.nio.charset.StandardCharsets;
 import java.util.Locale;
-import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
-/** Modbus TCP 变量读写（按 Tag.address 解析），不依赖 webscada.comm 骨架。 */
+/** Modbus TCP 变量读写（按 Tag.address 解析），对齐 Flight 类型/长度/字序。 */
 @Service
 public class ModbusTagIo {
   private static final Logger log = LoggerFactory.getLogger(ModbusTagIo.class);
@@ -21,6 +21,7 @@ public class ModbusTagIo {
   private final DeviceStatusService status;
   private final ScadaProperties props;
   private final ConcurrentHashMap<String, ModbusTcpClient> clients = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, ModbusChannel> channels = new ConcurrentHashMap<>();
   private final ModbusAcqLog acqLog = new ModbusAcqLog();
 
   public ModbusTagIo(DeviceFileStore devices, DeviceStatusService status, ScadaProperties props) {
@@ -56,8 +57,9 @@ public class ModbusTagIo {
     if (dev == null) throw new IllegalStateException("device not found");
     ModbusAddress addr = ModbusAddress.parse(meta.address());
     if (addr == null) throw new IllegalArgumentException("bad address: " + meta.address());
-    ModbusTcpClient client = clientFor(dev);
-    Object value = readValue(client, meta, addr);
+    ModbusChannel ch = channelFor(dev);
+    ModbusTcpClient client = clientFor(dev, ch);
+    Object value = readValue(client, ch, meta, addr);
     return new ReadOk(value, "Good");
   }
 
@@ -70,8 +72,9 @@ public class ModbusTagIo {
       throw new IllegalStateException("area not writable: " + addr.area());
     }
     try {
-      ModbusTcpClient client = clientFor(dev);
-      writeValue(client, meta, addr, value);
+      ModbusChannel ch = channelFor(dev);
+      ModbusTcpClient client = clientFor(dev, ch);
+      writeValue(client, ch, meta, addr, value);
       log.info(
           "modbus write ok device={} tag={} addr={} value={}",
           meta.deviceId(),
@@ -97,23 +100,40 @@ public class ModbusTagIo {
 
   public void dropClient(String deviceId) {
     ModbusTcpClient c = clients.remove(deviceId);
+    channels.remove(deviceId);
     if (c != null) {
       c.close();
       acqLog.info(log, "close:" + deviceId, "modbus session closed device={}", deviceId);
     }
   }
 
-  private ModbusTcpClient clientFor(DeviceMeta dev) throws Exception {
-    HostPort hp = HostPort.parse(dev.channel());
-    if (hp == null) throw new IllegalStateException("invalid channel");
+  private ModbusChannel channelFor(DeviceMeta dev) {
+    ModbusChannel ch = ModbusChannel.parse(dev.channel());
+    if (ch == null) throw new IllegalStateException("invalid channel");
+    // 若全局仍配置 lowWordFirst=false，且 channel 未显式写排序，则双字用 SwapNone
+    if (dev.channel() != null && !dev.channel().contains("|") && !props.getModbus().isLowWordFirst()) {
+      ch = new ModbusChannel(ch.host(), ch.port(), ch.wordSwap(), ModbusSwap.SwapNone);
+    }
+    return ch;
+  }
+
+  private ModbusTcpClient clientFor(DeviceMeta dev, ModbusChannel ch) throws Exception {
     ScadaProperties.Modbus cfg = props.getModbus();
     String key = dev.deviceId();
+    ModbusChannel prevCh = channels.get(key);
+    if (prevCh != null
+        && (!prevCh.host().equals(ch.host())
+            || prevCh.port() != ch.port()
+            || prevCh.wordSwap() != ch.wordSwap()
+            || prevCh.dwordSwap() != ch.dwordSwap())) {
+      dropClient(key);
+    }
     ModbusTcpClient existing = clients.get(key);
     if (existing != null) return existing;
     ModbusTcpClient created =
         new ModbusTcpClient(
-            hp.host,
-            hp.port,
+            ch.host(),
+            ch.port(),
             cfg.getUnitId(),
             cfg.getConnectTimeoutMs(),
             cfg.getResponseTimeoutMs());
@@ -122,20 +142,40 @@ public class ModbusTagIo {
       created.close();
       return prev;
     }
+    channels.put(key, ch);
     acqLog.info(
         log,
         "open:" + key,
-        "modbus session open device={} {}:{} unit={}",
+        "modbus session open device={} {}:{} unit={} word={} dword={}",
         key,
-        hp.host,
-        hp.port,
-        cfg.getUnitId());
+        ch.host(),
+        ch.port(),
+        cfg.getUnitId(),
+        ch.wordSwap(),
+        ch.dwordSwap());
     return created;
   }
 
-  private Object readValue(ModbusTcpClient client, TagMeta meta, ModbusAddress addr)
-      throws Exception {
-    String dt = meta.dataType() == null ? "float" : meta.dataType();
+  static String normalizeType(String dataType) {
+    if (dataType == null || dataType.isBlank()) return "float";
+    return dataType.trim().toLowerCase(Locale.ROOT);
+  }
+
+  /** 旧 int ≡ short；字数可由地址 #len 覆盖 */
+  static int resolveLength(String dt, ModbusAddress addr) {
+    if (addr.bit() != null) return 1;
+    if (addr.length() != null) return addr.length();
+    return switch (normalizeType(dt)) {
+      case "bool", "byte", "char", "short", "word", "int", "string" -> 1;
+      case "float", "long", "dword" -> 2;
+      case "double", "llong", "qword" -> 4;
+      default -> 1;
+    };
+  }
+
+  private Object readValue(
+      ModbusTcpClient client, ModbusChannel ch, TagMeta meta, ModbusAddress addr) throws Exception {
+    String dt = normalizeType(meta.dataType());
     if (addr.isCoilSpace()) {
       boolean[] bits = client.readBits(addr.readFc(), addr.offset(), 1);
       boolean on = bits.length > 0 && bits[0];
@@ -143,61 +183,176 @@ public class ModbusTagIo {
     }
     if ("bool".equals(dt) || addr.bit() != null) {
       int[] regs = client.readRegisters(addr.readFc(), addr.offset(), 1);
-      int word = regs[0] & 0xffff;
+      int[] ordered = applyWordSwap(regs, ch.wordSwap());
+      int word = ordered[0] & 0xffff;
       int bit = addr.bit() != null ? addr.bit() : 0;
       boolean on = ((word >> bit) & 1) != 0;
       return "bool".equals(dt) ? on : (on ? 1 : 0);
     }
-    if ("float".equals(dt)) {
-      int[] regs = client.readRegisters(addr.readFc(), addr.offset(), 2);
-      return decodeFloat32(regs[0], regs[1], props.getModbus().isLowWordFirst());
-    }
-    // int / string → 单寄存器
-    int[] regs = client.readRegisters(addr.readFc(), addr.offset(), 1);
-    int raw = regs[0] & 0xffff;
-    if ("string".equals(dt)) return String.valueOf(raw);
-    // 有符号 int16
-    return (raw & 0x8000) != 0 ? raw - 65536 : raw;
+
+    int len = resolveLength(dt, addr);
+    int[] regs = client.readRegisters(addr.readFc(), addr.offset(), len);
+    ModbusSwap swap = len >= 2 ? ch.dwordSwap() : ch.wordSwap();
+    int[] ordered = applySwap(regs, swap);
+
+    return switch (dt) {
+      case "byte" -> ordered[0] & 0xff;
+      case "char" -> String.valueOf((char) (ordered[0] & 0xff));
+      case "word" -> ordered[0] & 0xffff;
+      case "short", "int" -> {
+        int raw = ordered[0] & 0xffff;
+        yield (raw & 0x8000) != 0 ? raw - 65536 : raw;
+      }
+      case "float" -> decodeFloat32(ordered[0], ordered.length > 1 ? ordered[1] : 0);
+      case "long" -> decodeInt32(ordered, true);
+      case "dword" -> decodeInt32(ordered, false);
+      case "double" -> decodeFloat64(ordered);
+      case "llong" -> decodeInt64(ordered, true);
+      case "qword" -> decodeInt64(ordered, false);
+      case "string" -> decodeString(ordered);
+      default -> {
+        int raw = ordered[0] & 0xffff;
+        yield (raw & 0x8000) != 0 ? raw - 65536 : raw;
+      }
+    };
   }
 
-  private void writeValue(ModbusTcpClient client, TagMeta meta, ModbusAddress addr, Object value)
+  private void writeValue(
+      ModbusTcpClient client, ModbusChannel ch, TagMeta meta, ModbusAddress addr, Object value)
       throws Exception {
-    String dt = meta.dataType() == null ? "float" : meta.dataType();
+    String dt = normalizeType(meta.dataType());
     if ("coil".equals(addr.area())) {
       client.writeCoil(addr.offset(), toBool(value));
       return;
     }
-    // holding
     if ("bool".equals(dt) || addr.bit() != null) {
       int bit = addr.bit() != null ? addr.bit() : 0;
       int[] regs = client.readRegisters(3, addr.offset(), 1);
-      int word = regs[0] & 0xffff;
+      int[] ordered = applyWordSwap(regs, ch.wordSwap());
+      int word = ordered[0] & 0xffff;
       int mask = 1 << bit;
       word = toBool(value) ? (word | mask) : (word & ~mask);
-      client.writeSingleRegister(addr.offset(), word);
+      int[] wire = applyWordSwap(new int[] {word}, ch.wordSwap()); // swap is involution for bytes
+      client.writeSingleRegister(addr.offset(), wire[0] & 0xffff);
       return;
     }
-    if ("float".equals(dt)) {
-      int[] words = encodeFloat32(toDouble(value), props.getModbus().isLowWordFirst());
-      client.writeRegisters(addr.offset(), words);
-      return;
+
+    int len = resolveLength(dt, addr);
+    int[] logical =
+        switch (dt) {
+          case "byte" -> new int[] {((int) Math.rint(toDouble(value))) & 0xff};
+          case "char" -> {
+            String s = String.valueOf(value);
+            int c = s.isEmpty() ? 0 : s.charAt(0) & 0xff;
+            yield new int[] {c};
+          }
+          case "word" -> new int[] {((int) Math.rint(toDouble(value))) & 0xffff};
+          case "short", "int" -> new int[] {((int) Math.rint(toDouble(value))) & 0xffff};
+          case "float" -> encodeFloat32(toDouble(value));
+          case "long" -> encodeInt32((long) Math.rint(toDouble(value)), true);
+          case "dword" -> encodeInt32((long) Math.rint(toDouble(value)), false);
+          case "double" -> encodeFloat64(toDouble(value));
+          case "llong" -> encodeInt64(toLong(value), true);
+          case "qword" -> encodeInt64(toLong(value), false);
+          case "string" -> encodeString(String.valueOf(value), len);
+          default -> new int[] {((int) Math.rint(toDouble(value))) & 0xffff};
+        };
+
+    ModbusSwap swap = len >= 2 ? ch.dwordSwap() : ch.wordSwap();
+    int[] wire = applySwap(logical, swap);
+    if (wire.length == 1) {
+      client.writeSingleRegister(addr.offset(), wire[0] & 0xffff);
+    } else {
+      client.writeRegisters(addr.offset(), wire);
     }
-    int v = (int) Math.rint(toDouble(value));
-    client.writeSingleRegister(addr.offset(), v & 0xffff);
   }
 
-  static double decodeFloat32(int reg0, int reg1, boolean lowWordFirst) {
-    int hi = lowWordFirst ? (reg1 & 0xffff) : (reg0 & 0xffff);
-    int lo = lowWordFirst ? (reg0 & 0xffff) : (reg1 & 0xffff);
-    int bits = (hi << 16) | lo;
+  private static int[] applyWordSwap(int[] regs, ModbusSwap swap) {
+    byte[] bytes = ModbusSwap.regsToBytes(regs);
+    bytes = swap.apply(bytes, regs.length);
+    return ModbusSwap.bytesToRegs(bytes);
+  }
+
+  private static int[] applySwap(int[] regs, ModbusSwap swap) {
+    byte[] bytes = ModbusSwap.regsToBytes(regs);
+    bytes = swap.apply(bytes, regs.length);
+    return ModbusSwap.bytesToRegs(bytes);
+  }
+
+  static double decodeFloat32(int reg0, int reg1) {
+    int bits = ((reg0 & 0xffff) << 16) | (reg1 & 0xffff);
     return Float.intBitsToFloat(bits);
   }
 
-  static int[] encodeFloat32(double value, boolean lowWordFirst) {
+  static int[] encodeFloat32(double value) {
     int bits = Float.floatToIntBits((float) value);
-    int hi = (bits >>> 16) & 0xffff;
-    int lo = bits & 0xffff;
-    return lowWordFirst ? new int[] {lo, hi} : new int[] {hi, lo};
+    return new int[] {(bits >>> 16) & 0xffff, bits & 0xffff};
+  }
+
+  static long decodeInt32(int[] regs, boolean signed) {
+    long v = (((long) (regs[0] & 0xffff)) << 16) | (regs[1] & 0xffff);
+    if (!signed) return v;
+    if ((v & 0x8000_0000L) != 0) v -= 0x1_0000_0000L;
+    return v;
+  }
+
+  static int[] encodeInt32(long value, boolean signed) {
+    long v = signed ? value : (value & 0xffff_ffffL);
+    return new int[] {(int) ((v >>> 16) & 0xffff), (int) (v & 0xffff)};
+  }
+
+  static double decodeFloat64(int[] regs) {
+    long bits = 0;
+    for (int i = 0; i < 4 && i < regs.length; i++) {
+      bits = (bits << 16) | (regs[i] & 0xffff);
+    }
+    return Double.longBitsToDouble(bits);
+  }
+
+  static int[] encodeFloat64(double value) {
+    long bits = Double.doubleToLongBits(value);
+    return new int[] {
+      (int) ((bits >>> 48) & 0xffff),
+      (int) ((bits >>> 32) & 0xffff),
+      (int) ((bits >>> 16) & 0xffff),
+      (int) (bits & 0xffff)
+    };
+  }
+
+  static Object decodeInt64(int[] regs, boolean signed) {
+    long bits = 0;
+    for (int i = 0; i < 4 && i < regs.length; i++) {
+      bits = (bits << 16) | (regs[i] & 0xffff);
+    }
+    if (!signed) {
+      // JS/JSON 安全：大无符号用 double 可能丢精度；仍返回 long，Jackson 会序列化
+      return bits;
+    }
+    return bits;
+  }
+
+  static int[] encodeInt64(long value, boolean signed) {
+    long v = value;
+    return new int[] {
+      (int) ((v >>> 48) & 0xffff),
+      (int) ((v >>> 32) & 0xffff),
+      (int) ((v >>> 16) & 0xffff),
+      (int) (v & 0xffff)
+    };
+  }
+
+  static String decodeString(int[] regs) {
+    byte[] raw = ModbusSwap.regsToBytes(regs);
+    int end = raw.length;
+    while (end > 0 && raw[end - 1] == 0) end--;
+    return new String(raw, 0, end, StandardCharsets.ISO_8859_1);
+  }
+
+  static int[] encodeString(String s, int words) {
+    byte[] raw = (s == null ? "" : s).getBytes(StandardCharsets.ISO_8859_1);
+    byte[] buf = new byte[words * 2];
+    System.arraycopy(raw, 0, buf, 0, Math.min(raw.length, buf.length));
+    return ModbusSwap.bytesToRegs(buf);
   }
 
   private static boolean toBool(Object v) {
@@ -212,31 +367,19 @@ public class ModbusTagIo {
     return Double.parseDouble(String.valueOf(v));
   }
 
+  private static long toLong(Object v) {
+    if (v instanceof Number n) return n.longValue();
+    return Long.parseLong(String.valueOf(v).trim());
+  }
+
   public void invalidateOnError(String deviceId, Exception e) {
     dropClient(deviceId);
     log.debug("modbus client reset {}: {}", deviceId, e.toString());
   }
 
-  /** 仅探测 TCP 会话能否建立（无变量时用）。 */
   public void pingDevice(DeviceMeta dev) throws Exception {
-    ModbusTcpClient client = clientFor(dev);
+    ModbusChannel ch = channelFor(dev);
+    ModbusTcpClient client = clientFor(dev, ch);
     client.ensureConnected();
-  }
-
-  private record HostPort(String host, int port) {
-    static HostPort parse(String channel) {
-      if (channel == null || channel.isBlank()) return null;
-      String s = channel.trim();
-      int colon = s.lastIndexOf(':');
-      if (colon <= 0 || colon >= s.length() - 1) return null;
-      try {
-        int port = Integer.parseInt(s.substring(colon + 1).trim());
-        String host = s.substring(0, colon).trim();
-        if (host.isEmpty() || port < 1 || port > 65535) return null;
-        return new HostPort(host, port);
-      } catch (NumberFormatException e) {
-        return null;
-      }
-    }
   }
 }

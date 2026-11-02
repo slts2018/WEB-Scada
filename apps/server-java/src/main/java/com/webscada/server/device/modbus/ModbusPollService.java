@@ -192,11 +192,15 @@ public class ModbusPollService {
         if (raw instanceof Number n) yield n.doubleValue() != 0;
         yield Boolean.parseBoolean(String.valueOf(raw));
       }
-      case "int" -> {
-        if (raw instanceof Number n) yield (int) Math.rint(n.doubleValue());
-        yield (int) Math.rint(Double.parseDouble(String.valueOf(raw)));
+      case "byte", "short", "word", "int", "long", "dword", "llong", "qword" -> {
+        if (raw instanceof Number n) yield n.longValue();
+        yield (long) Math.rint(Double.parseDouble(String.valueOf(raw)));
       }
-      case "string" -> String.valueOf(raw);
+      case "char", "string" -> String.valueOf(raw);
+      case "float", "double" -> {
+        if (raw instanceof Number n) yield n.doubleValue();
+        yield Double.parseDouble(String.valueOf(raw));
+      }
       default -> {
         if (raw instanceof Number n) yield n.doubleValue();
         yield Double.parseDouble(String.valueOf(raw));
@@ -207,8 +211,8 @@ public class ModbusPollService {
   private static Object defaultVal(String dataType) {
     return switch (dataType == null ? "float" : dataType) {
       case "bool" -> false;
-      case "string" -> "";
-      case "float" -> 0.0;
+      case "char", "string" -> "";
+      case "float", "double" -> 0.0;
       default -> 0;
     };
   }

@@ -1,6 +1,7 @@
 /**
  * 变量「地址」按所属设备协议拆分/拼回（仍落盘为 TagMeta.address）。
- * Modbus 与检测柜一致：字地址 或 字地址.位号(0～15)，如 holding:144 / holding:144.1。
+ * Modbus 对齐 Flight：区 + 字地址 + 长度(字) + 可选位号。
+ * 落盘：holding:144 / holding:144.1 / holding:18448#2
  */
 import type { DeviceProtocol } from '@web-scada/core'
 
@@ -12,6 +13,8 @@ export type TagAddrFields = {
   mbOffset: string
   /** 空=整字；0～15=字内位号（对齐检测柜 144.1 写法） */
   mbBit: string
+  /** 空=按变量类型默认长度；否则 1～125 字（Flight「长度」） */
+  mbLength: string
   nodeId: string
   topic: string
   path: string
@@ -27,6 +30,7 @@ export function emptyTagAddrFields(): TagAddrFields {
     mbArea: 'holding',
     mbOffset: '',
     mbBit: '',
+    mbLength: '',
     nodeId: '',
     topic: '',
     path: '',
@@ -37,16 +41,17 @@ export function emptyTagAddrFields(): TagAddrFields {
 
 const MB_AREAS: ModbusArea[] = ['coil', 'discrete', 'input', 'holding']
 
-/** 解析「字」或「字.位」；位须 0～15 */
-export function parseModbusWordBit(text: string): { offset: string; bit: string } | null {
+/** 解析「字」或「字.位」或「字#长度」；位须 0～15 */
+export function parseModbusWordBit(text: string): { offset: string; bit: string; length: string } | null {
   const s = text.trim()
-  const m = s.match(/^(\d+)\s*(?:[./．。]\s*(\d+))?$/)
+  const m = s.match(/^(\d+)\s*(?:#\s*(\d+))?(?:\s*[./．。]\s*(\d+))?$/)
   if (!m) return null
   const offset = m[1]
-  if (m[2] == null || m[2] === '') return { offset, bit: '' }
-  const bitNum = Number(m[2])
+  const length = m[2] ?? ''
+  if (m[3] == null || m[3] === '') return { offset, bit: '', length }
+  const bitNum = Number(m[3])
   if (!Number.isInteger(bitNum) || bitNum < 0 || bitNum > 15) return null
-  return { offset, bit: String(bitNum) }
+  return { offset, bit: String(bitNum), length: '' }
 }
 
 /** 从已存 address 解析 */
@@ -67,17 +72,19 @@ export function parseTagAddress(
         if (wb) {
           f.mbOffset = wb.offset
           f.mbBit = wb.bit
+          f.mbLength = wb.length
           break
         }
         f.raw = s
         break
       }
-      // 兼容纯数字 / 字.位：按保持寄存器
+      // 兼容纯数字 / 字.位 / 字#长：按保持寄存器
       const wb = parseModbusWordBit(s)
       if (wb) {
         f.mbArea = 'holding'
         f.mbOffset = wb.offset
         f.mbBit = wb.bit
+        f.mbLength = wb.length
         break
       }
       f.raw = s
@@ -93,7 +100,6 @@ export function parseTagAddress(
       f.path = s
       break
     case 'mcd4000': {
-      // Sensor|Field
       const i = s.indexOf('|')
       if (i >= 0) {
         f.sensor = s.slice(0, i).trim()
@@ -128,10 +134,19 @@ export function formatTagAddress(
       if (!/^\d+$/.test(off)) return undefined
       const area = MB_AREAS.includes(fields.mbArea) ? fields.mbArea : 'holding'
       const bitRaw = (fields.mbBit ?? '').trim()
-      if (!bitRaw) return `${area}:${off}`
-      const bitNum = Number(bitRaw)
-      if (!Number.isInteger(bitNum) || bitNum < 0 || bitNum > 15) return `${area}:${off}`
-      return `${area}:${off}.${bitNum}`
+      if (bitRaw) {
+        const bitNum = Number(bitRaw)
+        if (!Number.isInteger(bitNum) || bitNum < 0 || bitNum > 15) return `${area}:${off}`
+        return `${area}:${off}.${bitNum}`
+      }
+      const lenRaw = (fields.mbLength ?? '').trim()
+      if (lenRaw) {
+        const len = Number(lenRaw)
+        if (Number.isInteger(len) && len >= 1 && len <= 125) {
+          return `${area}:${off}#${len}`
+        }
+      }
+      return `${area}:${off}`
     }
     case 'opcua': {
       const v = fields.nodeId.trim()

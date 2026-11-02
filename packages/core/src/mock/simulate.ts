@@ -1,21 +1,24 @@
 import type { SimMode, TagMeta, TagSimulation, TagValue } from '../types/tag'
+import { isIntegerTagType, isNumericTagType, normalizeTagDataType } from '../tag/dataTypes'
 
 type SimMeta = Pick<TagMeta, 'tagId' | 'dataType' | 'unit' | 'writable' | 'simulation'>
 
 export function defaultSimMode(dataType: TagMeta['dataType']): SimMode {
-  if (dataType === 'bool') return 'toggle'
-  if (dataType === 'string') return 'cycle'
+  const dt = normalizeTagDataType(dataType)
+  if (dt === 'bool') return 'toggle'
+  if (dt === 'string' || dt === 'char') return 'cycle'
   return 'walk'
 }
 
 export function simModeOptions(dataType: TagMeta['dataType']): Array<{ value: SimMode; label: string }> {
-  if (dataType === 'bool') {
+  const dt = normalizeTagDataType(dataType)
+  if (dt === 'bool') {
     return [
       { value: 'toggle', label: '翻转' },
       { value: 'random', label: '随机' },
     ]
   }
-  if (dataType === 'string') {
+  if (dt === 'string' || dt === 'char') {
     return [
       { value: 'cycle', label: '顺序轮换' },
       { value: 'random', label: '随机' },
@@ -38,17 +41,19 @@ export function simulationFollowsClock(mode: SimMode | undefined): boolean {
 export function defaultTagSimulation(meta: SimMeta): TagSimulation {
   const id = meta.tagId || ''
   const percent = meta.unit === '%' || id.includes('level')
-  const numeric = meta.dataType === 'int' || meta.dataType === 'float'
+  const dt = normalizeTagDataType(meta.dataType)
+  const numeric = isNumericTagType(dt)
+  const asInt = isIntegerTagType(dt)
   const step =
-    meta.dataType === 'int' ? 1 : id.includes('level') || meta.unit === '%' ? 2 : id.includes('pressure') ? 0.4 : 0.8
-  const periodSec = meta.dataType === 'bool' ? 5 : meta.dataType === 'string' ? 3 : 1
+    asInt ? 1 : id.includes('level') || meta.unit === '%' ? 2 : id.includes('pressure') ? 0.4 : 0.8
+  const periodSec = dt === 'bool' ? 5 : dt === 'string' || dt === 'char' ? 3 : 1
   return {
     enabled: !meta.writable,
     periodSec,
     min: numeric && percent ? 0 : undefined,
     max: numeric && percent ? 100 : undefined,
     step: numeric ? step : undefined,
-    options: meta.dataType === 'string' ? '待机\n运行\n停止' : undefined,
+    options: dt === 'string' || dt === 'char' ? '待机\n运行\n停止' : undefined,
     mode: defaultSimMode(meta.dataType),
   }
 }
@@ -91,10 +96,11 @@ export function stepSimulatedValue(
   const sim = effectiveTagSimulation(meta)
   if (!sim.enabled) return current
   const mode = sim.mode ?? defaultSimMode(meta.dataType)
-  if (meta.dataType === 'bool') return mode === 'random' ? rand < 0.5 : !toBool(current)
-  if (meta.dataType === 'int') return stepNumber(current, sim, rand, nowMs, true)
-  if (meta.dataType === 'float') return stepNumber(current, sim, rand, nowMs, false)
-  if (meta.dataType === 'string') return stepString(meta.tagId || '', sim, current, rand, nowMs)
+  const dt = normalizeTagDataType(meta.dataType)
+  if (dt === 'bool') return mode === 'random' ? rand < 0.5 : !toBool(current)
+  if (isIntegerTagType(dt)) return stepNumber(current, sim, rand, nowMs, true)
+  if (dt === 'float' || dt === 'double') return stepNumber(current, sim, rand, nowMs, false)
+  if (dt === 'string' || dt === 'char') return stepString(meta.tagId || '', sim, current, rand, nowMs)
   return current
 }
 

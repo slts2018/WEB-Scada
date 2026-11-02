@@ -5,32 +5,32 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 变量 address：{@code holding:144} / {@code holding:144.1} / {@code input:50} 等。
- * 与前端 tagAddress 及检测柜「字.位」一致。
+ * 变量 address：{@code holding:144} / {@code holding:144.1} / {@code holding:18448#2}。
+ * 与前端 tagAddress 及 Flight「区+地址+长度+位」对齐。
  */
-public record ModbusAddress(String area, int offset, Integer bit) {
+public record ModbusAddress(String area, int offset, Integer bit, Integer length) {
   private static final Pattern FULL =
       Pattern.compile(
-          "^(coil|discrete|input|holding)\\s*:\\s*(\\d+)\\s*(?:[./．。]\\s*(\\d+))?$",
+          "^(coil|discrete|input|holding)\\s*:\\s*(\\d+)\\s*(?:#\\s*(\\d+))?(?:[./．。]\\s*(\\d+))?$",
           Pattern.CASE_INSENSITIVE);
   private static final Pattern BARE =
-      Pattern.compile("^(\\d+)\\s*(?:[./．。]\\s*(\\d+))?$");
+      Pattern.compile("^(\\d+)\\s*(?:#\\s*(\\d+))?(?:[./．。]\\s*(\\d+))?$");
 
   public static ModbusAddress parse(String address) {
     if (address == null || address.isBlank()) return null;
     String s = address.trim();
     Matcher m = FULL.matcher(s);
     if (m.matches()) {
-      return of(m.group(1), m.group(2), m.group(3));
+      return of(m.group(1), m.group(2), m.group(4), m.group(3));
     }
     m = BARE.matcher(s);
     if (m.matches()) {
-      return of("holding", m.group(1), m.group(2));
+      return of("holding", m.group(1), m.group(3), m.group(2));
     }
     return null;
   }
 
-  private static ModbusAddress of(String areaRaw, String offsetRaw, String bitRaw) {
+  private static ModbusAddress of(String areaRaw, String offsetRaw, String bitRaw, String lengthRaw) {
     String area = areaRaw.trim().toLowerCase(Locale.ROOT);
     int offset;
     try {
@@ -49,7 +49,17 @@ public record ModbusAddress(String area, int offset, Integer bit) {
         return null;
       }
     }
-    return new ModbusAddress(area, offset, bit);
+    Integer length = null;
+    if (lengthRaw != null && !lengthRaw.isBlank()) {
+      try {
+        int len = Integer.parseInt(lengthRaw.trim());
+        if (len < 1 || len > 125) return null;
+        length = len;
+      } catch (NumberFormatException e) {
+        return null;
+      }
+    }
+    return new ModbusAddress(area, offset, bit, length);
   }
 
   /** 读功能码 1/2/3/4 */

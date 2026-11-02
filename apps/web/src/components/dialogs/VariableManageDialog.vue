@@ -2,7 +2,16 @@
 import { computed, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { AlarmLevel, AlarmLimitCode, DeviceLinkState, DeviceMeta, DeviceProtocol, SimMode, TagAlarmConfig, TagHistoryConfig, TagMeta, TagSimulation, TagValue } from '@web-scada/core'
-import { defaultTagSimulation, formatBoolText, simModeOptions } from '@web-scada/core'
+import {
+  defaultTagSimulation,
+  formatBoolText,
+  isIntegerTagType,
+  isNumericTagType,
+  MODBUS_SWAP_OPTIONS,
+  simModeOptions,
+  TAG_DATA_TYPES,
+  TAG_DATA_TYPE_OPTIONS,
+} from '@web-scada/core'
 import HelpTip from '@/components/designer/HelpTip.vue'
 import { useTagStore } from '@/stores/tag'
 import { useDeviceStore } from '@/stores/device'
@@ -297,7 +306,7 @@ function loadIoForm(meta?: TagMeta | null) {
 function historyPayload(): TagHistoryConfig {
   if (io.archive === 'legacy') return { mode: 'legacy' }
   if (io.archive === 'off') return { enabled: false }
-  const numeric = form.dataType === 'int' || form.dataType === 'float'
+  const numeric = isNumericTagType(form.dataType)
   return {
     enabled: true,
     mode: io.archive,
@@ -308,7 +317,7 @@ function historyPayload(): TagHistoryConfig {
 
 /** 数值变量的小数位。空 = 自适应，用 -1 告诉服务端清掉已保存的位数。 */
 function decimalsPayload(): number {
-  if (form.dataType !== 'int' && form.dataType !== 'float') return -1
+  if (!isNumericTagType(form.dataType) || isIntegerTagType(form.dataType)) return -1
   if (form.decimals == null || !Number.isFinite(form.decimals)) return -1
   return Math.min(6, Math.max(0, Math.trunc(form.decimals)))
 }
@@ -322,7 +331,7 @@ function displayValue(row: { meta: TagMeta; value?: TagValue }) {
 
 function simulationPayload(): TagSimulation | undefined {
   if (formDeviceProtocol.value !== 'mock') return undefined
-  const numeric = form.dataType === 'int' || form.dataType === 'float'
+  const numeric = isNumericTagType(form.dataType)
   const period = Number(sim.periodSec)
   return {
     enabled: sim.enabled,
@@ -697,7 +706,7 @@ async function importFile(ev: Event) {
           tagId,
           name,
           group: cells[idx('group')]?.trim() || undefined,
-          dataType: ['bool', 'int', 'float', 'string'].includes(dataType) ? dataType : 'float',
+          dataType: (TAG_DATA_TYPES as readonly string[]).includes(dataType) ? dataType : 'float',
           unit: cells[idx('unit')]?.trim() || undefined,
           ...decimalFromCsv(cells, idx('decimals')),
           writable: ['1', 'true', 'yes', '读写'].includes(
@@ -1161,18 +1170,20 @@ async function removeAlarm(alarmId: string) {
       </label>
       <label>
         <span>类型</span>
-        <el-select v-model="form.dataType" @change="onSimTypeChange">
-          <el-option label="bool" value="bool" />
-          <el-option label="int" value="int" />
-          <el-option label="float" value="float" />
-          <el-option label="string" value="string" />
+        <el-select v-model="form.dataType" filterable @change="onSimTypeChange">
+          <el-option
+            v-for="opt in TAG_DATA_TYPE_OPTIONS"
+            :key="opt.value"
+            :label="opt.label"
+            :value="opt.value"
+          />
         </el-select>
       </label>
       <label>
         <span>单位</span>
         <el-input v-model="form.unit" placeholder="可选" />
       </label>
-      <label v-if="form.dataType === 'int' || form.dataType === 'float'">
+      <label v-if="form.dataType === 'float' || form.dataType === 'double'">
         <span>小数位</span>
         <el-input-number
           :model-value="form.decimals ?? undefined"
@@ -1214,12 +1225,12 @@ async function removeAlarm(alarmId: string) {
         </label>
       </template>
 
-      <!-- Modbus TCP：与检测柜一致，字地址 或 字地址.位号（三栏同一行） -->
+      <!-- Modbus TCP：对齐 Flight —— 区 / 地址 / 长度(字) / 位号 -->
       <div v-else-if="formDeviceProtocol === 'modbus_tcp'" class="wide mb-addr-row">
         <label>
           <span class="cfg-label">
-            寄存器区
-            <HelpTip content="现场柜侧 DI/DO 位通常用 Holding Register；Coil / Discrete 仅在设备按区映射时使用。" />
+            类型(区)
+            <HelpTip content="对应 Flight HoldingRegisters / Coil / Discrete / InputRegisters。" />
           </span>
           <el-select v-model="tagAddr.mbArea">
             <el-option
@@ -1232,17 +1243,24 @@ async function removeAlarm(alarmId: string) {
         </label>
         <label>
           <span class="cfg-label">
-            字地址
-            <HelpTip content="保持寄存器字偏移，从 0 起。例：DI0 整字填 144。保存为 holding:144。" />
+            地址
+            <HelpTip content="协议 PDU 字偏移，从 0 起。例：18448。保存为 holding:18448。" />
           </span>
-          <el-input v-model="tagAddr.mbOffset" placeholder="如 144" />
+          <el-input v-model="tagAddr.mbOffset" placeholder="如 18448" />
         </label>
         <label>
           <span class="cfg-label">
-            位号（可选）
-            <HelpTip content="空=读整字。填 0～15 表示字内某一 bit（与检测柜 144.1 相同）。例：DI0 第2位 → 字 144、位 1，保存 holding:144.1。" />
+            长度(字)
+            <HelpTip content="对齐 Flight「长度」。空=按变量类型默认（短整/字=1，浮点/长整=2，双精度=4）。显式填写则保存为 holding:地址#长度。" />
           </span>
-          <el-input v-model="tagAddr.mbBit" placeholder="空=整字；0～15" maxlength="2" />
+          <el-input v-model="tagAddr.mbLength" placeholder="空=按类型" maxlength="3" :disabled="!!tagAddr.mbBit.trim()" />
+        </label>
+        <label>
+          <span class="cfg-label">
+            位数
+            <HelpTip content="勾选读位时填 0～15。有位号时按 1 字处理，忽略长度。保存 holding:地址.位。" />
+          </span>
+          <el-input v-model="tagAddr.mbBit" placeholder="空=不读位；0～15" maxlength="2" />
         </label>
       </div>
 
@@ -1376,7 +1394,7 @@ async function removeAlarm(alarmId: string) {
             <span>{{ sim.mode === 'sine' ? '波形周期（秒）' : '周期（秒）' }}</span>
             <el-input-number v-model="sim.periodSec" :min="1" :max="3600" :step="1" controls-position="right" />
           </label>
-          <template v-if="form.dataType === 'int' || form.dataType === 'float'">
+          <template v-if="isNumericTagType(form.dataType)">
             <label>
               <span>下限</span>
               <el-input-number v-model="sim.min" :value-on-clear="null" controls-position="right" />
@@ -1386,11 +1404,11 @@ async function removeAlarm(alarmId: string) {
               <el-input-number v-model="sim.max" :value-on-clear="null" controls-position="right" />
             </label>
             <label v-if="sim.mode === 'walk' || sim.mode === 'ramp'">
-              <span>{{ sim.mode === 'ramp' || form.dataType === 'int' ? '步进' : '幅度' }}</span>
+              <span>{{ sim.mode === 'ramp' || isIntegerTagType(form.dataType) ? '步进' : '幅度' }}</span>
               <el-input-number v-model="sim.step" :min="0" controls-position="right" />
             </label>
           </template>
-          <label v-else-if="form.dataType === 'string'" class="wide">
+          <label v-else-if="form.dataType === 'string' || form.dataType === 'char'" class="wide">
             <span class="cfg-label">
               候选值
               <HelpTip content="一行一个。顺序轮换时每个周期切到下一条，随机则从中抽一条。" />
@@ -1555,7 +1573,7 @@ async function removeAlarm(alarmId: string) {
             <span>存档周期（毫秒）</span>
             <el-input-number v-model="io.historyIntervalMs" :min="200" :max="86400000" :step="100" controls-position="right" />
           </label>
-          <label v-if="io.archive === 'change' && (form.dataType === 'int' || form.dataType === 'float')">
+          <label v-if="io.archive === 'change' && isNumericTagType(form.dataType)">
             <span class="cfg-label">
               死区
               <HelpTip content="变化量小于死区不记。0 表示数值一变就记。布尔和字符串忽略死区。" />
@@ -1637,6 +1655,34 @@ async function removeAlarm(alarmId: string) {
             <HelpTip content="Modbus TCP 默认 502。" />
           </span>
           <el-input v-model="deviceConn.port" placeholder="502" />
+        </label>
+        <label>
+          <span class="cfg-label">
+            字排序
+            <HelpTip content="对齐 Flight「字排序」。作用于单寄存器字节序。" />
+          </span>
+          <el-select v-model="deviceConn.wordSwap">
+            <el-option
+              v-for="opt in MODBUS_SWAP_OPTIONS"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
+          </el-select>
+        </label>
+        <label>
+          <span class="cfg-label">
+            双字排序
+            <HelpTip content="对齐 Flight「双字排序」。作用于 32/64 位（float/long/dword 等）。默认 SwapWords≈原低字在前。" />
+          </span>
+          <el-select v-model="deviceConn.dwordSwap">
+            <el-option
+              v-for="opt in MODBUS_SWAP_OPTIONS"
+              :key="opt.value"
+              :label="opt.label"
+              :value="opt.value"
+            />
+          </el-select>
         </label>
       </template>
 
@@ -1855,7 +1901,7 @@ async function removeAlarm(alarmId: string) {
 
 .mb-addr-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.8fr) minmax(0, 0.8fr);
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.9fr) minmax(0, 0.7fr) minmax(0, 0.7fr);
   gap: 12px;
   align-items: end;
 }

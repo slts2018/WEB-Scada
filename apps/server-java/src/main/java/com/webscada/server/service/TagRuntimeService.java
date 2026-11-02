@@ -431,27 +431,20 @@ public class TagRuntimeService {
 
 
     Object normalized = value;
-
-    switch (meta.dataType()) {
-
+    String dt = meta.dataType() == null ? "" : meta.dataType();
+    switch (dt) {
       case "bool" -> normalized = toBool(value);
-
-      case "int" -> normalized = (int) Math.rint(toNumber(value));
-
-      case "float" -> normalized = toNumber(value);
-
+      case "byte", "short", "word", "int", "long", "dword", "llong", "qword" ->
+          normalized = (long) Math.rint(toNumber(value));
+      case "float", "double" -> normalized = toNumber(value);
+      case "char", "string" -> normalized = value == null ? null : String.valueOf(value);
       default -> normalized = value == null ? null : String.valueOf(value);
-
     }
 
-    if (("int".equals(meta.dataType()) || "float".equals(meta.dataType()))
-
+    if (isNumericDataType(dt)
         && normalized instanceof Number n
-
         && !Double.isFinite(n.doubleValue())) {
-
       return WriteResult.fail("Invalid numeric value");
-
     }
 
     if (isCommDriven(meta)) return writeComm(meta, normalized);
@@ -735,14 +728,32 @@ public class TagRuntimeService {
 
   }
 
+  static boolean isNumericDataType(String dataType) {
+    String dt = dataType == null ? "" : dataType;
+    return switch (dt) {
+      case "byte", "short", "word", "int", "long", "dword", "float", "double", "llong", "qword" ->
+          true;
+      default -> false;
+    };
+  }
+
+  static boolean isIntegerDataType(String dataType) {
+    String dt = dataType == null ? "" : dataType;
+    return switch (dt) {
+      case "byte", "short", "word", "int", "long", "dword", "llong", "qword" -> true;
+      default -> false;
+    };
+  }
+
   /** 运行时值是否与元数据 dataType 一致（改类型后需重置）。 */
   static boolean valueCompatible(String dataType, Object value) {
     if (value == null) return false;
     String dt = dataType == null ? "" : dataType;
     return switch (dt) {
       case "bool" -> value instanceof Boolean;
-      case "int", "float" -> value instanceof Number;
-      case "string" -> value instanceof String;
+      case "byte", "short", "word", "int", "long", "dword", "float", "double", "llong", "qword" ->
+          value instanceof Number;
+      case "char", "string" -> value instanceof String;
       default -> true;
     };
   }
@@ -751,9 +762,9 @@ public class TagRuntimeService {
     String dt = dataType == null ? "" : dataType;
     return switch (dt) {
       case "bool" -> false;
-      case "string" -> "";
-      case "float" -> 0.0;
-      default -> 0; // int 及其他数值
+      case "char", "string" -> "";
+      case "float", "double" -> 0.0;
+      default -> 0;
     };
   }
 
@@ -785,118 +796,93 @@ public class TagRuntimeService {
 
       boolean percent = isPercent(meta) || (meta.tagId() != null && meta.tagId().contains("level"));
 
-      boolean numeric = "int".equals(meta.dataType()) || "float".equals(meta.dataType());
-
-      double period = "bool".equals(meta.dataType()) ? 5 : "string".equals(meta.dataType()) ? 3 : 1;
+      boolean numeric = isNumericDataType(meta.dataType());
+      double period =
+          "bool".equals(meta.dataType())
+              ? 5
+              : ("string".equals(meta.dataType()) || "char".equals(meta.dataType()) ? 3 : 1);
 
       return new TagSimulation(
-
           !meta.writable(),
-
           period,
-
           numeric && percent ? 0d : null,
-
           numeric && percent ? 100d : null,
-
           numeric ? fallbackStep : null,
-
-          "string".equals(meta.dataType()) ? "待机\n运行\n停止" : null,
-
+          ("string".equals(meta.dataType()) || "char".equals(meta.dataType()))
+              ? "待机\n运行\n停止"
+              : null,
           defaultMode(meta.dataType()));
-
     }
 
     double period = saved.periodSec();
-
     if (!Double.isFinite(period)) period = 1;
-
     period = Math.min(3600, Math.max(1, period));
-
-    Double step = saved.step() != null ? saved.step() : ("int".equals(meta.dataType()) || "float".equals(meta.dataType()) ? fallbackStep : null);
-
-    String options = saved.options() != null && !saved.options().isBlank() ? saved.options() : "待机\n运行\n停止";
-
-    return new TagSimulation(saved.enabled(), period, saved.min(), saved.max(), step, options, resolveMode(meta.dataType(), saved.mode()));
-
+    Double step =
+        saved.step() != null
+            ? saved.step()
+            : (isNumericDataType(meta.dataType()) ? fallbackStep : null);
+    String options =
+        saved.options() != null && !saved.options().isBlank() ? saved.options() : "待机\n运行\n停止";
+    return new TagSimulation(
+        saved.enabled(), period, saved.min(), saved.max(), step, options, resolveMode(meta.dataType(), saved.mode()));
   }
-
-
 
   private static String defaultMode(String dataType) {
-
     if ("bool".equals(dataType)) return "toggle";
-
-    if ("string".equals(dataType)) return "cycle";
-
+    if ("string".equals(dataType) || "char".equals(dataType)) return "cycle";
     return "walk";
-
   }
-
-
 
   private static String resolveMode(String dataType, String mode) {
-
     if (mode == null || mode.isBlank()) return defaultMode(dataType);
-
     boolean ok =
-
         switch (dataType == null ? "" : dataType) {
-
           case "bool" -> mode.equals("toggle") || mode.equals("random");
-
-          case "string" -> mode.equals("cycle") || mode.equals("random");
-
-          case "int", "float" -> mode.equals("walk") || mode.equals("random") || mode.equals("ramp") || mode.equals("sine");
-
+          case "string", "char" -> mode.equals("cycle") || mode.equals("random");
+          case "byte",
+              "short",
+              "word",
+              "int",
+              "long",
+              "dword",
+              "float",
+              "double",
+              "llong",
+              "qword" ->
+              mode.equals("walk")
+                  || mode.equals("random")
+                  || mode.equals("ramp")
+                  || mode.equals("sine");
           default -> false;
-
         };
-
     return ok ? mode : defaultMode(dataType);
-
   }
-
-
 
   private static double defaultStep(TagMeta meta) {
-
-    if ("int".equals(meta.dataType())) return 1;
-
+    if (isIntegerDataType(meta.dataType())) return 1;
     String id = meta.tagId() == null ? "" : meta.tagId();
-
     if (id.contains("level") || isPercent(meta)) return 2;
-
     if (id.contains("pressure")) return 0.4;
-
     return 0.8;
-
   }
 
-
-
   private static Object stepSimulation(
-
       TagMeta meta, TagSimulation sim, Object current, ThreadLocalRandom rnd, long nowMs) {
-
     String type = meta.dataType() == null ? "" : meta.dataType();
-
     String mode = sim.mode() == null ? defaultMode(type) : sim.mode();
-
-    return switch (type) {
-
-      case "bool" -> "random".equals(mode) ? rnd.nextBoolean() : !toBool(current);
-
-      case "int" -> stepNumber(current, sim, rnd, nowMs, true);
-
-      case "float" -> stepNumber(current, sim, rnd, nowMs, false);
-
-      case "string" -> stepString(meta, sim, mode, rnd, nowMs);
-
-      default -> current;
-
-    };
-
+    if ("bool".equals(type)) {
+      return "random".equals(mode) ? rnd.nextBoolean() : !toBool(current);
+    }
+    if (isIntegerDataType(type)) {
+      return stepNumber(current, sim, rnd, nowMs, true);
+    }
+    if ("float".equals(type) || "double".equals(type)) {
+      return stepNumber(current, sim, rnd, nowMs, false);
+    }
+    if ("string".equals(type) || "char".equals(type)) {
+      return stepString(meta, sim, mode, rnd, nowMs);
+    }
+    return current;
   }
 
 

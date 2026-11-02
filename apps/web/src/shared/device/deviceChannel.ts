@@ -1,8 +1,9 @@
 /**
  * 设备「通道」字段按协议拆分/拼回（仍落盘为 DeviceMeta.channel 字符串）。
- * MCD4000 已接数据中台 Query* 轮询；其余协议仍为元数据。
+ * Modbus：host:port 或 host:port|字排序|双字排序（对齐 Flight Swap*）。
  */
-import type { DeviceProtocol } from '@web-scada/core'
+import type { DeviceProtocol, ModbusSwapMode } from '@web-scada/core'
+import { normalizeModbusSwap } from '@web-scada/core'
 
 /** MCD4000 数据源：振动 / PLC / ARM */
 export type Mcd4000Source = 'vib' | 'plc' | 'arm'
@@ -19,6 +20,10 @@ export type DeviceConnFields = {
   unitId: string
   /** MCD4000：Query 接口族 */
   mcdSource: Mcd4000Source
+  /** Modbus：字排序（单寄存器字节序） */
+  wordSwap: ModbusSwapMode
+  /** Modbus：双字排序（32/64 位） */
+  dwordSwap: ModbusSwapMode
   raw: string
 }
 
@@ -32,6 +37,8 @@ export function emptyConnFields(): DeviceConnFields {
     mcdDeviceId: '',
     unitId: '',
     mcdSource: 'vib',
+    wordSwap: 'SwapNone',
+    dwordSwap: 'SwapWords',
     raw: '',
   }
 }
@@ -57,21 +64,25 @@ export function parseDeviceChannel(
 
   switch (protocol) {
     case 'modbus_tcp': {
-      const m = s.match(/^([^:]+):(\d+)$/)
+      // host:port | optional Swap* | optional Swap*
+      const parts = s.split('|').map((p) => p.trim())
+      const hp = parts[0] ?? ''
+      const m = hp.match(/^([^:]+):(\d+)$/)
       if (m) {
         f.host = m[1]
         f.port = m[2]
       } else {
-        f.host = s
+        f.host = hp
         f.port = '502'
       }
+      if (parts[1]) f.wordSwap = normalizeModbusSwap(parts[1], 'SwapNone')
+      if (parts[2]) f.dwordSwap = normalizeModbusSwap(parts[2], 'SwapWords')
       break
     }
     case 'opcua':
       f.endpoint = s
       break
     case 'mqtt': {
-      // broker|topic 或 host:port|topic；无 | 则整段当 broker
       const i = s.indexOf('|')
       if (i >= 0) {
         const broker = s.slice(0, i).trim()
@@ -100,7 +111,6 @@ export function parseDeviceChannel(
       f.baseUrl = s
       break
     case 'mcd4000': {
-      // baseUrl|DeviceId|UnitId|source(vib|plc|arm)
       const parts = s.split('|')
       f.baseUrl = (parts[0] ?? '').trim()
       f.mcdDeviceId = (parts[1] ?? '').trim()
@@ -129,7 +139,13 @@ export function formatDeviceChannel(
       const host = fields.host.trim()
       if (!host) return undefined
       const port = fields.port.trim() || '502'
-      return `${host}:${port}`
+      const word = normalizeModbusSwap(fields.wordSwap, 'SwapNone')
+      const dword = normalizeModbusSwap(fields.dwordSwap, 'SwapWords')
+      // 默认字序不写进 channel，保持旧工程简洁；任一非默认则完整写出
+      if (word === 'SwapNone' && dword === 'SwapWords') {
+        return `${host}:${port}`
+      }
+      return `${host}:${port}|${word}|${dword}`
     }
     case 'opcua': {
       const ep = fields.endpoint.trim()

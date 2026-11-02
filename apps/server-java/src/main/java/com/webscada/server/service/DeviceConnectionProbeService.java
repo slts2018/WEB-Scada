@@ -165,7 +165,10 @@ public class DeviceConnectionProbeService {
 
   private static HostPort parseHostPort(String channel, int defaultPort) {
     if (channel == null || channel.isBlank()) return null;
+    // Modbus channel 可带 |字排序|双字排序，探测只取 host:port
     String s = channel.trim();
+    int bar = s.indexOf('|');
+    if (bar >= 0) s = s.substring(0, bar).trim();
     int colon = s.lastIndexOf(':');
     if (colon > 0 && colon < s.length() - 1) {
       String host = s.substring(0, colon).trim();

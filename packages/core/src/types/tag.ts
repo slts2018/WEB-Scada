@@ -10,7 +10,24 @@ export interface TagMeta {
   /** 所属设备（必填；一对多：一台设备下多个变量） */
   deviceId: string
   address?: string
-  dataType: 'bool' | 'int' | 'float' | 'string'
+  /**
+   * 与 Flight 对齐：bool/byte/char/short/word/long/dword/float/double/llong/qword/string。
+   * 旧工程 `int` 仍可读，语义等同 short（有符号 16 位）。
+   */
+  dataType:
+    | 'bool'
+    | 'byte'
+    | 'char'
+    | 'short'
+    | 'word'
+    | 'int'
+    | 'long'
+    | 'dword'
+    | 'float'
+    | 'double'
+    | 'llong'
+    | 'qword'
+    | 'string'
   unit?: string
   /**
    * 显示小数位 0～6。留空 = 按数值大小自动取位。

@@ -151,6 +151,18 @@ export type { ResolvedPage3DPresentation } from './factory/page3dPresentation'
 export { MOCK_TAG_METAS, MOCK_DEVICES, createInitialMockValues } from './mock/tags'
 export { formatBoolText } from './tag/boolText'
 export {
+  TAG_DATA_TYPES,
+  TAG_DATA_TYPE_OPTIONS,
+  MODBUS_SWAP_OPTIONS,
+  normalizeTagDataType,
+  isIntegerTagType,
+  isNumericTagType,
+  defaultModbusLength,
+  normalizeModbusSwap,
+  isBoolTagType,
+} from './tag/dataTypes'
+export type { TagDataType, ModbusSwapMode } from './tag/dataTypes'
+export {
   defaultTagSimulation,
   effectiveTagSimulation,
   simulationSlot,
