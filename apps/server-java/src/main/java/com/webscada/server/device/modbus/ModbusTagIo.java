@@ -5,6 +5,7 @@ import com.webscada.server.model.DeviceMeta;
 import com.webscada.server.model.TagMeta;
 import com.webscada.server.service.DeviceStatusService;
 import com.webscada.server.store.DeviceFileStore;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
@@ -22,6 +23,9 @@ public class ModbusTagIo {
   private final ScadaProperties props;
   private final ConcurrentHashMap<String, ModbusTcpClient> clients = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, ModbusChannel> channels = new ConcurrentHashMap<>();
+  /** 当前停在备用地址。备还通着不切回主；备断了才回到主。 */
+  private final ConcurrentHashMap<String, Boolean> preferBackup = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, Object> gates = new ConcurrentHashMap<>();
   private final ModbusAcqLog acqLog = new ModbusAcqLog();
 
   public ModbusTagIo(DeviceFileStore devices, DeviceStatusService status, ScadaProperties props) {
@@ -58,9 +62,15 @@ public class ModbusTagIo {
     ModbusAddress addr = ModbusAddress.parse(meta.address());
     if (addr == null) throw new IllegalArgumentException("bad address: " + meta.address());
     ModbusChannel ch = channelFor(dev);
-    ModbusTcpClient client = clientFor(dev, ch);
-    Object value = readValue(client, ch, meta, addr);
-    return new ReadOk(value, "Good");
+    synchronized (gate(dev.deviceId())) {
+      return withLink(
+          dev,
+          ch,
+          client -> {
+            Object value = readValue(client, ch, meta, addr);
+            return new ReadOk(value, "Good");
+          });
+    }
   }
 
   public void write(TagMeta meta, Object value) throws Exception {
@@ -73,8 +83,15 @@ public class ModbusTagIo {
     }
     try {
       ModbusChannel ch = channelFor(dev);
-      ModbusTcpClient client = clientFor(dev, ch);
-      writeValue(client, ch, meta, addr, value);
+      synchronized (gate(dev.deviceId())) {
+        withLink(
+            dev,
+            ch,
+            client -> {
+              writeValue(client, ch, meta, addr, value);
+              return null;
+            });
+      }
       log.info(
           "modbus write ok device={} tag={} addr={} value={}",
           meta.deviceId(),
@@ -99,6 +116,12 @@ public class ModbusTagIo {
   }
 
   public void dropClient(String deviceId) {
+    synchronized (gate(deviceId)) {
+      dropSocket(deviceId);
+    }
+  }
+
+  private void dropSocket(String deviceId) {
     ModbusTcpClient c = clients.remove(deviceId);
     channels.remove(deviceId);
     if (c != null) {
@@ -112,28 +135,101 @@ public class ModbusTagIo {
     if (ch == null) throw new IllegalStateException("invalid channel");
     // 若全局仍配置 lowWordFirst=false，且 channel 未显式写排序，则双字用 SwapNone
     if (dev.channel() != null && !dev.channel().contains("|") && !props.getModbus().isLowWordFirst()) {
-      ch = new ModbusChannel(ch.host(), ch.port(), ch.wordSwap(), ModbusSwap.SwapNone);
+      ch =
+          new ModbusChannel(
+              ch.host(),
+              ch.port(),
+              ch.wordSwap(),
+              ModbusSwap.SwapNone,
+              ch.backupHost(),
+              ch.backupPort());
     }
     return ch;
+  }
+
+  private Object gate(String deviceId) {
+    return gates.computeIfAbsent(deviceId, k -> new Object());
+  }
+
+  @FunctionalInterface
+  private interface IoCall<T> {
+    T run(ModbusTcpClient client) throws Exception;
+  }
+
+  /**
+   * 先走当前地址。链路断开（连不上、超时、连接被重置）且配了备用时，切到另一边再试一次。
+   * 设备已应答的 Modbus 异常码不切换。
+   */
+  private <T> T withLink(DeviceMeta dev, ModbusChannel ch, IoCall<T> call) throws Exception {
+    try {
+      return call.run(clientFor(dev, ch));
+    } catch (IOException first) {
+      if (!isLinkFailure(first) || !ch.hasBackup()) throw first;
+      String id = dev.deviceId();
+      boolean wasBackup = Boolean.TRUE.equals(preferBackup.get(id));
+      dropSocket(id);
+      preferBackup.put(id, !wasBackup);
+      String next =
+          ch.activeHost(!wasBackup) + ":" + ch.activePort(!wasBackup);
+      acqLog.warn(
+          log,
+          "failover:" + id,
+          "modbus failover device={} {} -> {}",
+          id,
+          wasBackup ? "backup" : "primary",
+          next);
+      return call.run(clientFor(dev, ch));
+    }
+  }
+
+  /** 协议应答（异常码、长度不对）说明 CPU 还在，不切冗余。 */
+  static boolean isLinkFailure(IOException e) {
+    String m = e.getMessage() == null ? "" : e.getMessage();
+    return !m.startsWith("modbus exception")
+        && !m.startsWith("fc mismatch")
+        && !m.startsWith("length mismatch")
+        && !m.startsWith("short pdu");
+  }
+
+  /** 状态栏用。没配备用时返回空串。 */
+  public String activeSideNote(DeviceMeta dev) {
+    ModbusChannel ch;
+    try {
+      ch = channelFor(dev);
+    } catch (Exception e) {
+      return "";
+    }
+    if (!ch.hasBackup()) return "";
+    boolean backup = Boolean.TRUE.equals(preferBackup.get(dev.deviceId()));
+    String side = backup ? "备" : "主";
+    return side + " " + ch.activeHost(backup) + ":" + ch.activePort(backup);
   }
 
   private ModbusTcpClient clientFor(DeviceMeta dev, ModbusChannel ch) throws Exception {
     ScadaProperties.Modbus cfg = props.getModbus();
     String key = dev.deviceId();
+    if (!ch.hasBackup()) preferBackup.remove(key);
+    boolean backup = Boolean.TRUE.equals(preferBackup.get(key)) && ch.hasBackup();
+    String host = ch.activeHost(backup);
+    int port = ch.activePort(backup);
     ModbusChannel prevCh = channels.get(key);
     if (prevCh != null
         && (!prevCh.host().equals(ch.host())
             || prevCh.port() != ch.port()
             || prevCh.wordSwap() != ch.wordSwap()
-            || prevCh.dwordSwap() != ch.dwordSwap())) {
-      dropClient(key);
+            || prevCh.dwordSwap() != ch.dwordSwap()
+            || !sameBackup(prevCh, ch))) {
+      dropSocket(key);
     }
     ModbusTcpClient existing = clients.get(key);
-    if (existing != null) return existing;
+    if (existing != null && existing.host().equals(host) && existing.port() == port) {
+      return existing;
+    }
+    if (existing != null) dropSocket(key);
     ModbusTcpClient created =
         new ModbusTcpClient(
-            ch.host(),
-            ch.port(),
+            host,
+            port,
             cfg.getUnitId(),
             cfg.getConnectTimeoutMs(),
             cfg.getResponseTimeoutMs());
@@ -146,14 +242,21 @@ public class ModbusTagIo {
     acqLog.info(
         log,
         "open:" + key,
-        "modbus session open device={} {}:{} unit={} word={} dword={}",
+        "modbus session open device={} {}:{} side={} unit={} word={} dword={}",
         key,
-        ch.host(),
-        ch.port(),
+        host,
+        port,
+        backup ? "backup" : "primary",
         cfg.getUnitId(),
         ch.wordSwap(),
         ch.dwordSwap());
     return created;
+  }
+
+  private static boolean sameBackup(ModbusChannel a, ModbusChannel b) {
+    if (a.hasBackup() != b.hasBackup()) return false;
+    if (!a.hasBackup()) return true;
+    return a.backupHost().equals(b.backupHost()) && a.backupPort() == b.backupPort();
   }
 
   static String normalizeType(String dataType) {
@@ -379,7 +482,14 @@ public class ModbusTagIo {
 
   public void pingDevice(DeviceMeta dev) throws Exception {
     ModbusChannel ch = channelFor(dev);
-    ModbusTcpClient client = clientFor(dev, ch);
-    client.ensureConnected();
+    synchronized (gate(dev.deviceId())) {
+      withLink(
+          dev,
+          ch,
+          client -> {
+            client.ensureConnected();
+            return null;
+          });
+    }
   }
 }

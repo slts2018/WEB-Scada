@@ -58,6 +58,18 @@ public class DeviceConnectionProbeService {
   private Map<String, Object> modbus(String channel) {
     HostPort hp = parseHostPort(channel, 502);
     if (hp == null) return fail("请填写主机和端口，如 192.168.1.10:502");
+    Map<String, Object> primary = modbusOnce(hp);
+    if (Boolean.TRUE.equals(primary.get("ok"))) return primary;
+    HostPort backup = parseBackup(channel, hp.port);
+    if (backup == null) return primary;
+    Map<String, Object> standby = modbusOnce(backup);
+    if (Boolean.TRUE.equals(standby.get("ok"))) {
+      return ok("主地址不可达，已连通备用 " + backup.host() + ":" + backup.port());
+    }
+    return fail("主 " + primary.get("message") + "；备 " + standby.get("message"));
+  }
+
+  private Map<String, Object> modbusOnce(HostPort hp) {
     try (Socket socket = new Socket()) {
       socket.connect(new InetSocketAddress(hp.host, hp.port), CONNECT_MS);
       socket.setTcpNoDelay(true);
@@ -182,6 +194,18 @@ public class DeviceConnectionProbeService {
     }
     if (s.isEmpty()) return null;
     return new HostPort(s, defaultPort);
+  }
+
+  /** 第 4 段为备用 host:port。与主地址相同则视为没配。 */
+  private static HostPort parseBackup(String channel, int defaultPort) {
+    if (channel == null) return null;
+    String[] parts = channel.trim().split("\\|");
+    if (parts.length < 4) return null;
+    HostPort primary = parseHostPort(channel, defaultPort);
+    HostPort backup = parseHostPort(parts[3].trim(), defaultPort);
+    if (primary == null || backup == null) return backup;
+    if (primary.host.equals(backup.host) && primary.port == backup.port) return null;
+    return backup;
   }
 
   private static HostPort parseOpcUa(String channel) {

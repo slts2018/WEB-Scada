@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
-import type { AnimationLinkFlow } from '@web-scada/core'
+import { Euler, MathUtils, Matrix4, Quaternion, Vector3 } from 'three'
+import type { AnimationLinkFlow, Transform3D } from '@web-scada/core'
 import {
   clonePageWithNewIds,
   createDefaultObject3DPanel,
@@ -50,7 +51,12 @@ import {
   savePublishPackage,
   type ProjectIndexItem,
 } from '@/shared/storage/repository'
-import { apiExportProject, apiExportSite, apiImportProject, apiUploadResource } from '@/shared/api/client'
+import {
+  apiExportProject,
+  apiExportSite,
+  apiImportProject,
+  apiUploadResource,
+} from '@/shared/api/client'
 import { computeAlignPatches, type AlignMode } from '@/shared/designer/geometry'
 import { computeAlignPatches3d } from '@/shared/designer/geometry3d'
 import { clearResourceRefs, countRefsByResource, replaceResourceRefs } from '@/shared/project/resourceRefs'
@@ -65,6 +71,16 @@ import { libraryPlaceSize } from '@/shared/library/materials'
 import { clonePlain } from '@/shared/utils/clonePlain'
 
 const HISTORY_LIMIT = 50
+
+export type SiteExportPhase = 'save' | 'publish' | 'pack' | 'download'
+
+export interface SiteExportProgress {
+  phase: SiteExportPhase
+  /** 下载阶段 0–100；打包阶段未知时为 null */
+  percent: number | null
+  received: number
+  total: number
+}
 
 export const useProjectStore = defineStore('project', () => {
   const document = ref<ProjectDocument>(normalizeProjectDocument(createEmptyProject('演示工程')))
@@ -1554,10 +1570,11 @@ export const useProjectStore = defineStore('project', () => {
       return
     }
     if (opts?.additive) {
-      const rest = selectedObject3dIds.value.filter((x) => x !== id)
       const already = selectedObject3dIds.value.includes(id)
-      // 再点已选项：仅改为主选，不取消（取消用空白单击）
-      selectedObject3dIds.value = already ? [id, ...rest] : [id, ...rest]
+      // Ctrl/Shift 再点已选项：从多选里去掉。空白单击仍清空整组。
+      selectedObject3dIds.value = already
+        ? selectedObject3dIds.value.filter((x) => x !== id)
+        : [id, ...selectedObject3dIds.value]
     } else {
       selectedObject3dIds.value = [id]
     }
@@ -1985,13 +2002,13 @@ export const useProjectStore = defineStore('project', () => {
       typical = Math.max(typical, sx, sy, sz)
     }
     /**
-     * 内置图元 scale≈1，可用尺寸推间距。
-     * CAD 管道等自动缩放后 scale 常为 1e-3～1e6，再乘 1.25 会贴到「很远」；这类用固定场景间距。
+     * 内置图元 scale≈1，按尺寸错开一小段，避免和原件完全重叠。
+     * CAD 管道等自动缩放后 scale 常为 1e-3～1e6，不能再按缩放放大间距。
      */
     if (typical > 0.05 && typical < 8) {
-      return Math.min(3, Math.max(1.2, typical * 1.25))
+      return Math.min(1.2, Math.max(0.3, typical * 0.35))
     }
-    return 1.5
+    return 0.4
   }
 
   function offsetPosition3d(
@@ -2188,7 +2205,44 @@ export const useProjectStore = defineStore('project', () => {
     return group
   }
 
-  function ungroupSelectedObject3ds(): string[] {
+  /** 解组：子物体本地变换乘上组的旋转/缩放/位移，视觉位置和朝向保持不变 */
+function bakeChildUnderGroup(group: Transform3D, child: Transform3D): Transform3D {
+  const parentEuler = new Euler(
+    MathUtils.degToRad(group.rotation[0]),
+    MathUtils.degToRad(group.rotation[1]),
+    MathUtils.degToRad(group.rotation[2]),
+    'XYZ',
+  )
+  const childEuler = new Euler(
+    MathUtils.degToRad(child.rotation[0]),
+    MathUtils.degToRad(child.rotation[1]),
+    MathUtils.degToRad(child.rotation[2]),
+    'XYZ',
+  )
+  const parentMat = new Matrix4().compose(
+    new Vector3(group.position[0], group.position[1], group.position[2]),
+    new Quaternion().setFromEuler(parentEuler),
+    new Vector3(group.scale[0], group.scale[1], group.scale[2]),
+  )
+  const childMat = new Matrix4().compose(
+    new Vector3(child.position[0], child.position[1], child.position[2]),
+    new Quaternion().setFromEuler(childEuler),
+    new Vector3(child.scale[0], child.scale[1], child.scale[2]),
+  )
+  parentMat.multiply(childMat)
+  const pos = new Vector3()
+  const quat = new Quaternion()
+  const scale = new Vector3()
+  parentMat.decompose(pos, quat, scale)
+  const euler = new Euler().setFromQuaternion(quat, 'XYZ')
+  return {
+    position: [pos.x, pos.y, pos.z],
+    rotation: [MathUtils.radToDeg(euler.x), MathUtils.radToDeg(euler.y), MathUtils.radToDeg(euler.z)],
+    scale: [scale.x, scale.y, scale.z],
+  }
+}
+
+function ungroupSelectedObject3ds(): string[] {
     const page = activePage3d.value
     if (!page) return []
     const groups = selectedObjects3d.value.filter((o) => o.children?.length)
@@ -2200,14 +2254,7 @@ export const useProjectStore = defineStore('project', () => {
       if (!loc) continue
       const children = (group.children ?? []).map((c) => ({
         ...c,
-        transform: {
-          ...c.transform,
-          position: [
-            c.transform.position[0] + group.transform.position[0],
-            c.transform.position[1] + group.transform.position[1],
-            c.transform.position[2] + group.transform.position[2],
-          ] as [number, number, number],
-        },
+        transform: bakeChildUnderGroup(group.transform, c.transform),
       }))
       loc.list.splice(loc.index, 1, ...children)
       if (loc.parent) loc.parent.children = [...loc.list]
@@ -2612,14 +2659,26 @@ log('script ready · ' + (context.trigger || 'try'))
    * 导出网站部署包（Runtime + 工程发布快照 + 资源）。
    * 需服务端且本机已有 win-x64-java 模板（pnpm pack:win 或 SCADA_SITE_TEMPLATE）。
    */
-  async function exportSitePackage(): Promise<{ fileName: string }> {
+  async function exportSitePackage(
+    onProgress?: (progress: SiteExportProgress) => void,
+  ): Promise<{ fileName: string }> {
+    const report = (phase: SiteExportPhase, extra?: Partial<SiteExportProgress>) => {
+      onProgress?.({ phase, percent: null, received: 0, total: 0, ...extra })
+    }
+    report('save')
     await probeStorage()
     if (getStorageMode() !== 'api') {
       throw new Error('export_requires_api')
     }
     if (dirty.value) await save()
+    report('publish')
     await publish()
-    const { blob, fileName } = await apiExportSite(document.value.meta.id)
+    report('pack')
+    const { blob, fileName } = await apiExportSite(document.value.meta.id, (download) => {
+      const percent = download.total > 0 ? Math.min(99, Math.round((download.received / download.total) * 100)) : null
+      report('download', { percent, received: download.received, total: download.total })
+    })
+    report('download', { percent: 100, received: blob.size, total: blob.size })
     const url = URL.createObjectURL(blob)
     const a = window.document.createElement('a')
     a.href = url

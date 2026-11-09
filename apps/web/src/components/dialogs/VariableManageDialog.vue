@@ -1658,6 +1658,20 @@ async function removeAlarm(alarmId: string) {
         </label>
         <label>
           <span class="cfg-label">
+            备用主机
+            <HelpTip content="冗余 PLC 的另一台地址。主连不上就改连备用，备用断了再试主。备用还通着时不切回主。留空则只用上面的主机。" />
+          </span>
+          <el-input v-model="deviceConn.backupHost" placeholder="可不填" />
+        </label>
+        <label>
+          <span class="cfg-label">
+            备用端口
+            <HelpTip content="备用 PLC 的 Modbus 端口。留空则与主端口相同，默认 502。" />
+          </span>
+          <el-input v-model="deviceConn.backupPort" placeholder="502" />
+        </label>
+        <label>
+          <span class="cfg-label">
             字排序
             <HelpTip content="对齐 Flight「字排序」。作用于单寄存器字节序。" />
           </span>

@@ -32,7 +32,7 @@ import Object3DModelEditorDialog from '@/components/designer/Object3DModelEditor
 import Object3DPanelPageEditorDialog from '@/components/designer/Object3DPanelPageEditorDialog.vue'
 import Object3DLiquidDialog from '@/components/designer/Object3DLiquidDialog.vue'
 import Object3DFlowDialog from '@/components/designer/Object3DFlowDialog.vue'
-import { useProjectStore } from '@/stores/project'
+import { useProjectStore, type SiteExportPhase } from '@/stores/project'
 import { useOutputLogStore } from '@/stores/outputLog'
 import { useTagStore } from '@/stores/tag'
 import {
@@ -123,6 +123,16 @@ const variableManageVisible = ref(false)
 const resourceManageVisible = ref(false)
 const publishValidateVisible = ref(false)
 const publishValidateResult = ref<PublishValidationResult | null>(null)
+const siteExportVisible = ref(false)
+const siteExporting = ref(false)
+const siteExportDone = ref(false)
+const siteExportError = ref('')
+const siteExportPhase = ref<SiteExportPhase>('save')
+const siteExportPercent = ref<number | null>(null)
+const siteExportReceived = ref(0)
+const siteExportTotal = ref(0)
+const siteExportElapsed = ref(0)
+const siteExportSteps = ['保存工程', '发布画面', '打包网站', '下载文件']
 const pendingDeleteId = ref<string | null>(null)
 const unsavedAction = ref<'new' | 'open' | null>(null)
 
@@ -173,33 +183,114 @@ async function onExportProject() {
 }
 
 async function onExportSite() {
+  if (siteExporting.value) return
+  let timer = 0
+  const started = Date.now()
+  siteExportVisible.value = true
+  siteExporting.value = true
+  siteExportDone.value = false
+  siteExportError.value = ''
+  siteExportPhase.value = 'save'
+  siteExportPercent.value = null
+  siteExportReceived.value = 0
+  siteExportTotal.value = 0
+  siteExportElapsed.value = 0
+  timer = window.setInterval(() => {
+    siteExportElapsed.value = Math.floor((Date.now() - started) / 1000)
+  }, 500)
   try {
     cancelAutoSave()
-    ElMessage.info('正在发布并打包网站，请稍候…')
-    const { fileName } = await project.exportSitePackage()
+    log.info('开始导出网站包', '设计端')
+    const { fileName } = await project.exportSitePackage((progress) => {
+      siteExportPhase.value = progress.phase
+      siteExportPercent.value = progress.percent
+      siteExportReceived.value = progress.received
+      siteExportTotal.value = progress.total
+    })
+    siteExportDone.value = true
+    siteExportPercent.value = 100
     ElMessage.success(`已导出网站包 ${fileName}（解压后运行 start.bat，他人访问 IP:8787/runtime）`)
     log.success(`导出网站包：${fileName}`, '设计端')
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg === 'export_requires_api') {
-      ElMessage.warning('导出网站需要连接服务端')
+      siteExportError.value = '导出网站需要连接服务端'
+      ElMessage.warning(siteExportError.value)
     } else if (err instanceof ApiError && err.body && typeof err.body === 'object') {
       const body = err.body as { error?: string; message?: string }
       if (body.error === 'site_template_missing') {
-        ElMessage.warning(
-          body.message ||
-            '缺少网站模板：请先在仓库执行 pnpm pack:win，或设置 SCADA_SITE_TEMPLATE',
-        )
+        siteExportError.value =
+          body.message || '缺少网站模板：请先在仓库执行 pnpm pack:win，或设置 SCADA_SITE_TEMPLATE'
+        ElMessage.warning(siteExportError.value)
         log.warn('导出网站失败：site_template_missing', '设计端')
       } else {
-        ElMessage.error('导出网站包失败')
+        siteExportError.value = '导出网站包失败'
+        ElMessage.error(siteExportError.value)
         log.error(`导出网站失败：${msg}`, '设计端')
       }
     } else {
-      ElMessage.error('导出网站包失败')
+      siteExportError.value = '导出网站包失败'
+      ElMessage.error(siteExportError.value)
       log.error(`导出网站失败：${msg}`, '设计端')
     }
+  } finally {
+    window.clearInterval(timer)
+    siteExporting.value = false
   }
+}
+
+function siteExportStepIndex(phase: SiteExportPhase) {
+  if (phase === 'publish') return 1
+  if (phase === 'pack') return 2
+  if (phase === 'download') return 3
+  return 0
+}
+
+function siteExportMark(index: number) {
+  const current = siteExportStepIndex(siteExportPhase.value)
+  if (siteExportDone.value || index < current) return '完成'
+  if (siteExportError.value && index === current) return '失败'
+  if (siteExporting.value && index === current) return '进行中'
+  return '等待'
+}
+
+function formatExportSize(bytes: number) {
+  if (!bytes) return '0 MB'
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/** 整段导出共用一条进度。打包在服务端完成前没有字节数，按已用时间往前走，到下载再收到尾。 */
+const siteExportShownPercent = computed(() => {
+  if (siteExportDone.value) return 100
+  const elapsed = siteExportElapsed.value
+  const packCap = 88
+  const packed = Math.min(packCap, 20 + Math.round(68 * (1 - Math.exp(-elapsed / 22))))
+  if (siteExportPhase.value === 'save') return 6
+  if (siteExportPhase.value === 'publish') return 14
+  if (siteExportPhase.value === 'pack') return Math.max(20, packed)
+  const filePct = siteExportPercent.value ?? 0
+  return Math.min(99, packed + Math.round(((100 - packed) * filePct) / 100))
+})
+
+const siteExportDetail = computed(() => {
+  const sec = siteExportElapsed.value
+  const clock = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`
+  const pct = siteExportShownPercent.value
+  if (siteExportError.value) return siteExportError.value
+  if (siteExportDone.value) return `已完成 ${pct}%，用时 ${clock}。文件已开始下载。`
+  if (siteExportPhase.value === 'save') return `正在保存工程… ${pct}% ，已用时 ${clock}`
+  if (siteExportPhase.value === 'publish') return `正在发布运行画面… ${pct}% ，已用时 ${clock}`
+  if (siteExportPhase.value === 'pack') return `正在复制运行环境并压缩… ${pct}% ，已用时 ${clock}`
+  const got = formatExportSize(siteExportReceived.value)
+  if (siteExportTotal.value > 0) {
+    return `正在下载 ${got} / ${formatExportSize(siteExportTotal.value)}… ${pct}% ，已用时 ${clock}`
+  }
+  return `正在下载 ${got}… ${pct}% ，已用时 ${clock}`
+})
+
+function beforeSiteExportClose(done: () => void) {
+  if (siteExporting.value) return
+  done()
 }
 
 async function onImportProject(file?: File | null) {
@@ -651,7 +742,7 @@ function onDesignerKeyDown(e: KeyboardEvent) {
   }
 
   const step2d = shift ? 10 : 1
-  const step3d = shift ? 0.5 : 0.1
+  const step3d = shift ? 0.5 : 0.001
   if (code === 'ArrowLeft') {
     e.preventDefault()
     e.stopPropagation()
@@ -942,6 +1033,41 @@ onUnmounted(() => {
   >
     <ScriptEditorPanel />
   </el-dialog>
+
+  <el-dialog
+    v-model="siteExportVisible"
+    title="导出网站包"
+    width="460px"
+    align-center
+    :close-on-click-modal="false"
+    :close-on-press-escape="!siteExporting"
+    :show-close="!siteExporting"
+    :before-close="beforeSiteExportClose"
+  >
+    <p class="site-export-lead">正在准备可在其他电脑上打开的运行包。打包时请留在此窗口。</p>
+    <ol class="site-export-steps">
+      <li
+        v-for="(label, index) in siteExportSteps"
+        :key="label"
+        :class="{
+          on: siteExporting && siteExportStepIndex(siteExportPhase) === index,
+          ok: siteExportDone || siteExportStepIndex(siteExportPhase) > index,
+        }"
+      >
+        <span>{{ label }}</span>
+        <span>{{ siteExportMark(index) }}</span>
+      </li>
+    </ol>
+    <el-progress
+      :percentage="siteExportShownPercent"
+      :status="siteExportError ? 'exception' : siteExportDone ? 'success' : undefined"
+      :stroke-width="8"
+    />
+    <p class="site-export-detail">{{ siteExportDetail }}</p>
+    <template #footer>
+      <el-button type="primary" :disabled="siteExporting" @click="siteExportVisible = false">关闭</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <style scoped>
@@ -978,6 +1104,42 @@ onUnmounted(() => {
 
 .autosave.ok {
   color: #86efac;
+}
+
+.site-export-lead,
+.site-export-detail {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--scada-muted);
+}
+
+.site-export-steps {
+  margin: 12px 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.site-export-steps li {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--scada-muted);
+}
+
+.site-export-steps li.on {
+  color: var(--scada-text);
+}
+
+.site-export-steps li.ok {
+  color: #86efac;
+}
+
+.site-export-detail {
+  margin-top: 10px;
 }
 
 .autosave.error {

@@ -104,6 +104,7 @@ export function applyScenePresentation(
       opts.controls.maxDistance = p.cameraMaxDistance
       opts.controls.minPolarAngle = MathUtils.degToRad(p.cameraMinPolarDeg)
       opts.controls.maxPolarAngle = MathUtils.degToRad(p.cameraMaxPolarDeg)
+      opts.controls.rotateSpeed = p.cameraRotateSpeed
     }
   }
 

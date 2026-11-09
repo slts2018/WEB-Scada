@@ -521,8 +521,10 @@ async function replaceImage(e: Event) {
     <div class="panel-title">属性</div>
     <div v-if="multiCount === 0" class="empty">选中画布上的图元</div>
     <div v-else-if="multiCount > 1" class="form">
-      <div class="multi">已选中 {{ multiCount }} 个图元</div>
-      <p class="hint">可用顶栏对齐/分布，或下方批量操作</p>
+      <div class="multi">
+        已选中 {{ multiCount }} 个图元
+        <HelpTip content="可用顶栏对齐/分布，或下方批量操作" />
+      </div>
       <div class="batch-row">
         <el-button size="small" @click="project.setSelectedFlags('locked', true)">锁定</el-button>
         <el-button size="small" @click="project.setSelectedFlags('locked', false)">解锁</el-button>
@@ -538,9 +540,14 @@ async function replaceImage(e: Event) {
       </div>
     </div>
     <div v-else-if="widget" class="single">
-      <p class="hint">按分类编辑当前图元</p>
       <el-collapse v-model="propCollapse" class="prop-collapse">
-        <el-collapse-item :title="sectionTitle.basic" name="basic">
+        <el-collapse-item name="basic">
+          <template #title>
+            <span class="collapse-title">
+              {{ sectionTitle.basic }}
+              <HelpTip content="按分类编辑当前图元" />
+            </span>
+          </template>
       <label>
         <span>名称</span>
         <el-input size="small" :model-value="widget.name" @update:model-value="updateName" />
@@ -565,7 +572,16 @@ async function replaceImage(e: Event) {
       </div>
         </el-collapse-item>
 
-        <el-collapse-item :title="sectionTitle.transform" name="transform">
+        <el-collapse-item name="transform">
+          <template #title>
+            <span class="collapse-title">
+              {{ sectionTitle.transform }}
+              <HelpTip
+                v-if="widget.type === 'polyline' || widget.type === 'polygon' || widget.type === 'pipe'"
+                content="选中后拖动白色顶点可改折点"
+              />
+            </span>
+          </template>
       <div class="row">
         <label>
           <span>X</span>
@@ -620,9 +636,6 @@ async function replaceImage(e: Event) {
         />
       </label>
 
-      <p v-if="widget.type === 'polyline' || widget.type === 'polygon' || widget.type === 'pipe'" class="hint">
-        选中后拖动白色顶点可改折点
-      </p>
         </el-collapse-item>
 
         <el-collapse-item v-if="hasAppearance" :title="sectionTitle.look" name="look">
@@ -827,7 +840,7 @@ async function replaceImage(e: Event) {
             <section v-if="widget.type === 'trend' || widget.type === 'trendHistory'" class="config-block">
               <div class="section-title">
                 曲线变量（最多 {{ TREND_MAX_CURVES }} 条）
-                <HelpTip content="最多 8 条。每条选变量、颜色和图例名。没加变量时显示示例数据。历史曲线绑上变量后按时间范围读历史，不是实时值。" />
+                <HelpTip content="最多 8 条。每条选变量、颜色和图例名。没加变量时显示示例数据；添加后由动画连接 / 属性绑定提供实时值。历史曲线绑上变量后按时间范围读历史。每条曲线按自身数据自动缩放；可点图例、滚轮缩放、悬停读数。" />
               </div>
               <div class="curve-list">
                 <div v-for="(curve, i) in trendCurveList" :key="curve.tagId || `empty${i}`" class="curve-block">
@@ -885,13 +898,6 @@ async function replaceImage(e: Event) {
                   <el-button @click="exportTrendPng">导出图片</el-button>
                 </div>
               </div>
-              <p class="form-hint curve-hint">
-                {{
-                  trendCurveList.length
-                    ? '每条曲线按自身数据自动缩放；可点图例、滚轮缩放、悬停读数。'
-                    : '未添加变量时显示示例数据；添加后由动画连接 / 属性绑定提供实时值。'
-                }}
-              </p>
             </section>
 
             <section class="config-block">
@@ -919,9 +925,6 @@ async function replaceImage(e: Event) {
                 @update:model-value="(v: number | undefined) => updateProp('chartFontSize', v == null ? undefined as never : Number(v))"
               />
             </el-form-item>
-            <p v-if="widget.type === 'trend' || widget.type === 'trendHistory'" class="form-hint">
-              留空 = 自动（图元短边 ÷ 10，14~22px）
-            </p>
 
             <el-form-item v-if="widget.type === 'trend' || widget.type === 'trendHistory'" label-width="108px">
               <template #label>
@@ -974,7 +977,6 @@ async function replaceImage(e: Event) {
                 <el-option v-for="item in TREND_INTERVALS" :key="item.id" :label="item.label" :value="item.id" />
               </el-select>
             </el-form-item>
-            <p v-if="widget.type === 'trendHistory'" class="form-hint">默认间隔；运行端工具栏可临时改，不写回工程。</p>
 
             <el-form-item v-if="widget.type === 'trendHistory'" label-width="108px">
               <template #label>
@@ -1427,7 +1429,16 @@ async function replaceImage(e: Event) {
 }
 
 .multi {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   font-weight: 600;
+}
+
+.collapse-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
 }
 
 .form {

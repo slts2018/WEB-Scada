@@ -66,7 +66,8 @@ const cache = new Map<string, HTMLCanvasElement>()
 function ensureHost() {
   if (host) return host
   host = document.createElement('div')
-  host.style.cssText = 'position:fixed;left:-10000px;top:0;visibility:hidden;pointer-events:none;'
+  // 必须是 absolute。fixed 会被 ECharts tooltip 改回 relative，离屏盒子仍占文档高度，页面底部就能空拖。
+  host.style.cssText = 'position:absolute;left:-10000px;top:0;visibility:hidden;pointer-events:none;'
   document.body.appendChild(host)
   return host
 }

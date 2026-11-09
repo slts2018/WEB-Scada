@@ -333,6 +333,8 @@ export interface Page3DPresentation {
   cameraMinPolarDeg?: number
   /** 俯仰上限（极角，度；90≈平视），默认 89 */
   cameraMaxPolarDeg?: number
+  /** 左键旋转灵敏度。1 为默认，越大同样拖动转得越快 */
+  cameraRotateSpeed?: number
 }
 
 export type Page = Page2D | Page3D

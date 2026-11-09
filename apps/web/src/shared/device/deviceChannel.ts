@@ -1,6 +1,7 @@
 /**
  * 设备「通道」字段按协议拆分/拼回（仍落盘为 DeviceMeta.channel 字符串）。
- * Modbus：host:port 或 host:port|字排序|双字排序（对齐 Flight Swap*）。
+ * Modbus：host:port、host:port|字排序|双字排序，
+ * 或 host:port|字排序|双字排序|备用host:port（有备用时字序总是写出）。
  */
 import type { DeviceProtocol, ModbusSwapMode } from '@web-scada/core'
 import { normalizeModbusSwap } from '@web-scada/core'
@@ -24,6 +25,10 @@ export type DeviceConnFields = {
   wordSwap: ModbusSwapMode
   /** Modbus：双字排序（32/64 位） */
   dwordSwap: ModbusSwapMode
+  /** Modbus 冗余备用主机。空则只用主地址。 */
+  backupHost: string
+  /** Modbus 冗余备用端口。空则跟主端口。 */
+  backupPort: string
   raw: string
 }
 
@@ -39,6 +44,8 @@ export function emptyConnFields(): DeviceConnFields {
     mcdSource: 'vib',
     wordSwap: 'SwapNone',
     dwordSwap: 'SwapWords',
+    backupHost: '',
+    backupPort: '',
     raw: '',
   }
 }
@@ -77,6 +84,17 @@ export function parseDeviceChannel(
       }
       if (parts[1]) f.wordSwap = normalizeModbusSwap(parts[1], 'SwapNone')
       if (parts[2]) f.dwordSwap = normalizeModbusSwap(parts[2], 'SwapWords')
+      const backup = (parts[3] ?? '').trim()
+      if (backup) {
+        const bm = backup.match(/^([^:]+):(\d+)$/)
+        if (bm) {
+          f.backupHost = bm[1]
+          f.backupPort = bm[2]
+        } else {
+          f.backupHost = backup
+          f.backupPort = f.port || '502'
+        }
+      }
       break
     }
     case 'opcua':
@@ -141,11 +159,16 @@ export function formatDeviceChannel(
       const port = fields.port.trim() || '502'
       const word = normalizeModbusSwap(fields.wordSwap, 'SwapNone')
       const dword = normalizeModbusSwap(fields.dwordSwap, 'SwapWords')
-      // 默认字序不写进 channel，保持旧工程简洁；任一非默认则完整写出
-      if (word === 'SwapNone' && dword === 'SwapWords') {
-        return `${host}:${port}`
+      const backupHost = fields.backupHost.trim()
+      let channel = `${host}:${port}`
+      if (word !== 'SwapNone' || dword !== 'SwapWords') {
+        channel = `${host}:${port}|${word}|${dword}`
       }
-      return `${host}:${port}|${word}|${dword}`
+      if (!backupHost || (backupHost === host && (fields.backupPort.trim() || port) === port)) {
+        return channel
+      }
+      const backupPort = fields.backupPort.trim() || port
+      return `${host}:${port}|${word}|${dword}|${backupHost}:${backupPort}`
     }
     case 'opcua': {
       const ep = fields.endpoint.trim()

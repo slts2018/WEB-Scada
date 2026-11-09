@@ -20,6 +20,7 @@ import {
 } from '@/shared/project/object3dTree'
 import { useProjectStore } from '@/stores/project'
 import { useTagStore } from '@/stores/tag'
+import Object3DSameModelSizeDialog from '@/components/designer/Object3DSameModelSizeDialog.vue'
 import {
   isDesignerCanvasContext,
   installPointerModifierTracker,
@@ -38,7 +39,12 @@ const props = withDefaults(
 const project = useProjectStore()
 const tags = useTagStore()
 const host = ref<HTMLDivElement | null>(null)
+const boardEl = ref<HTMLDivElement | null>(null)
+const ctxEl = ref<HTMLDivElement | null>(null)
 const marquee = ref<{ x: number; y: number; width: number; height: number } | null>(null)
+const ctxMenu = ref({ visible: false, placed: false, x: 0, y: 0, maxHeight: 0 })
+const batchSizeOpen = ref(false)
+let rightDown: { x: number; y: number } | null = null
 let bundle: Scene3DBundle | null = null
 let removeTagListener: (() => void) | null = null
 let boxStart: { x: number; y: number; additive: boolean } | null = null
@@ -72,7 +78,7 @@ const panelOnlySelection = computed(() => {
 const previewHint = computed(() =>
   project.previewLive
     ? '实时预览中：外观随 Tag 刷新（含闪烁；不写回）'
-    : '点画布后：Ctrl/Shift+点多选 · Ctrl+C/V · Delete · W/E/R · F',
+    : '点画布后：Ctrl/Shift+点多选 · 右键菜单 · Ctrl+C/V · Delete · W/E/R · F',
 )
 
 const gizmoModeLabel = computed(() => {
@@ -146,7 +152,23 @@ function onEmptyPointerDown(e: PointerEvent) {
   window.addEventListener('pointerup', onMarqueeUp, { once: true })
 }
 
+function onBoardPointerDown(e: PointerEvent) {
+  const el = e.currentTarget as HTMLElement
+  el.focus({ preventScroll: true })
+  if (e.button === 2) rightDown = { x: e.clientX, y: e.clientY }
+}
+
 function onBoardPointerUp(e: PointerEvent) {
+  if (e.button === 2) {
+    const start = rightDown
+    rightDown = null
+    if (!start || props.interactive === false) return
+    const dx = e.clientX - start.x
+    const dy = e.clientY - start.y
+    if (dx * dx + dy * dy >= 25) return
+    openCtxMenu(e)
+    return
+  }
   // 延迟 focus，避免与本轮 pointer 事件叠出假单击冲掉选中
   if (isAdditivePointer(e)) return
   const el = e.currentTarget as HTMLElement
@@ -155,6 +177,175 @@ function onBoardPointerUp(e: PointerEvent) {
     if (document.activeElement === el) return
     el.focus({ preventScroll: true })
   }, 0)
+}
+
+const ctxHasSel = computed(() => project.selectedObject3dIds.length > 0)
+const ctxCanGroup = computed(() => project.selectedObject3dIds.length >= 2)
+const ctxCanUngroup = computed(() =>
+  project.selectedObjects3d.some((o) => Boolean(o.children?.length)),
+)
+const ctxCanPaste = computed(() => project.clipboard3d.length > 0)
+/** 至少两个，且都是同一个模型文件。混了别的模型或内置图元则不能一起改尺寸 */
+const ctxSameModel = computed(() => {
+  const objs = project.selectedObjects3d
+  if (objs.length < 2) return false
+  const id = objs[0]?.modelResourceId
+  if (!id) return false
+  return objs.every((o) => o.modelResourceId === id)
+})
+
+function hideCtx() {
+  ctxMenu.value.visible = false
+}
+
+function onWindowPointerDown(e: PointerEvent) {
+  if (!ctxMenu.value.visible) return
+  const menu = ctxEl.value
+  if (menu && e.target instanceof Node && menu.contains(e.target)) return
+  hideCtx()
+}
+
+/** 右键点在未选中的模型上时先选中它；已在选区里则保留多选，空白不改选区 */
+function openCtxMenu(e: PointerEvent) {
+  if (!bundle || !boardEl.value) return
+  const hit = bundle.raycastAt(e.clientX, e.clientY)
+  if (hit && !project.selectedObject3dIds.includes(hit)) {
+    project.selectObject3d(hit)
+    syncSelectionGizmo()
+  }
+  const rect = boardEl.value.getBoundingClientRect()
+  const x = e.clientX - rect.left
+  const y = e.clientY - rect.top
+  ctxMenu.value = { visible: true, placed: false, x, y, maxHeight: 0 }
+  void nextTick(() => placeCtxMenu(x, y))
+}
+
+function placeCtxMenu(anchorX: number, anchorY: number) {
+  const board = boardEl.value
+  const menu = ctxEl.value
+  if (!board || !menu || !ctxMenu.value.visible) return
+  const pad = 4
+  const mw = menu.offsetWidth
+  const mh = menu.offsetHeight
+  const bw = board.clientWidth
+  const bh = board.clientHeight
+  const maxHeight = Math.max(120, bh - pad * 2)
+  let x = anchorX + 2
+  let y = anchorY + 2
+  if (x + mw > bw - pad) x = Math.max(pad, anchorX - mw - 2)
+  if (y + Math.min(mh, maxHeight) > bh - pad) y = Math.max(pad, anchorY - Math.min(mh, maxHeight) - 2)
+  if (y + Math.min(mh, maxHeight) > bh - pad) y = pad
+  ctxMenu.value = {
+    ...ctxMenu.value,
+    placed: true,
+    x,
+    y,
+    maxHeight: mh > maxHeight ? maxHeight : 0,
+  }
+}
+
+function ctxAction(action: string) {
+  hideCtx()
+  if (action === 'paste') {
+    void pasteAndShow()
+    return
+  }
+  if (action === 'copy') {
+    void copySelectedAndNotify()
+    return
+  }
+  if (action === 'cut') {
+    syncStoreSelectionFromScene()
+    const ids = [...project.selectedObject3dIds]
+    if (project.cutSelectedObject3ds()) {
+      ElMessage.success('已剪切')
+      unmountByIds(ids)
+      void syncSceneFromPage()
+    } else ElMessage.warning('请先在场景中点选对象再剪切')
+    return
+  }
+  if (action === 'duplicate') {
+    const created = project.duplicateObject3ds(project.selectedObject3dIds)
+    if (created.length) {
+      ElMessage.success(`已复制副本 ${created.length} 个`)
+      void syncSceneFromPage()
+    }
+    return
+  }
+  if (action === 'delete') {
+    syncStoreSelectionFromScene()
+    const ids = [...project.selectedObject3dIds]
+    if (!ids.length) {
+      ElMessage.warning('请先在场景中点选要删除的对象')
+      return
+    }
+    project.removeObject3ds(ids)
+    unmountByIds(ids)
+    void syncSceneFromPage()
+    ElMessage.success(`已删除 ${ids.length} 个对象`)
+    return
+  }
+  if (action === 'group') {
+    syncStoreSelectionFromScene()
+    if (project.selectedObject3dIds.length < 2) {
+      ElMessage.warning('请先多选至少 2 个对象（Ctrl/Shift + 左键）')
+      return
+    }
+    const g = project.groupSelectedObject3ds()
+    if (!g) {
+      ElMessage.warning('只能组合同一层级下的对象')
+      return
+    }
+    void syncSceneFromPage()
+    ElMessage.success(`已组合为「${g.name}」`)
+    return
+  }
+  if (action === 'ungroup') {
+    syncStoreSelectionFromScene()
+    const ids = project.ungroupSelectedObject3ds()
+    if (!ids.length) {
+      ElMessage.warning('请先选中已组合的对象')
+      return
+    }
+    void syncSceneFromPage()
+    ElMessage.success(`已解组（${ids.length} 个对象）`)
+    return
+  }
+  if (action === 'lock') {
+    project.setSelectedObject3dFlags('locked')
+    return
+  }
+  if (action === 'hide') {
+    project.setSelectedObject3dFlags('visible')
+    return
+  }
+  if (action === 'focus') {
+    fitSelection()
+    return
+  }
+  if (action === 'animation') {
+    if (project.selectedObject3dIds.length) project.openAnimationConnection()
+    return
+  }
+  if (action === 'size') {
+    if (!ctxSameModel.value) return
+    batchSizeOpen.value = true
+  }
+}
+
+function onBatchSizeApplied(ids: string[]) {
+  if (!bundle) return
+  for (const id of ids) {
+    const node = findObject3dDeep(props.page.objects, id)
+    if (!node) continue
+    if (project.previewLive) {
+      const resolved = resolveObject3DVisual(node, (tagId) => tags.getValue(tagId))
+      bundle.applyVisual(id, resolved.object, { applyModelColor: resolved.colorTinted })
+    } else {
+      bundle.applyVisual(id, node)
+    }
+  }
+  syncSelectionGizmo()
 }
 
 function onMarqueeMove(e: PointerEvent) {
@@ -692,6 +883,7 @@ onMounted(async () => {
     installPointerModifierTracker()
     if (project.previewLive) startPreview()
     window.addEventListener('keydown', onKeyDown, true)
+    window.addEventListener('pointerdown', onWindowPointerDown)
     statusTimer = setInterval(() => refreshGizmoStatus(), 400)
   } catch (err) {
     console.error('[Canvas3DBoard] init failed', err)
@@ -828,6 +1020,7 @@ onUnmounted(() => {
   if (statusTimer) { clearInterval(statusTimer); statusTimer = null }
   clearPreviewBlink()
   window.removeEventListener('keydown', onKeyDown, true)
+  window.removeEventListener('pointerdown', onWindowPointerDown)
   window.removeEventListener('pointermove', onMarqueeMove)
   removeTagListener?.()
   removeTagListener = null
@@ -865,11 +1058,13 @@ defineExpose({
 
 <template>
   <div
+    ref="boardEl"
     class="board3d"
     data-scada-canvas="3d"
     tabindex="0"
-    @pointerdown.capture="($event.currentTarget as HTMLElement).focus({ preventScroll: true })"
+    @pointerdown.capture="onBoardPointerDown"
     @pointerup="onBoardPointerUp"
+    @contextmenu.prevent
   >
     <div ref="host" class="host" />
     <div
@@ -921,6 +1116,46 @@ defineExpose({
       </button>
       <button type="button" class="cam" title="设为默认视角" @click="captureDefaultCamera">视</button>
     </div>
+    <div
+      v-if="ctxMenu.visible"
+      ref="ctxEl"
+      class="ctx"
+      :class="{ pending: !ctxMenu.placed }"
+      :style="{
+        left: ctxMenu.x + 'px',
+        top: ctxMenu.y + 'px',
+        maxHeight: ctxMenu.maxHeight ? ctxMenu.maxHeight + 'px' : undefined,
+      }"
+      @pointerdown.stop
+    >
+      <button
+        type="button"
+        class="accent"
+        :disabled="!ctxHasSel"
+        @click="ctxAction('animation')"
+      >
+        动画连接
+      </button>
+      <button v-if="ctxSameModel" type="button" class="accent" @click="ctxAction('size')">
+        改尺寸
+      </button>
+      <hr />
+      <button type="button" :disabled="!ctxHasSel" @click="ctxAction('copy')">复制</button>
+      <button type="button" :disabled="!ctxHasSel" @click="ctxAction('cut')">剪切</button>
+      <button type="button" :disabled="!ctxCanPaste" @click="ctxAction('paste')">粘贴</button>
+      <button type="button" :disabled="!ctxHasSel" @click="ctxAction('duplicate')">复制副本</button>
+      <hr />
+      <button type="button" :disabled="!ctxCanGroup" @click="ctxAction('group')">组合</button>
+      <button type="button" :disabled="!ctxCanUngroup" @click="ctxAction('ungroup')">解组</button>
+      <button type="button" :disabled="!ctxHasSel" @click="ctxAction('lock')">锁定/解锁</button>
+      <button type="button" :disabled="!ctxHasSel" @click="ctxAction('hide')">显示/隐藏</button>
+      <button type="button" :disabled="!ctxHasSel" @click="ctxAction('focus')">看选中</button>
+      <hr />
+      <button type="button" class="danger" :disabled="!ctxHasSel" @click="ctxAction('delete')">
+        删除
+      </button>
+    </div>
+    <Object3DSameModelSizeDialog v-model:visible="batchSizeOpen" @applied="onBatchSizeApplied" />
     <div class="hud">
       <span>{{ page.name }}</span>
       <span>对象 {{ objectCount }}</span>
@@ -1023,6 +1258,59 @@ defineExpose({
 .focus-hint {
   color: #fbbf24;
   font-weight: 600;
+}
+
+.ctx {
+  position: absolute;
+  z-index: 30;
+  min-width: 140px;
+  padding: 4px;
+  border: 1px solid var(--scada-border);
+  border-radius: 6px;
+  background: #171a21;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.ctx.pending {
+  visibility: hidden;
+}
+
+.ctx button {
+  border: none;
+  background: transparent;
+  color: var(--scada-text);
+  text-align: left;
+  padding: 6px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.ctx button:hover {
+  background: rgba(61, 139, 253, 0.16);
+}
+
+.ctx button.danger {
+  color: #f87171;
+}
+
+.ctx button.accent {
+  color: #93c5fd;
+  font-weight: 600;
+}
+
+.ctx button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.ctx hr {
+  border: none;
+  border-top: 1px solid var(--scada-border);
+  margin: 4px 0;
 }
 </style>
 

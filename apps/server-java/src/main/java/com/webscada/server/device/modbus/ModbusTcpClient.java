@@ -28,6 +28,14 @@ public final class ModbusTcpClient implements AutoCloseable {
     this.responseTimeoutMs = Math.max(200, responseTimeoutMs);
   }
 
+  public String host() {
+    return host;
+  }
+
+  public int port() {
+    return port;
+  }
+
   public synchronized void ensureConnected() throws IOException {
     if (socket != null && socket.isConnected() && !socket.isClosed()) return;
     closeQuietly();

@@ -308,9 +308,7 @@ function disposeObject3DResources(root: Object3D) {
 
 function restoreOriginalMaterials(root: Object3D) {
   clearObject3DMaterialMaps(root)
-  root.traverse((child) => {
-    const mesh = child as Mesh
-    if (!mesh.isMesh) return
+  forEachOwnMesh(root, (mesh) => {
     const cached = mesh.userData[USER_DATA_ORIG_MAT] as OrigMatSnapshot[] | undefined
     if (!cached) return
     const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
@@ -337,9 +335,7 @@ function restoreOriginalMaterials(root: Object3D) {
 function applyNodeShadowFlags(root: Object3D, node: Object3DNode) {
   const cast = node.castShadow !== false
   const receive = node.receiveShadow !== false
-  root.traverse((child) => {
-    const mesh = child as Mesh
-    if (!mesh.isMesh) return
+  forEachOwnMesh(root, (mesh) => {
     mesh.castShadow = cast
     mesh.receiveShadow = receive
   })
@@ -368,10 +364,38 @@ function readTransform(obj: Object3D): Transform3D {
   }
 }
 
+/**
+ * 只走过本对象自己的网格。
+ * 组合后子模型挂在父节点下，若整棵 traverse，父节点 opacity=0 会把子模型一起刷没。
+ */
+function forEachOwnMesh(root: Object3D, visit: (mesh: Mesh) => void) {
+  const walk = (obj: Object3D, isRoot: boolean) => {
+    if (!isRoot && obj.userData[USER_DATA_ID]) return
+    const mesh = obj as Mesh
+    if (mesh.isMesh) visit(mesh)
+    for (const child of obj.children) walk(child, false)
+  }
+  walk(root, true)
+}
+
+/** 组合父节点：没有模型、opacity≈0，方块只是变换锚点 */
+function isInvisibleGroupAnchor(node: Object3DNode | undefined): boolean {
+  if (!node || node.panel || node.modelResourceId) return false
+  return (node.children?.length ?? 0) > 0 && (node.style?.opacity ?? 1) <= 0.01
+}
+
+/**
+ * 组合锚点是 1m 透明方块。BoxHelper / setFromObject 会把它算进包围盒，
+ * 两个小模型组合后黄框就变成 1 米见方。空包围盒表示这块几何不参与测量，只量子模型。
+ */
+function ignoreGroupAnchorBounds(root: Object3D) {
+  forEachOwnMesh(root, (mesh) => {
+    if (mesh.geometry) mesh.geometry.boundingBox = new Box3()
+  })
+}
+
 function setMeshColor(root: Object3D, color: string, opacity = 1) {
-  root.traverse((child) => {
-    const mesh = child as Mesh
-    if (!mesh.isMesh) return
+  forEachOwnMesh(root, (mesh) => {
     const mat = mesh.material
     const apply = (m: MeshStandardMaterial) => {
       m.color = new Color(color)
@@ -392,9 +416,7 @@ function setMeshColor(root: Object3D, color: string, opacity = 1) {
 /** 只改透明度，不碰顶点色/贴图色（GLTF 闪烁用） */
 function setMeshOpacity(root: Object3D, opacity: number) {
   const o = Math.min(1, Math.max(0, opacity))
-  root.traverse((child) => {
-    const mesh = child as Mesh
-    if (!mesh.isMesh) return
+  forEachOwnMesh(root, (mesh) => {
     const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
     for (const m of mats) {
       const std = m as MeshStandardMaterial
@@ -408,9 +430,7 @@ function setMeshOpacity(root: Object3D, opacity: number) {
 
 function setMeshEmissive(root: Object3D, emissive: string | null) {
   const color = emissive ? new Color(emissive) : new Color(0x000000)
-  root.traverse((child) => {
-    const mesh = child as Mesh
-    if (!mesh.isMesh) return
+  forEachOwnMesh(root, (mesh) => {
     const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
     for (const m of mats) {
       const std = m as MeshStandardMaterial
@@ -463,6 +483,11 @@ function createPrimitiveMesh(node: Object3DNode): Object3D {
   }
   const mesh = new Mesh(geometry, material)
   if (panelAnchorOnly) mesh.userData.scadaPanelAnchor = true
+  // 组合锚点是 1m 透明方块，留着射线会把模型之间的空白点击吃掉，轨道旋转跟着失效
+  if (groupAnchorOnly) {
+    mesh.raycast = () => {}
+    ignoreGroupAnchorBounds(mesh)
+  }
   return mesh
 }
 
@@ -986,8 +1011,10 @@ const syncSelectionHelpers = (ids: string[]) => {
     for (const hit of hits) {
       let cur: Object3D | null = hit.object
       while (cur && !cur.userData[USER_DATA_ID]) cur = cur.parent
-      const id = cur?.userData[USER_DATA_ID] as string | undefined
-      if (!id || nodeMap.get(id)?.visible === false) continue
+      const rawId = cur?.userData[USER_DATA_ID] as string | undefined
+      if (!rawId || nodeMap.get(rawId)?.visible === false) continue
+      const id = outermostGroupId(rawId)
+      if (nodeMap.get(id)?.visible === false) continue
       lastPickId = id
       return { id, distance: hit.distance }
     }
@@ -1237,26 +1264,37 @@ const syncSelectionHelpers = (ids: string[]) => {
     nodeMap.clear()
   }
 
+  /** 点到组内成员时，选中整组，而不是把组拆成单个子物体 */
+  const outermostGroupId = (id: string): string => {
+    let cur = objectMap.get(id)
+    let top = id
+    while (cur?.parent) {
+      const pid = cur.parent.userData[USER_DATA_ID] as string | undefined
+      if (!pid) break
+      if (isInvisibleGroupAnchor(nodeMap.get(pid))) top = pid
+      cur = cur.parent
+    }
+    return top
+  }
+
   const highlight = (ids: string[]) => {
     if (!selectionHighlight) return
     const set = new Set(ids)
+    for (const id of ids) {
+      objectMap.get(id)?.traverse((child) => {
+        const cid = child.userData[USER_DATA_ID] as string | undefined
+        if (cid) set.add(cid)
+      })
+    }
     for (const [oid, obj] of objectMap) {
       const node = nodeMap.get(oid)
-      // 面板 / 不可见组合锚点不发光
+      // 面板 / 不可见组合锚点不发光；成员由上面的展开集合点亮
       if (node?.panel && !node.modelResourceId) continue
-      if (
-        !node?.modelResourceId &&
-        (node?.children?.length ?? 0) > 0 &&
-        (node?.style?.opacity ?? 1) <= 0.01
-      ) {
-        continue
-      }
+      if (isInvisibleGroupAnchor(node)) continue
       const on = set.has(oid)
       const base = node?.style?.emissive
       const color = on ? new Color(0x886622) : base ? new Color(base) : new Color(0x000000)
-      obj.traverse((child) => {
-        const mesh = child as Mesh
-        if (!mesh.isMesh) return
+      forEachOwnMesh(obj, (mesh) => {
         const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
         for (const m of mats) {
           const std = m as MeshStandardMaterial
@@ -1870,6 +1908,12 @@ const syncSelectionHelpers = (ids: string[]) => {
     const obj = objectMap.get(objectId)
     if (!obj) return
     nodeMap.set(objectId, visual)
+    if (isInvisibleGroupAnchor(visual)) {
+      forEachOwnMesh(obj, (mesh) => {
+        mesh.raycast = () => {}
+      })
+      ignoreGroupAnchorBounds(obj)
+    }
     if (!gizmoDragging || selectedId !== objectId) {
       const [px, py, pz] = visual.transform.position
       const [rx, ry, rz] = visual.transform.rotation
@@ -1994,8 +2038,10 @@ const syncSelectionHelpers = (ids: string[]) => {
     for (const mesh of found) {
       let cur: Object3D | null = mesh
       while (cur && !cur.userData[USER_DATA_ID]) cur = cur.parent
-      const id = cur?.userData[USER_DATA_ID] as string | undefined
-      if (!id || nodeMap.get(id)?.visible === false) continue
+      const rawId = cur?.userData[USER_DATA_ID] as string | undefined
+      if (!rawId || nodeMap.get(rawId)?.visible === false) continue
+      const id = outermostGroupId(rawId)
+      if (nodeMap.get(id)?.visible === false) continue
       ids.add(id)
     }
     return [...ids]
@@ -2279,6 +2325,9 @@ const syncSelectionHelpers = (ids: string[]) => {
     if (!gizmoDragging) controls.enabled = true
   }
 
+  /** pointerdown 已经点选过时，随后的 click 不再补一次，否则 Ctrl 取消会被加回来 */
+  let designerPickHandled = false
+
   const applyDesignerPick = (
     e: {
       shiftKey: boolean
@@ -2289,18 +2338,23 @@ const syncSelectionHelpers = (ids: string[]) => {
     pickedId: string,
   ) => {
     const additive = isAdditivePointer(e)
-    const ids = additive
-      ? [pickedId, ...selectedIds.filter((id) => id !== pickedId)]
-      : [pickedId]
+    const already = selectedIds.includes(pickedId)
+    const ids = !additive
+      ? [pickedId]
+      : already
+        ? selectedIds.filter((id) => id !== pickedId)
+        : [pickedId, ...selectedIds]
     selectObjects(ids, { gizmo: true })
-    handlers.onSelect?.(pickedId, { additive, ids })
+    handlers.onSelect?.(ids[0] ?? null, { additive, ids })
     suppressEmptyClear = true
     emptyClickAt = null
-    lastPointerNote = `pick:${pickedId.slice(-6)}${additive ? '+add' : ''}`
+    designerPickHandled = true
+    lastPointerNote = `pick:${pickedId.slice(-6)}${additive ? (already ? '-sub' : '+add') : ''}`
   }
 
   const onDesignerPointerDownCapture = (e: PointerEvent) => {
     if (!enableGizmo || e.button !== 0) return
+    designerPickHandled = false
     pointerDownCount += 1
     emptyClickAt = null
     suppressEmptyClear = false
@@ -2404,6 +2458,10 @@ const syncSelectionHelpers = (ids: string[]) => {
     if (hitGizmo(e)) return
     const picked = pickObjectAtClient(e.clientX, e.clientY)
     if (!picked) return
+    if (designerPickHandled) {
+      designerPickHandled = false
+      return
+    }
     const additive = isAdditivePointer(e)
     if (
       !additive &&

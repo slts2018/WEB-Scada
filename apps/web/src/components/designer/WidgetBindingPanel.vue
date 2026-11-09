@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { animationLinkTypeLabel } from '@web-scada/core'
+import HelpTip from '@/components/designer/HelpTip.vue'
 import { useProjectStore } from '@/stores/project'
 
 const project = useProjectStore()
@@ -10,9 +11,12 @@ const links = computed(() => widget.value?.animationLinks ?? [])
 
 <template>
   <div v-if="widget" class="anim-summary">
-    <el-button type="primary" size="small" style="width: 100%" @click="project.openAnimationConnection()">
-      动画连接…
-    </el-button>
+    <div class="anim-head">
+      <el-button type="primary" size="small" @click="project.openAnimationConnection()">
+        动画连接…
+      </el-button>
+      <HelpTip content="也可在画布上右键 → 动画连接" />
+    </div>
     <div v-if="links.length" class="summary-list">
       <div v-for="l in links" :key="l.id" class="summary-item">
         <span>{{ animationLinkTypeLabel(l.type) }}</span>
@@ -21,11 +25,20 @@ const links = computed(() => widget.value?.animationLinks ?? [])
         </el-tag>
       </div>
     </div>
-    <p v-else class="hint">也可在画布上右键 → 动画连接</p>
   </div>
 </template>
 
 <style scoped>
+.anim-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.anim-head .el-button {
+  flex: 1;
+}
+
 .anim-summary {
   display: flex;
   flex-direction: column;
@@ -48,11 +61,5 @@ const links = computed(() => widget.value?.animationLinks ?? [])
   border-radius: 4px;
   background: #12151c;
   border: 1px solid var(--scada-border);
-}
-
-.hint {
-  margin: 0;
-  font-size: 12px;
-  color: var(--scada-muted);
 }
 </style>

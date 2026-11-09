@@ -111,8 +111,16 @@ export async function apiExportProject(id: string): Promise<{ blob: Blob; fileNa
   return parseZipDownload(res, 'project.webscada.zip')
 }
 
-/** 下载网站部署包（Runtime + 工程 + 资源） */
-export async function apiExportSite(id: string): Promise<{ blob: Blob; fileName: string }> {
+export interface SiteDownloadProgress {
+  received: number
+  total: number
+}
+
+/** 下载网站部署包（Runtime + 工程 + 资源）。有 Content-Length 时回报下载进度。 */
+export async function apiExportSite(
+  id: string,
+  onDownload?: (progress: SiteDownloadProgress) => void,
+): Promise<{ blob: Blob; fileName: string }> {
   const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(id)}/export/site`, {
     method: 'GET',
     headers: {
@@ -129,28 +137,57 @@ export async function apiExportSite(id: string): Promise<{ blob: Blob; fileName:
     }
     throw new ApiError(`API ${res.status} /projects/${id}/export/site`, res.status, body)
   }
-  return parseZipDownload(res, 'WebScada-Site.zip')
+  return readZipDownload(res, 'WebScada-Site.zip', onDownload)
 }
 
 async function parseZipDownload(
   res: Response,
   fallbackName: string,
 ): Promise<{ blob: Blob; fileName: string }> {
+  const fileName = zipFileName(res, fallbackName)
+  const blob = await res.blob()
+  return { blob, fileName }
+}
+
+async function readZipDownload(
+  res: Response,
+  fallbackName: string,
+  onDownload?: (progress: SiteDownloadProgress) => void,
+): Promise<{ blob: Blob; fileName: string }> {
+  const fileName = zipFileName(res, fallbackName)
+  const total = Number(res.headers.get('Content-Length') || 0)
+  const reader = res.body?.getReader()
+  if (!reader) {
+    const blob = await res.blob()
+    onDownload?.({ received: blob.size, total: total || blob.size })
+    return { blob, fileName }
+  }
+  const chunks: BlobPart[] = []
+  let received = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    if (!value) continue
+    chunks.push(value)
+    received += value.byteLength
+    onDownload?.({ received, total })
+  }
+  return { blob: new Blob(chunks, { type: 'application/zip' }), fileName }
+}
+
+function zipFileName(res: Response, fallbackName: string): string {
   const disposition = res.headers.get('Content-Disposition') || ''
   const utfMatch = disposition.match(/filename\*=UTF-8''([^;]+)/i)
   const plainMatch = disposition.match(/filename="?([^";]+)"?/i)
-  let fileName = fallbackName
   if (utfMatch?.[1]) {
     try {
-      fileName = decodeURIComponent(utfMatch[1])
+      return decodeURIComponent(utfMatch[1])
     } catch {
-      fileName = utfMatch[1]
+      return utfMatch[1]
     }
-  } else if (plainMatch?.[1]) {
-    fileName = plainMatch[1]
   }
-  const blob = await res.blob()
-  return { blob, fileName }
+  if (plainMatch?.[1]) return plainMatch[1]
+  return fallbackName
 }
 
 /** 导入工程包 → 服务端新建工程并返回文档 */

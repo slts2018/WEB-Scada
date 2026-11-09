@@ -21,6 +21,7 @@ import {
   resolvePanelContentSize,
   sizeMetersFromObject3d,
 } from '@web-scada/core'
+import HelpTip from '@/components/designer/HelpTip.vue'
 import { useProjectStore } from '@/stores/project'
 
 const project = useProjectStore()
@@ -60,6 +61,9 @@ const flowStyleLabel = computed(
 const sizeMeters = computed(() =>
   obj.value ? sizeMetersFromObject3d(obj.value) : ([0, 0, 0] as [number, number, number]),
 )
+
+/** 变换栏的等比开关。只影响接下来的尺寸输入，不写入工程。 */
+const scaleUniform = ref(true)
 
 function patch(partial: Partial<NonNullable<typeof obj.value>>) {
   if (!obj.value) return
@@ -112,12 +116,32 @@ function updateTransform(
   patch({ transform: { ...obj.value.transform, [axis]: next } })
 }
 
-/** 缩放栏编辑的是轴向真实尺寸（米），三位小数 */
+/**
+ * 缩放栏在失焦或回车后才写入。打字中间的空值和 .000 不进模型，
+ * 否则等比锁定会用这个半成品去乘另外两轴。
+ */
+function commitSizeMeters(index: 0 | 1 | 2, value: number | undefined | null) {
+  if (value == null || !Number.isFinite(value)) return
+  updateSizeMeters(index, value)
+}
+
+/** 缩放栏编辑的是轴向真实尺寸（米），三位小数。锁定时三轴乘同一个倍数。 */
 function updateSizeMeters(index: 0 | 1 | 2, value: number) {
   if (!obj.value) return
   const cur = sizeMetersFromObject3d(obj.value)
-  const next: [number, number, number] = [...cur]
-  next[index] = Math.max(0.001, Number.isFinite(value) ? value : 0.001)
+  const safe = Math.max(0.001, value)
+  let next: [number, number, number]
+  if (scaleUniform.value && cur[index] > 1e-9) {
+    const factor = safe / cur[index]
+    next = [
+      Math.max(0.001, cur[0] * factor),
+      Math.max(0.001, cur[1] * factor),
+      Math.max(0.001, cur[2] * factor),
+    ]
+  } else {
+    next = [...cur]
+    next[index] = safe
+  }
   patch(patchObject3dSizeMeters(obj.value, next))
 }
 
@@ -161,6 +185,18 @@ function openModelEditor() {
   project.openObject3dModelEditor()
 }
 
+const liquidHelp = computed(() => {
+  const base =
+    '给罐体加一层液体，变量驱动液位（0%~100%）。变量、量程、颜色、生成方式、内缩、罐壁透明度都在对话框里配。'
+  if (!liquid.value) return base
+  return `${base}液位层已锁定变换：位置与高度由连接 / 液面裁剪接管。`
+})
+
+const flowHelp = computed(() => {
+  const batch = multiCount.value > 1 ? `对 ${multiCount.value} 个选中对象批量生效。` : ''
+  return `管道流动：贴管壁滚动的箭头，速度由变量驱动（不依赖模型 UV）。变量、速度、样式、箭头长度、间隔、颜色都在对话框里配。${batch}运行时按变量速度滚动；变量为 0 或测点坏 → 停流并隐藏箭头。`
+})
+
 const panelSummary = computed(() => {
   const p = obj.value?.panel
   if (!p) return ''
@@ -175,8 +211,10 @@ const panelSummary = computed(() => {
 
 <template>
   <div v-if="multiCount > 1" class="prop3d">
-    <div class="panel-title">已选 {{ multiCount }} 个对象</div>
-    <p class="multi-hint">属性编辑针对主选（列表首项）。可批量复制 / 删除 / 组合。</p>
+    <div class="panel-title">
+      已选 {{ multiCount }} 个对象
+      <HelpTip content="属性编辑针对主选（列表首项）。可批量复制 / 删除 / 组合。" />
+    </div>
     <div class="ops">
       <el-button size="small" @click="project.duplicateObject3ds(project.selectedObject3dIds)">
         批量复制
@@ -194,8 +232,10 @@ const panelSummary = computed(() => {
     <div v-if="obj" class="panel-title">主选：{{ obj.name }}</div>
   </div>
   <div v-if="obj" class="prop3d object-edit">
-    <div class="panel-title">对象属性</div>
-    <p class="multi-hint">按分类编辑当前选中对象</p>
+    <div class="panel-title">
+      对象属性
+      <HelpTip content="按分类编辑当前选中对象" />
+    </div>
 
     <el-collapse v-model="objectCollapse" class="scene-collapse">
       <el-collapse-item title="1 · 基础" name="basic">
@@ -228,11 +268,13 @@ const panelSummary = computed(() => {
           锁定变换
         </el-checkbox>
         <template v-if="!isPanelOnly">
-          <div class="sub-label">模型外观</div>
+          <div class="sub-label">
+            模型外观
+            <HelpTip content="颜色、金属度/粗糙度与贴图；修改后写入工程并实时预览。" />
+          </div>
           <el-button size="small" type="primary" style="width: 100%" @click="openModelEditor">
             编辑模型…
           </el-button>
-          <p class="multi-hint">颜色、金属度/粗糙度与贴图；修改后写入工程并实时预览。</p>
         </template>
       </el-collapse-item>
 
@@ -264,8 +306,20 @@ const panelSummary = computed(() => {
               @update:model-value="(v: number | undefined) => updateTransform('rotation', i as 0 | 1 | 2, Number(v) || 0)"
             />
           </div>
-          <div class="sub-label">缩放（米）</div>
-          <p class="multi-hint">X/Y/Z 为各轴向真实尺寸（米）；模型文件按米建模。</p>
+          <div class="sub-label scale-head">
+            <span>缩放（米）</span>
+            <button
+              type="button"
+              class="scale-lock"
+              :class="{ on: scaleUniform }"
+              :aria-pressed="scaleUniform"
+              :disabled="Boolean(obj.locked)"
+              @click="scaleUniform = !scaleUniform"
+            >
+              <span class="scale-lock-box" aria-hidden="true" />
+              等比锁定
+            </button>
+          </div>
           <div class="xyz">
             <el-input-number
               v-for="(axis, i) in (['X', 'Y', 'Z'] as const)"
@@ -277,7 +331,7 @@ const panelSummary = computed(() => {
               :min="0.001"
               :precision="3"
               controls-position="right"
-              @update:model-value="(v: number | undefined) => updateSizeMeters(i as 0 | 1 | 2, Number(v) || 0.001)"
+              @change="(v: number | undefined) => commitSizeMeters(i as 0 | 1 | 2, v)"
             />
           </div>
         </template>
@@ -314,25 +368,31 @@ const panelSummary = computed(() => {
         </template>
       </el-collapse-item>
 
-      <el-collapse-item v-if="isPanelOnly" title="3 · 跟镜头面板" name="panel">
-        <p class="multi-hint">{{ panelSummary }} · 始终朝向相机</p>
+      <el-collapse-item v-if="isPanelOnly" name="panel">
+        <template #title>
+          <span class="collapse-title">
+            3 · 跟镜头面板
+            <HelpTip content="始终朝向相机。双击场景中的面板也可打开编辑弹窗。" />
+          </span>
+        </template>
+        <p v-if="panelSummary" class="multi-hint">{{ panelSummary }}</p>
         <div class="ops">
           <el-button size="small" type="primary" style="flex: 1" @click="openPanelIn2dEditor">
             编辑面板内容
           </el-button>
         </div>
-        <p class="multi-hint">双击场景中的面板也可打开编辑弹窗。</p>
       </el-collapse-item>
 
       <el-collapse-item
         v-if="!isPanelOnly"
-        :title="isPanelOnly ? '4 · 液位' : '3 · 液位'"
         name="liquid"
       >
-        <p class="multi-hint">
-          给罐体加一层液体，变量驱动液位（0%~100%）。
-          变量、量程、颜色、生成方式、内缩、罐壁透明度都在对话框里配。
-        </p>
+        <template #title>
+          <span class="collapse-title">
+            3 · 液位
+            <HelpTip :content="liquidHelp" />
+          </span>
+        </template>
         <div class="ops">
           <el-button
             type="primary"
@@ -361,21 +421,18 @@ const panelSummary = computed(() => {
             <span class="swatch"><i :style="{ background: liquid.color }" />{{ liquid.color }}</span>
           </div>
         </div>
-        <p v-if="liquid" class="multi-hint">
-          液位层已锁定变换：位置与高度由连接 / 液面裁剪接管。
-        </p>
       </el-collapse-item>
 
       <el-collapse-item
         v-if="!isPanelOnly"
-        :title="isPanelOnly ? '5 · 流动' : '4 · 流动'"
         name="flow"
       >
-        <p class="multi-hint">
-          管道流动：贴管壁滚动的箭头，速度由变量驱动（不依赖模型 UV）。
-          变量、速度、样式、箭头长度、间隔、颜色都在对话框里配。
-          <template v-if="multiCount > 1">对 {{ multiCount }} 个选中对象批量生效。</template>
-        </p>
+        <template #title>
+          <span class="collapse-title">
+            4 · 流动
+            <HelpTip :content="flowHelp" />
+          </span>
+        </template>
         <div class="ops">
           <el-button
             type="primary"
@@ -406,12 +463,15 @@ const panelSummary = computed(() => {
             </span>
           </div>
         </div>
-        <p class="multi-hint">
-          运行时按变量速度滚动；变量为 0 或测点坏 → 停流并隐藏箭头。
-        </p>
       </el-collapse-item>
 
-      <el-collapse-item :title="isPanelOnly ? '6 · 动画连接' : '5 · 动画连接'" name="animLink">
+      <el-collapse-item name="animLink">
+        <template #title>
+          <span class="collapse-title">
+            {{ isPanelOnly ? '6 · 动画连接' : '5 · 动画连接' }}
+            <HelpTip content="位移、颜色、拖拽写、属性绑定、事件等均在此配置（与对话框为同一份数据）" />
+          </span>
+        </template>
         <div class="anim-summary">
           <el-button
             type="primary"
@@ -429,9 +489,6 @@ const panelSummary = computed(() => {
               </el-tag>
             </div>
           </div>
-          <p class="multi-hint">
-            位移、颜色、拖拽写、属性绑定、事件等均在此配置（与对话框为同一份数据）
-          </p>
         </div>
       </el-collapse-item>
     </el-collapse>
@@ -447,12 +504,19 @@ const panelSummary = computed(() => {
     选中对象未找到，请再点一次模型
   </div>
   <div v-else class="prop3d scene-edit">
-    <div class="panel-title">编辑场景</div>
-    <p class="scene-hint">未选中模型时，按分类编辑本页场景（随工程保存）</p>
+    <div class="panel-title">
+      编辑场景
+      <HelpTip content="未选中模型时，按分类编辑本页场景（随工程保存）" />
+    </div>
 
     <el-collapse v-model="sceneCollapse" class="scene-collapse">
-      <el-collapse-item title="1 · 环境" name="env">
-        <p class="scene-hint section-hint">背景色与整体明暗</p>
+      <el-collapse-item name="env">
+        <template #title>
+          <span class="collapse-title">
+            1 · 环境
+            <HelpTip content="背景色与整体明暗" />
+          </span>
+        </template>
         <label class="row">
           <span>背景色</span>
           <el-color-picker
@@ -514,8 +578,13 @@ const panelSummary = computed(() => {
         </label>
       </el-collapse-item>
 
-      <el-collapse-item title="2 · 网格地面" name="grid">
-        <p class="scene-hint section-hint">辅助网格与地面阴影接收面</p>
+      <el-collapse-item name="grid">
+        <template #title>
+          <span class="collapse-title">
+            2 · 网格地面
+            <HelpTip content="辅助网格与地面阴影接收面" />
+          </span>
+        </template>
         <label class="row">
           <span>显示网格</span>
           <el-checkbox
@@ -563,8 +632,13 @@ const panelSummary = computed(() => {
         </label>
       </el-collapse-item>
 
-      <el-collapse-item title="3 · 阳光与阴影" name="sun">
-        <p class="scene-hint section-hint">平行光方向、亮度与阴影质量</p>
+      <el-collapse-item name="sun">
+        <template #title>
+          <span class="collapse-title">
+            3 · 阳光与阴影
+            <HelpTip content="平行光方向、亮度与阴影质量" />
+          </span>
+        </template>
         <label class="row">
           <span>开启太阳光</span>
           <el-checkbox
@@ -673,8 +747,13 @@ const panelSummary = computed(() => {
         </label>
       </el-collapse-item>
 
-      <el-collapse-item title="4 · 相机" name="camera">
-        <p class="scene-hint section-hint">默认视角与运行时操作限位</p>
+      <el-collapse-item name="camera">
+        <template #title>
+          <span class="collapse-title">
+            4 · 相机
+            <HelpTip content="默认视角与运行时操作限位" />
+          </span>
+        </template>
         <div class="cam-readout">
           <template v-if="page3d?.camera">
             <div>
@@ -701,56 +780,79 @@ const panelSummary = computed(() => {
           <el-button size="small" @click="applyDefaultCamera">恢复默认视角</el-button>
         </div>
         <div class="sub-label">距离限位</div>
+        <div class="pair">
+          <label>
+            <span>最小</span>
+            <el-input-number
+              size="small"
+              :min="0.05"
+              :max="scenePres.cameraMaxDistance - 0.1"
+              :step="0.1"
+              controls-position="right"
+              :model-value="scenePres.cameraMinDistance"
+              @update:model-value="(v: number | undefined) => patchPresentation({ cameraMinDistance: Number(v) || 0.5 })"
+            />
+          </label>
+          <label>
+            <span>最大</span>
+            <el-input-number
+              size="small"
+              :min="scenePres.cameraMinDistance + 0.1"
+              :max="10000"
+              :step="10"
+              controls-position="right"
+              :model-value="scenePres.cameraMaxDistance"
+              @update:model-value="(v: number | undefined) => patchPresentation({ cameraMaxDistance: Number(v) || 500 })"
+            />
+          </label>
+        </div>
+        <div class="sub-label">
+          俯仰限位
+          <HelpTip content="0°=顶视，90°≈平视；上限建议 ≤89，避免钻到地面下。" />
+        </div>
+        <div class="pair">
+          <label>
+            <span>下限 (°)</span>
+            <el-input-number
+              size="small"
+              :min="0"
+              :max="178"
+              :step="1"
+              controls-position="right"
+              :model-value="scenePres.cameraMinPolarDeg"
+              @update:model-value="(v: number | undefined) => patchPresentation({ cameraMinPolarDeg: Number(v) ?? 5 })"
+            />
+          </label>
+          <label>
+            <span>上限 (°)</span>
+            <el-input-number
+              size="small"
+              :min="1"
+              :max="180"
+              :step="1"
+              controls-position="right"
+              :model-value="scenePres.cameraMaxPolarDeg"
+              @update:model-value="(v: number | undefined) => patchPresentation({ cameraMaxPolarDeg: Number(v) ?? 89 })"
+            />
+          </label>
+        </div>
+        <div class="sub-label">
+          旋转
+          <HelpTip content="1 为默认。越大，左键同样拖动转过的角度越大。" />
+        </div>
         <label class="row">
-          <span>最小距离</span>
+          <span>灵敏度</span>
           <el-input-number
             size="small"
-            :min="0.05"
-            :max="scenePres.cameraMaxDistance - 0.1"
+            :min="0.1"
+            :max="5"
             :step="0.1"
+            :precision="1"
             controls-position="right"
-            :model-value="scenePres.cameraMinDistance"
-            @update:model-value="(v: number | undefined) => patchPresentation({ cameraMinDistance: Number(v) || 0.5 })"
+            :model-value="scenePres.cameraRotateSpeed"
+            @change="(v: number | undefined) => patchPresentation({ cameraRotateSpeed: Number(v) || 1 })"
           />
         </label>
-        <label class="row">
-          <span>最大距离</span>
-          <el-input-number
-            size="small"
-            :min="scenePres.cameraMinDistance + 0.1"
-            :max="10000"
-            :step="10"
-            controls-position="right"
-            :model-value="scenePres.cameraMaxDistance"
-            @update:model-value="(v: number | undefined) => patchPresentation({ cameraMaxDistance: Number(v) || 500 })"
-          />
-        </label>
-        <div class="sub-label">俯仰限位</div>
-        <label class="row">
-          <span>下限 (°)</span>
-          <el-input-number
-            size="small"
-            :min="0"
-            :max="178"
-            :step="1"
-            controls-position="right"
-            :model-value="scenePres.cameraMinPolarDeg"
-            @update:model-value="(v: number | undefined) => patchPresentation({ cameraMinPolarDeg: Number(v) ?? 5 })"
-          />
-        </label>
-        <label class="row">
-          <span>上限 (°)</span>
-          <el-input-number
-            size="small"
-            :min="1"
-            :max="180"
-            :step="1"
-            controls-position="right"
-            :model-value="scenePres.cameraMaxPolarDeg"
-            @update:model-value="(v: number | undefined) => patchPresentation({ cameraMaxPolarDeg: Number(v) ?? 89 })"
-          />
-        </label>
-        <p class="scene-hint">0°=顶视，90°≈平视；上限建议 ≤89，避免钻到地面下。</p>
       </el-collapse-item>
     </el-collapse>
 
@@ -769,6 +871,9 @@ const panelSummary = computed(() => {
 
 .panel-title {
   margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   font-size: 12px;
   color: var(--scada-muted);
   text-transform: uppercase;
@@ -919,6 +1024,23 @@ label {
   width: 140px;
 }
 
+.scene-edit .pair {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.scene-edit .pair > label {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+.scene-edit .pair :deep(.el-input-number) {
+  width: 100%;
+}
+
 .scene-collapse {
   border: none;
   --el-collapse-header-height: 36px;
@@ -949,11 +1071,77 @@ label {
   margin: 0 0 2px;
 }
 
+.collapse-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .sub-label {
   margin-top: 4px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
   font-size: 11px;
   color: var(--scada-muted);
   letter-spacing: 0.04em;
+}
+
+.scale-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.scale-lock {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--scada-muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.scale-lock-box {
+  width: 12px;
+  height: 12px;
+  box-sizing: border-box;
+  border: 1px solid var(--scada-border);
+  border-radius: 2px;
+  position: relative;
+  flex: 0 0 12px;
+}
+
+.scale-lock.on {
+  color: var(--scada-accent);
+}
+
+.scale-lock.on .scale-lock-box {
+  border-color: var(--scada-accent);
+  background: var(--scada-accent);
+}
+
+.scale-lock.on .scale-lock-box::after {
+  content: '';
+  position: absolute;
+  left: 3px;
+  top: 1px;
+  width: 3px;
+  height: 6px;
+  border: solid #fff;
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+
+.scale-lock:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .object-edit .row {

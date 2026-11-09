@@ -79,7 +79,7 @@ public class ModbusPollService {
         try {
           io.pingDevice(dev);
           noteOnline(deviceId, true, "connected (no tags)");
-          io.reportOnline(deviceId, true, "已连接（无采集点）");
+          io.reportOnline(deviceId, true, withSide(dev, "已连接（无采集点）"));
         } catch (Exception ex) {
           io.invalidateOnError(deviceId, ex);
           noteOnline(deviceId, false, shortMsg(ex));
@@ -128,7 +128,7 @@ public class ModbusPollService {
       long cost = System.currentTimeMillis() - t0;
       if (ok > 0 && fail == 0) {
         noteOnline(deviceId, true, "poll ok " + ok + " pts " + cost + "ms");
-        io.reportOnline(deviceId, true, "已采集 " + ok + " 点");
+        io.reportOnline(deviceId, true, withSide(dev, "已采集 " + ok + " 点"));
         if (trace) {
           log.debug("modbus poll ok device={} points={} costMs={}", deviceId, ok, cost);
         } else {
@@ -144,7 +144,7 @@ public class ModbusPollService {
         }
       } else if (ok > 0) {
         noteOnline(deviceId, true, "partial " + ok + "/" + (ok + fail));
-        io.reportOnline(deviceId, true, "部分成功 " + ok + "/" + (ok + fail));
+        io.reportOnline(deviceId, true, withSide(dev, "部分成功 " + ok + "/" + (ok + fail)));
         acqLog.warn(
             log,
             "partial:" + deviceId,
@@ -159,6 +159,12 @@ public class ModbusPollService {
         io.reportOnline(deviceId, false, lastErr != null ? lastErr : "采集失败");
       }
     }
+  }
+
+  private String withSide(DeviceMeta dev, String message) {
+    String side = io.activeSideNote(dev);
+    if (side.isEmpty()) return message;
+    return message + " · " + side;
   }
 
   private void noteOnline(String deviceId, boolean online, String detail) {

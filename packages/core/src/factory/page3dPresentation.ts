@@ -21,6 +21,7 @@ export const DEFAULT_PAGE3D_PRESENTATION = {
   cameraMaxDistance: 500,
   cameraMinPolarDeg: 5,
   cameraMaxPolarDeg: 89,
+  cameraRotateSpeed: 1,
 } as const satisfies Required<Page3DPresentation>
 
 export type ResolvedPage3DPresentation = {
@@ -43,6 +44,7 @@ export type ResolvedPage3DPresentation = {
   cameraMaxDistance: number
   cameraMinPolarDeg: number
   cameraMaxPolarDeg: number
+  cameraRotateSpeed: number
 }
 
 function clamp(n: number, min: number, max: number) {
@@ -89,6 +91,7 @@ export function resolvePage3DPresentation(
     cameraMaxDistance: maxDist,
     cameraMinPolarDeg: minPolar,
     cameraMaxPolarDeg: maxPolar,
+    cameraRotateSpeed: clamp(finiteOr(p.cameraRotateSpeed, d.cameraRotateSpeed), 0.1, 5),
   }
 }
 

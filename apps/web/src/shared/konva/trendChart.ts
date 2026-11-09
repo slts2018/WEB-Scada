@@ -275,8 +275,8 @@ function ensureHost(): HTMLDivElement | null {
   if (typeof document === 'undefined') return null
   if (!host) {
     host = document.createElement('div')
-    // 不能用 display:none（ECharts 量不到尺寸），挪到屏幕外即可
-    host.style.cssText = 'position:fixed;left:-10000px;top:0;width:1px;height:1px;pointer-events:none;'
+    // 不能用 display:none（ECharts 量不到尺寸）。absolute 才不会被 tooltip 改回 relative 而撑高页面。
+    host.style.cssText = 'position:absolute;left:-10000px;top:0;width:1px;height:1px;pointer-events:none;'
     document.body.appendChild(host)
   }
   return host

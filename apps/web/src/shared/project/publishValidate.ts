@@ -53,45 +53,47 @@ function pageWidgetCount(page: Page2D): number {
 function collectTagIdsFromWidget(w: Widget2D, into: Set<string>) {
   for (const b of w.bindings ?? []) {
     if (b.tagId) into.add(b.tagId)
-    else into.add('')
   }
   for (const a of w.animations ?? []) {
     if (a.tagId) into.add(a.tagId)
-    else into.add('')
   }
   for (const link of w.animationLinks ?? []) {
     if (link.tagId) into.add(link.tagId)
-    else into.add('')
   }
   for (const evt of w.events ?? []) {
     for (const action of evt.actions) {
-      if (action.type === 'writeTag') {
-        if (action.tagId) into.add(action.tagId)
-        else into.add('')
-      }
+      if (action.type === 'writeTag' && action.tagId) into.add(action.tagId)
     }
   }
+}
+
+/** 没选 Tag 的绑定、动画、写值。发布时只提醒，不拦住。 */
+function emptyTagReminders(name: string, node: Widget2D | Object3DNode, kind: '图元' | '对象'): string[] {
+  const who = `${kind}「${name || '未命名'}」`
+  const notes: string[] = []
+  if ((node.bindings ?? []).some((b) => !b.tagId)) notes.push(`${who}的绑定未选择 Tag`)
+  if ((node.animations ?? []).some((a) => !a.tagId)) notes.push(`${who}的动画未选择 Tag`)
+  if ((node.animationLinks ?? []).some((link) => !link.tagId)) notes.push(`${who}的动画连接未选择 Tag`)
+  const writeEmpty = (node.events ?? []).some((evt) =>
+    evt.actions.some((action) => action.type === 'writeTag' && !action.tagId),
+  )
+  if (writeEmpty) notes.push(`${who}的写值未选择 Tag`)
+  return notes
 }
 
 function collectTagIdsFromObject(o: Object3DNode, into: Set<string>) {
   for (const b of o.bindings ?? []) {
     if (b.tagId) into.add(b.tagId)
-    else into.add('')
   }
   for (const a of o.animations ?? []) {
     if (a.tagId) into.add(a.tagId)
-    else into.add('')
   }
   for (const link of o.animationLinks ?? []) {
     if (link.tagId) into.add(link.tagId)
-    else into.add('')
   }
   for (const evt of o.events ?? []) {
     for (const action of evt.actions) {
-      if (action.type === 'writeTag') {
-        if (action.tagId) into.add(action.tagId)
-        else into.add('')
-      }
+      if (action.type === 'writeTag' && action.tagId) into.add(action.tagId)
     }
   }
 }
@@ -165,21 +167,26 @@ export function validatePublishPackage(
     }
 
     const tagIds = new Set<string>()
-    if (page.type === '2d') {
-      for (const layer of page.layers) {
-        walkWidgets(layer.widgets, (w) => collectTagIdsFromWidget(w, tagIds))
-      }
-    } else {
-      walkObjects(page.objects, (o) => collectTagIdsFromObject(o, tagIds))
-    }
-
-    if (tagIds.has('')) {
+    const remind = (note: string) => {
       push({
-        level: 'error',
+        level: 'warning',
         code: 'empty_tag_id',
-        message: `页面「${page.name}」存在未选择 Tag 的绑定/动画/写值`,
+        message: `页面「${page.name}」${note}`,
         pageId: page.id,
         pageName: page.name,
+      })
+    }
+    if (page.type === '2d') {
+      for (const layer of page.layers) {
+        walkWidgets(layer.widgets, (w) => {
+          collectTagIdsFromWidget(w, tagIds)
+          for (const note of emptyTagReminders(w.name, w, '图元')) remind(note)
+        })
+      }
+    } else {
+      walkObjects(page.objects, (o) => {
+        collectTagIdsFromObject(o, tagIds)
+        for (const note of emptyTagReminders(o.name, o, '对象')) remind(note)
       })
     }
     for (const tagId of tagIds) {
@@ -201,7 +208,10 @@ export function validatePublishPackage(
         walkWidgets(layer.widgets, (w) => {
           if (w.type !== 'image') return
           const resourceId = String(w.props.resourceId || '')
+          const src = String(w.props.src || '').trim()
+          // 素材库图元只带 src（/library/...），不进工程资源表。有地址就能显示。
           if (!resourceId) {
+            if (src) return
             push({
               level: 'warning',
               code: 'image_no_resource',
