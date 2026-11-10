@@ -2641,20 +2641,24 @@ log('script ready · ' + (context.trigger || 'try'))
   }
 
   /** 导出当前工程完整包（需服务端）；先自动保存未落盘改动 */
-  async function exportProjectPackage(): Promise<{ fileName: string }> {
+  async function exportProjectPackage(opts?: {
+    /** 浏览器下载文件名；不传则用服务端 Content-Disposition */
+    downloadName?: string
+  }): Promise<{ fileName: string }> {
     await probeStorage()
     if (getStorageMode() !== 'api') {
       throw new Error('export_requires_api')
     }
     if (dirty.value) await save()
     const { blob, fileName } = await apiExportProject(document.value.meta.id)
+    const saveAs = (opts?.downloadName?.trim() || fileName).trim() || fileName
     const url = URL.createObjectURL(blob)
     const a = window.document.createElement('a')
     a.href = url
-    a.download = fileName
+    a.download = saveAs
     a.click()
     URL.revokeObjectURL(url)
-    return { fileName }
+    return { fileName: saveAs }
   }
 
   /**

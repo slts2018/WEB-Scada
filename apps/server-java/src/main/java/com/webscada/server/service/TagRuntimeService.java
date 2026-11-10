@@ -659,7 +659,7 @@ public class TagRuntimeService {
       if (last != 0 && nowMs - last < period) continue;
       TagValue cur = values.get(meta.tagId());
       if (cur == null) continue;
-      influx.writeSampleQuiet(cur.tagId(), cur.value(), cur.quality(), nowMs);
+      influx.writeSampleQuiet(cur.tagId(), meta.name(), cur.value(), cur.quality(), nowMs);
       lastHistAt.put(meta.tagId(), nowMs);
     }
   }
@@ -670,21 +670,22 @@ public class TagRuntimeService {
    */
   private void recordHistory(TagMeta meta, TagValue prev, TagValue next, boolean legacyWrite) {
     TagHistory history = meta == null ? null : meta.history();
+    String name = meta == null ? null : meta.name();
     if (history == null || history.enabled() == null) {
       if (legacyWrite) {
-        influx.writeSampleQuiet(next.tagId(), next.value(), next.quality(), next.timestamp());
+        influx.writeSampleQuiet(next.tagId(), name, next.value(), next.quality(), next.timestamp());
       }
       return;
     }
     if (qualityFlip(prev, next)) {
-      influx.writeSampleQuiet(next.tagId(), next.value(), next.quality(), next.timestamp());
+      influx.writeSampleQuiet(next.tagId(), name, next.value(), next.quality(), next.timestamp());
       lastHistAt.put(next.tagId(), next.timestamp());
       return;
     }
     if (!Boolean.TRUE.equals(history.enabled())) return;
     if ("interval".equals(history.mode())) return;
     if (!changedEnough(history, prev == null ? null : prev.value(), next.value())) return;
-    influx.writeSampleQuiet(next.tagId(), next.value(), next.quality(), next.timestamp());
+    influx.writeSampleQuiet(next.tagId(), name, next.value(), next.quality(), next.timestamp());
     lastHistAt.put(next.tagId(), next.timestamp());
   }
 

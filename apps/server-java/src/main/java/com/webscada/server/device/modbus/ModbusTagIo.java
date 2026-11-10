@@ -7,6 +7,8 @@ import com.webscada.server.service.DeviceStatusService;
 import com.webscada.server.store.DeviceFileStore;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
@@ -281,23 +283,98 @@ public class ModbusTagIo {
     String dt = normalizeType(meta.dataType());
     if (addr.isCoilSpace()) {
       boolean[] bits = client.readBits(addr.readFc(), addr.offset(), 1);
-      boolean on = bits.length > 0 && bits[0];
-      return "bool".equals(dt) ? on : (on ? 1 : 0);
+      return decodeCoilBit(dt, bits.length > 0 && bits[0]);
     }
     if ("bool".equals(dt) || addr.bit() != null) {
       int[] regs = client.readRegisters(addr.readFc(), addr.offset(), 1);
-      int[] ordered = applyWordSwap(regs, ch.wordSwap());
-      int word = ordered[0] & 0xffff;
-      int bit = addr.bit() != null ? addr.bit() : 0;
-      boolean on = ((word >> bit) & 1) != 0;
-      return "bool".equals(dt) ? on : (on ? 1 : 0);
+      return decodeRegisterBit(ch, dt, addr, regs);
     }
 
     int len = resolveLength(dt, addr);
     int[] regs = client.readRegisters(addr.readFc(), addr.offset(), len);
+    return decodeRegisters(ch, dt, len, regs);
+  }
+
+  /**
+   * 同设备一批到期点：按地址合并读，再拆开解码。单点失败不影响已解码点（整组 IO 失败则整组抛错）。
+   */
+  public List<ReadOk> readBatch(DeviceMeta dev, List<TagMeta> due) throws Exception {
+    if (due == null || due.isEmpty()) return List.of();
+    ModbusChannel ch = channelFor(dev);
+    List<ModbusReadPlan.Group> groups = ModbusReadPlan.plan(due);
+    List<ReadOk> out = new ArrayList<>(due.size());
+    // tagId → index in out; we fill in slot order matching due iteration via map
+    java.util.LinkedHashMap<String, ReadOk> byId = new java.util.LinkedHashMap<>();
+    synchronized (gate(dev.deviceId())) {
+      for (ModbusReadPlan.Group g : groups) {
+        withLink(
+            dev,
+            ch,
+            client -> {
+              if (g.bitSpace()) {
+                boolean[] bits = client.readBits(g.fc(), g.start(), g.quantity());
+                for (ModbusReadPlan.Slot slot : g.slots()) {
+                  int idx = slot.offset() - g.start();
+                  boolean on = idx >= 0 && idx < bits.length && bits[idx];
+                  String dt = normalizeType(slot.meta().dataType());
+                  byId.put(slot.meta().tagId(), new ReadOk(decodeCoilBit(dt, on), "Good"));
+                }
+              } else {
+                int[] regs = client.readRegisters(g.fc(), g.start(), g.quantity());
+                for (ModbusReadPlan.Slot slot : g.slots()) {
+                  String dt = normalizeType(slot.meta().dataType());
+                  int rel = slot.offset() - g.start();
+                  if ("bool".equals(dt) || slot.addr().bit() != null) {
+                    int[] one = sliceRegs(regs, rel, 1);
+                    byId.put(
+                        slot.meta().tagId(),
+                        new ReadOk(decodeRegisterBit(ch, dt, slot.addr(), one), "Good"));
+                  } else {
+                    int len = slot.length();
+                    int[] slice = sliceRegs(regs, rel, len);
+                    byId.put(
+                        slot.meta().tagId(),
+                        new ReadOk(decodeRegisters(ch, dt, len, slice), "Good"));
+                  }
+                }
+              }
+              return null;
+            });
+      }
+    }
+    for (TagMeta meta : due) {
+      ReadOk r = byId.get(meta.tagId());
+      if (r != null) out.add(r);
+      else throw new IllegalStateException("batch miss tag=" + meta.tagId());
+    }
+    return out;
+  }
+
+  private static int[] sliceRegs(int[] regs, int rel, int len) {
+    int[] slice = new int[len];
+    for (int i = 0; i < len; i++) {
+      int idx = rel + i;
+      slice[i] = (idx >= 0 && idx < regs.length) ? regs[idx] : 0;
+    }
+    return slice;
+  }
+
+  private static Object decodeCoilBit(String dt, boolean on) {
+    return "bool".equals(dt) ? on : (on ? 1 : 0);
+  }
+
+  private Object decodeRegisterBit(
+      ModbusChannel ch, String dt, ModbusAddress addr, int[] regs) {
+    int[] ordered = applyWordSwap(regs, ch.wordSwap());
+    int word = ordered.length > 0 ? ordered[0] & 0xffff : 0;
+    int bit = addr.bit() != null ? addr.bit() : 0;
+    boolean on = ((word >> bit) & 1) != 0;
+    return "bool".equals(dt) ? on : (on ? 1 : 0);
+  }
+
+  private Object decodeRegisters(ModbusChannel ch, String dt, int len, int[] regs) {
     ModbusSwap swap = len >= 2 ? ch.dwordSwap() : ch.wordSwap();
     int[] ordered = applySwap(regs, swap);
-
     return switch (dt) {
       case "byte" -> ordered[0] & 0xff;
       case "char" -> String.valueOf((char) (ordered[0] & 0xff));

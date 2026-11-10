@@ -45,9 +45,14 @@ webscada:
     enabled: ${MODBUS_ENABLED:true}
     poll-ms: ${MODBUS_POLL_MS:1000}
     unit-id: ${MODBUS_UNIT_ID:1}
-    connect-timeout-ms: ${MODBUS_CONNECT_TIMEOUT_MS:2000}
+    connect-timeout-ms: ${MODBUS_CONNECT_TIMEOUT_MS:800}
     response-timeout-ms: ${MODBUS_RESPONSE_TIMEOUT_MS:2000}
     low-word-first: ${MODBUS_LOW_WORD_FIRST:true}
+    # isolated=每设备独立队列（默认）；legacy=全局串行（回滚）
+    scheduler: ${MODBUS_SCHEDULER:isolated}
+    # 设备连失败后冷却，冷却期内不发起 TCP
+    device-cooldown-ms: ${MODBUS_DEVICE_COOLDOWN_MS:3000}
+    max-fail-before-cooldown: ${MODBUS_MAX_FAIL_BEFORE_COOLDOWN:1}
     # 逐点成功 DEBUG；掉线/写值/点失败仍走 INFO/WARN
     trace: ${MODBUS_TRACE:false}
   # 通信骨架默认关闭，避免没有链路配置时启动失败。打开后才会拉起 Supervisor。

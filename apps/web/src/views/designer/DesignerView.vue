@@ -163,12 +163,12 @@ async function onExportProject() {
   try {
     cancelAutoSave()
     const { fileName } = await project.exportProjectPackage()
-    ElMessage.success(`已导出 ${fileName}`)
+    ElMessage.success(`已导出 ${fileName}（含页面/脚本/资源/设备/变量）`)
     log.success(`导出工程：${fileName}`, '设计端')
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg === 'export_requires_api') {
-      ElMessage.warning('导出需要连接服务端（完整包含模型资源）')
+      ElMessage.warning('导出需要连接服务端（含模型资源与设备变量）')
     } else {
       ElMessage.error('导出失败')
       log.error(`导出失败：${msg}`, '设计端')
@@ -350,8 +350,49 @@ function beforeImportClose(done: () => void) {
   done()
 }
 
+/** 导入前自动备份下载名：演示工程_2026-11-10_1559.webscada.zip */
+function importBackupDownloadName(projectName: string): string {
+  const safe =
+    projectName.replace(/[^\w.\-()\u4e00-\u9fff]+/g, '_').slice(0, 80).replace(/^_+|_+$/g, '') ||
+    'project'
+  const d = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`
+  return `${safe}_${stamp}.webscada.zip`
+}
+
 async function onImportProject(file?: File | null) {
   if (!file || importing.value) return
+  try {
+    await scadaConfirm(
+      '导入前会先把当前工程（含设备/变量）自动下载备份到浏览器的「下载」文件夹。\n\n注意：这会覆盖目标电脑上的设备/变量配置，导入前请确认。\n\n将用工程包内的设备、变量、报警整表替换本机配置，本机原有项会被删除。',
+      '导入工程包',
+      { confirmButtonText: '备份并导入', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return
+  }
+
+  // 浏览器下载到「下载」目录（跟随浏览器设置，不写死磁盘路径）
+  try {
+    const backupName = importBackupDownloadName(project.document.meta.name || 'project')
+    const { fileName } = await project.exportProjectPackage({ downloadName: backupName })
+    ElMessage.success(`已备份到下载：${fileName}`)
+    log.success(`导入前自动备份：${fileName}`, '设计端')
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    log.error(`导入前自动备份失败：${msg}`, '设计端')
+    try {
+      await scadaConfirm(
+        '当前工程自动备份失败，是否仍继续导入？\n继续将覆盖本机设备/变量且可能无法恢复。',
+        '备份失败',
+        { confirmButtonText: '仍继续导入', cancelButtonText: '取消', type: 'warning' },
+      )
+    } catch {
+      return
+    }
+  }
+
   let timer = 0
   const started = Date.now()
   let unpackAt = 0
@@ -379,9 +420,12 @@ async function onImportProject(file?: File | null) {
       importReceived.value = progress.loaded
       importTotal.value = progress.total
     })
+    // 工程包可能含 devices/tags：刷新变量表与实时连接
+    await tags.hydrateFromServer()
+    tags.connectRealtime()
     importName.value = doc.meta.name
     importDone.value = true
-    ElMessage.success(`已导入为新工程：${doc.meta.name}`)
+    ElMessage.success(`已导入为新工程：${doc.meta.name}（已用包内设备/变量替换本机）`)
     log.success(`导入工程：${doc.meta.name}`, '设计端')
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -1141,6 +1185,7 @@ onUnmounted(() => {
     :before-close="beforeImportClose"
   >
     <p class="site-export-lead">正在把工程包传到服务端并写入模型资源。导入时请留在此窗口。</p>
+    <p class="site-export-lead import-warn">导入前已尝试把当前工程备份下载到「下载」文件夹。注意：导入会覆盖本机设备/变量配置。</p>
     <ol class="site-export-steps">
       <li
         v-for="(label, index) in importSteps"
@@ -1208,6 +1253,10 @@ onUnmounted(() => {
   font-size: 13px;
   line-height: 1.5;
   color: var(--scada-muted);
+}
+.import-warn {
+  margin-top: 8px;
+  color: var(--el-color-warning);
 }
 
 .site-export-steps {

@@ -151,9 +151,13 @@ public class InfluxHolder {
       String quality = s.get("quality") == null ? "Uncertain" : String.valueOf(s.get("quality"));
       long ts =
           s.get("timestamp") instanceof Number n ? n.longValue() : System.currentTimeMillis();
+      // name 作为 tag，8087 Data Explorer 可按变量名筛选（与 tagId 并存）
+      String name = influxTagValue(s.get("name"));
+      if (name.isEmpty()) name = tagId;
       Point point =
           Point.measurement(measurement)
               .addTag("tagId", tagId)
+              .addTag("name", name)
               .addTag("quality", quality)
               .time(Instant.ofEpochMilli(ts), WritePrecision.MS);
       Object value = s.get("value");
@@ -173,10 +177,16 @@ public class InfluxHolder {
 
   /** Best-effort async write for runtime; never throws to caller of setTagValue path. */
   public void writeSampleQuiet(String tagId, Object value, String quality, long timestamp) {
+    writeSampleQuiet(tagId, null, value, quality, timestamp);
+  }
+
+  public void writeSampleQuiet(
+      String tagId, String name, Object value, String quality, long timestamp) {
     if (!ready) return;
     try {
       Map<String, Object> s = new LinkedHashMap<>();
       s.put("tagId", tagId);
+      if (name != null && !name.isBlank()) s.put("name", name);
       s.put("value", value);
       s.put("quality", quality);
       s.put("timestamp", timestamp);
@@ -184,6 +194,14 @@ public class InfluxHolder {
     } catch (Exception e) {
       log.warn("influx write failed tagId={}: {}", tagId, e.toString());
     }
+  }
+
+  /** Influx tag 值不能含换行；过长截断，避免写入失败。 */
+  static String influxTagValue(Object raw) {
+    if (raw == null) return "";
+    String s = String.valueOf(raw).replace('\r', ' ').replace('\n', ' ').trim();
+    if (s.length() > 200) s = s.substring(0, 200);
+    return s;
   }
 
   public List<Map<String, Object>> queryHistory(String tagId, String start, String stop, Integer limit) {

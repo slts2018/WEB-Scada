@@ -231,12 +231,20 @@ public class ScadaProperties {
     private boolean enabled = true;
     private long pollMs = 1000;
     private int unitId = 1;
-    private int connectTimeoutMs = 2000;
+    private int connectTimeoutMs = 800;
     private int responseTimeoutMs = 2000;
     /** true=低字在前（协议20040401 V0 示例）；false=高字在前 */
     private boolean lowWordFirst = true;
     /** true 时打 DEBUG 逐点成功摘要（默认关，避免刷屏） */
     private boolean trace = false;
+    /**
+     * 调度模式：{@code isolated}=每设备独立队列（默认）；{@code legacy}=全局单线程串行（回滚用）。
+     */
+    private String scheduler = "isolated";
+    /** 设备连续失败后冷却，冷却期内不发起 TCP 连接 */
+    private long deviceCooldownMs = 3000;
+    /** 连续失败几次进入冷却 */
+    private int maxFailBeforeCooldown = 1;
 
     public boolean isEnabled() {
       return enabled;
@@ -292,6 +300,34 @@ public class ScadaProperties {
 
     public void setTrace(boolean trace) {
       this.trace = trace;
+    }
+
+    public String getScheduler() {
+      return scheduler;
+    }
+
+    public void setScheduler(String scheduler) {
+      this.scheduler = scheduler;
+    }
+
+    public boolean isLegacyScheduler() {
+      return scheduler != null && "legacy".equalsIgnoreCase(scheduler.trim());
+    }
+
+    public long getDeviceCooldownMs() {
+      return deviceCooldownMs;
+    }
+
+    public void setDeviceCooldownMs(long deviceCooldownMs) {
+      this.deviceCooldownMs = deviceCooldownMs;
+    }
+
+    public int getMaxFailBeforeCooldown() {
+      return maxFailBeforeCooldown;
+    }
+
+    public void setMaxFailBeforeCooldown(int maxFailBeforeCooldown) {
+      this.maxFailBeforeCooldown = maxFailBeforeCooldown;
     }
   }
 }

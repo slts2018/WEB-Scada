@@ -176,7 +176,23 @@ public class TagController {
     }
     List<Map<String, Object>> list = new java.util.ArrayList<>();
     for (Object s : samples) {
-      if (s instanceof Map<?, ?> m) list.add((Map<String, Object>) m);
+      if (!(s instanceof Map<?, ?> m)) continue;
+      Map<String, Object> row = new LinkedHashMap<>((Map<String, Object>) m);
+      Object nameObj = row.get("name");
+      if (nameObj == null || String.valueOf(nameObj).isBlank()) {
+        Object idObj = row.get("tagId");
+        if (idObj != null) {
+          try {
+            TagMeta meta = tags.get(String.valueOf(idObj));
+            if (meta != null && meta.name() != null && !meta.name().isBlank()) {
+              row.put("name", meta.name());
+            }
+          } catch (Exception ignored) {
+            // 补名称失败仍写入
+          }
+        }
+      }
+      list.add(row);
     }
     if (list.isEmpty()) {
       return ResponseEntity.badRequest().body(ApiError.of("invalid_samples"));
