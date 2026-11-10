@@ -340,9 +340,22 @@ function categoryAxisData(spec: TrendChartSpec): string[] {
   return Array.from({ length: Math.max(2, maxLen) }, (_, i) => String(i))
 }
 
+/** 有时间戳就画 [时间, 值]；窗口已定但还没点时给空序列，避免把示例值画到时间轴上 */
+function timeSeriesData(
+  useTime: boolean,
+  s: { points: Array<number | null>; times?: number[] },
+): Array<number | null> | Array<[number, number | null]> {
+  if (!useTime) return s.points
+  if (!s.times?.length) return []
+  return s.points.map((v, i): [number, number | null] => [s.times?.[i] ?? i, v])
+}
+
 export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unknown> {
   const { theme } = spec
-  const useTime = spec.series.some((s) => Array.isArray(s.times) && s.times.length > 0)
+  const hasTimes = spec.series.some((s) => Array.isArray(s.times) && s.times.length > 0)
+  // 历史窗口已经定了，就算一个点都没有也画时间轴。否则会落到 0、1、2 这种序号轴上
+  const hasWindow = spec.timeMin != null && spec.timeMax != null && spec.timeMax > spec.timeMin
+  const useTime = hasTimes || hasWindow
   const axisColor = theme.textColor
   const splitLine = { lineStyle: { color: theme.gridColor } }
   // 排版统一由 trendChartLayout 算：图表绘制与指针交互共用一份，避免两边各算一套对不上
@@ -650,10 +663,7 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
       ...(spec.stacked ? { stack: 'total' } : {}),
       lineStyle: { width: Math.max(2, Math.round(F / 7)), color: s.color },
       itemStyle: { color: s.color },
-      data:
-        useTime && s.times
-          ? s.points.map((v, i) => [s.times?.[i] ?? i, v])
-          : s.points,
+      data: timeSeriesData(useTime, s),
       })),
       // 坏质量段标红：叠一条只画坏段的线，压在曲线色之上（不进图例、不进读数）
       ...(spec.stacked
@@ -678,10 +688,7 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
                   opacity: 0.9,
                 },
                 itemStyle: { color: spec.badQualityColor ?? '#ef4444' },
-                data:
-                  useTime && s.times
-                    ? overlay.map((v, i) => [s.times?.[i] ?? i, v])
-                    : overlay,
+                data: timeSeriesData(useTime, { points: overlay, times: s.times }),
               }
             })
             .filter((item): item is NonNullable<typeof item> => item != null)),

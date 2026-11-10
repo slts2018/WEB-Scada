@@ -6,6 +6,7 @@ import {
   captureCameraState,
   createScene3D,
   type Scene3DBundle,
+  type SceneObjectLoadEvent,
   type TransformGizmoMode,
 } from '@/shared/three/createScene3D'
 import { frameDesigner3dSelection } from '@/shared/three/designer3dIntent'
@@ -19,6 +20,7 @@ import {
   walkObject3dTree,
 } from '@/shared/project/object3dTree'
 import { useProjectStore } from '@/stores/project'
+import { useOutputLogStore } from '@/stores/outputLog'
 import { useTagStore } from '@/stores/tag'
 import Object3DSameModelSizeDialog from '@/components/designer/Object3DSameModelSizeDialog.vue'
 import {
@@ -37,7 +39,78 @@ const props = withDefaults(
 )
 
 const project = useProjectStore()
+const log = useOutputLogStore()
 const tags = useTagStore()
+
+const sceneLoading = ref(false)
+const sceneLoadIndex = ref(0)
+const sceneLoadTotal = ref(0)
+const sceneLoadName = ref('')
+const sceneLoadKind = ref('')
+let sceneLoadDepth = 0
+let sceneLoadUsesEventIndex = true
+
+const sceneLoadPercent = computed(() => {
+  if (sceneLoadTotal.value <= 0) return 0
+  return Math.min(100, Math.round((sceneLoadIndex.value / sceneLoadTotal.value) * 100))
+})
+
+const sceneLoadDetail = computed(() => {
+  if (!sceneLoadTotal.value) return '正在准备场景…'
+  const at = Math.min(sceneLoadTotal.value, sceneLoadIndex.value + (sceneLoading.value ? 1 : 0))
+  const name = sceneLoadName.value || '…'
+  const kind = sceneLoadKind.value ? `（${sceneLoadKind.value}）` : ''
+  return `${at}/${sceneLoadTotal.value} ${name}${kind}`
+})
+
+function countSceneObjects(nodes: Page3D['objects']) {
+  let total = 0
+  walkObject3dTree(nodes, () => {
+    total += 1
+  })
+  return total
+}
+
+function onSceneObjectLoad(event: SceneObjectLoadEvent) {
+  sceneLoadName.value = event.name
+  sceneLoadKind.value = event.kind
+  if (sceneLoadUsesEventIndex) sceneLoadTotal.value = event.total
+  if (event.phase === 'start') {
+    if (sceneLoadUsesEventIndex) sceneLoadIndex.value = Math.max(0, event.index - 1)
+    return
+  }
+  const index = sceneLoadUsesEventIndex ? event.index : sceneLoadIndex.value + 1
+  const total = sceneLoadUsesEventIndex ? event.total : sceneLoadTotal.value
+  sceneLoadIndex.value = index
+  const node = findObject3dDeep(props.page.objects, event.id)
+  const file = node?.modelResourceId
+    ? project.document.resources.find((item) => item.id === node.modelResourceId)?.name
+    : ''
+  const extra = file ? `${event.kind} · ${file}` : event.kind
+  const line = `${index}/${total} ${event.name}（${extra}）`
+  if (event.ok) log.success(`已加载 ${line}`, '三维')
+  else log.error(`加载失败 ${line}`, '三维')
+}
+
+function beginSceneLoad(total: number, title?: string, usesEventIndex = true) {
+  sceneLoadDepth += 1
+  sceneLoadUsesEventIndex = usesEventIndex
+  sceneLoadIndex.value = 0
+  sceneLoadTotal.value = total
+  sceneLoadName.value = ''
+  sceneLoadKind.value = ''
+  sceneLoading.value = total > 0
+  if (title) log.info(title, '三维')
+}
+
+function endSceneLoad(total: number, title?: string) {
+  sceneLoadDepth = Math.max(0, sceneLoadDepth - 1)
+  if (sceneLoadDepth === 0) {
+    if (total > 0) sceneLoadIndex.value = total
+    sceneLoading.value = false
+  }
+  if (title) log.success(title, '三维')
+}
 const host = ref<HTMLDivElement | null>(null)
 const boardEl = ref<HTMLDivElement | null>(null)
 const ctxEl = ref<HTMLDivElement | null>(null)
@@ -376,7 +449,20 @@ function onMarqueeUp(e: PointerEvent) {
 
 async function reload() {
   if (!bundle) return
-  await bundle.setPage(props.page, (id) => project.getResourceUrl(id))
+  const total = countSceneObjects(props.page.objects)
+  const pageName = props.page.name || '未命名'
+  beginSceneLoad(
+    total,
+    total > 0 ? `开始加载三维页面「${pageName}」，共 ${total} 个对象` : undefined,
+  )
+  try {
+    await bundle.setPage(props.page, (id) => project.getResourceUrl(id), onSceneObjectLoad)
+  } finally {
+    endSceneLoad(
+      total,
+      total > 0 ? `三维页面「${pageName}」加载完成，共 ${total} 个对象` : undefined,
+    )
+  }
   syncSelectionGizmo()
   bundle.setGizmoMode(gizmoMode.value)
   if (project.previewLive) applyPreview()
@@ -421,9 +507,26 @@ async function syncSceneFromPage() {
           toMount.push({ node: obj, parentId: parent?.id ?? null })
         }
       })
-      for (const item of toMount) {
-        if (bundle.getObject3D(item.node.id)) continue
-        await bundle.mountObject(item.node, resolveUrl, item.parentId)
+      const mountTotal = toMount.length
+      if (mountTotal > 0) {
+        beginSceneLoad(
+          mountTotal,
+          mountTotal > 1 ? `开始加载 ${mountTotal} 个三维对象` : undefined,
+          false,
+        )
+      }
+      try {
+        for (const item of toMount) {
+          if (bundle.getObject3D(item.node.id)) continue
+          await bundle.mountObject(item.node, resolveUrl, item.parentId, onSceneObjectLoad)
+        }
+      } finally {
+        if (mountTotal > 0) {
+          endSceneLoad(
+            mountTotal,
+            mountTotal > 1 ? `三维对象加载完成，共 ${mountTotal} 个` : undefined,
+          )
+        }
       }
 
       bundle.pruneDuplicateRoots(desired)
@@ -1067,6 +1170,13 @@ defineExpose({
     @contextmenu.prevent
   >
     <div ref="host" class="host" />
+    <div v-if="sceneLoading" class="load-mask">
+      <div class="load-card">
+        <p class="load-title">正在加载三维场景</p>
+        <el-progress :percentage="sceneLoadPercent" :stroke-width="8" />
+        <p class="load-detail">{{ sceneLoadDetail }}</p>
+      </div>
+    </div>
     <div
       v-if="marquee"
       class="marquee"
@@ -1179,6 +1289,38 @@ defineExpose({
 .host {
   width: 100%;
   height: 100%;
+}
+
+.load-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 10, 14, 0.45);
+  pointer-events: none;
+}
+
+.load-card {
+  width: min(420px, calc(100% - 48px));
+  padding: 16px 18px 14px;
+  border-radius: 8px;
+  background: rgba(18, 22, 30, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.load-title {
+  margin: 0 0 10px;
+  font-size: 14px;
+  color: var(--scada-text);
+}
+
+.load-detail {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--scada-muted);
+  word-break: break-all;
 }
 
 .marquee {

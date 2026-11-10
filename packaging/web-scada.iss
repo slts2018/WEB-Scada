@@ -38,11 +38,11 @@ Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription:
 Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-; ShellExecute .bat (not CreateProcess). Keep console on failure via start.bat pause.
-Name: "{group}\{#MyAppName}"; Filename: "{app}\start.bat"; WorkingDir: "{app}"
+; launch.vbs shows a splash and starts the server with no console.
+Name: "{group}\{#MyAppName}"; Filename: "{app}\launch.vbs"; WorkingDir: "{app}"
 Name: "{group}\Stop"; Filename: "{app}\stop.bat"; WorkingDir: "{app}"
 Name: "{group}\README"; Filename: "{app}\README.txt"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\start.bat"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\launch.vbs"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\start.bat"; Description: "Launch now"; Flags: shellexec nowait postinstall skipifsilent
+Filename: "{app}\launch.vbs"; Description: "Launch now"; Flags: shellexec nowait postinstall skipifsilent

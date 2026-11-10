@@ -20,6 +20,7 @@ import {
   TooltipComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
+import { trendHistoryViewEpoch } from '@/shared/runtime/trendHistoryQuery'
 
 use([
   LineChart,
@@ -54,7 +55,7 @@ export function createTrendLiveOverlay(opts: {
   host: HTMLElement
   /** 图例点选变化 → 记下被点掉的曲线 */
   onLegendSelect?: (widgetId: string, hidden: string[]) => void
-  /** 底部滑块 / 滚轮缩放 → 记下时间窗，下次 setOption 不会把窗口弹回去 */
+  /** 底部滑块 / 滚轮缩放。历史趋势忽略它（只看已查出的点）；实时趋势用来记住显示窗口 */
   onZoom?: (widgetId: string, zoom: { start: number; end: number }) => void
   /** 图内单击 = 在该时刻落游标（历史趋势） */
   onCursor?: (widgetId: string, at: number) => void
@@ -80,6 +81,15 @@ export function createTrendLiveOverlay(opts: {
     }
     item.el.remove()
     live.delete(widgetId)
+  }
+
+  /** 把滑块和滚轮拨回整段查询窗口。历史趋势换了开始/结束，或双击还原时用 */
+  const showFullRange = (chart: ECharts) => {
+    try {
+      chart.setOption({ dataZoom: [{ start: 0, end: 100 }, { start: 0, end: 100 }] }, { lazyUpdate: false })
+    } catch {
+      /* 图还没建好缩放组件时忽略 */
+    }
   }
 
   const readZoom = (chart: ECharts): { start: number; end: number } | null => {
@@ -118,8 +128,11 @@ export function createTrendLiveOverlay(opts: {
       const chart = init(el, undefined, { renderer: 'canvas' })
       item = { el, chart }
       live.set(slot.widgetId, item)
-      // 双击 = 还原显示缩放（历史趋势还会因此跳回“当前查询窗口”）
-      chart.getZr().on('dblclick', () => opts.onReset?.(slot.widgetId))
+      // 双击 = 滑块回到这次查询的整段，不重新查
+      chart.getZr().on('dblclick', () => {
+        showFullRange(chart)
+        opts.onReset?.(slot.widgetId)
+      })
       // 拖游标：按住时指针离竖线 ±8px 内就算“拖游标”，
       // 拖期间临时关掉 dataZoom 的左键平移（否则窗口会跟着一起跑），松手恢复。
       let cursorDrag = false
@@ -198,6 +211,10 @@ export function createTrendLiveOverlay(opts: {
     // replaceMerge series：曲线条数变化时清掉旧序列，同时留下 dataZoom。
     if (!layoutOnly || !existed) {
       chart.setOption(slot.option, { notMerge: false, lazyUpdate: true, replaceMerge: ['series'] })
+      // 查询窗口换了（开始/结束、过去、搜索、翻页）：滑块拨回整段。只拖滑块不会改这个代数
+      const epoch = String(trendHistoryViewEpoch(slot.widgetId))
+      if (el.dataset.winEpoch != null && el.dataset.winEpoch !== epoch) showFullRange(chart)
+      el.dataset.winEpoch = epoch
     }
   }
 

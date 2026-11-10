@@ -14,6 +14,7 @@ import {
 } from '@/shared/storage/repository'
 import { RUNTIME_BOOT_KEY } from '@/shared/runtime/openRuntime'
 import { isObject3dPanelPage, listNavigationPages, type Page2D, type Page3D } from '@web-scada/core'
+import { retainLiveTrendSampling } from '@/shared/runtime/liveTrendSampler'
 
 const route = useRoute()
 const router = useRouter()
@@ -231,6 +232,8 @@ function onStorage(e: StorageEvent) {
   }
 }
 
+let stopLiveTrendSampling: (() => void) | null = null
+
 onMounted(async () => {
   try {
     syncShowGridFromRoute()
@@ -239,6 +242,7 @@ onMounted(async () => {
       document.title = `${project.document.meta.name || '运行'} · 运行`
       await tags.hydrateFromServer()
       tags.connectRealtime()
+      stopLiveTrendSampling = retainLiveTrendSampling()
       log.info(
         `存储模式：${getStorageMode() === 'api' ? '服务端' : '本地'}；变量：${tags.mode === 'live' ? '服务端' : 'Mock'}`,
         '运行端',
@@ -255,6 +259,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener('storage', onStorage)
+  stopLiveTrendSampling?.()
+  stopLiveTrendSampling = null
 })
 
 watch(

@@ -38,6 +38,10 @@ export const useTagStore = defineStore('tag', () => {
     Object.fromEntries(createInitialMockValues().map((v) => [v.tagId, v])),
   )
   const subscribed = ref<Set<string>>(new Set())
+  /** 当前页面要看的变量。切页时整组换掉。 */
+  const pageTagIds = new Set<string>()
+  /** 工程里所有实时趋势的变量。切页后仍要收到值，才能在后台继续记点。 */
+  const backgroundTagIds = new Set<string>()
   const connected = ref(false)
   const mode = ref<'live' | 'mock'>('mock')
   const activeAlarms = ref<ActiveAlarm[]>([])
@@ -155,18 +159,36 @@ export const useTagStore = defineStore('tag', () => {
     return { ok: true, message: '写值成功（本地 Mock）' }
   }
 
-  function setPageSubscription(tagIds: string[]) {
-    subscribed.value = new Set(tagIds)
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'subscribe', tagIds }))
+  function publishSubscription() {
+    const ids = new Set<string>([...pageTagIds, ...backgroundTagIds])
+    subscribed.value = ids
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    if (ids.size) {
+      ws.send(JSON.stringify({ type: 'subscribe', tagIds: [...ids] }))
+    } else {
+      ws.send(JSON.stringify({ type: 'unsubscribe' }))
     }
   }
 
+  function setPageSubscription(tagIds: string[]) {
+    pageTagIds.clear()
+    for (const id of tagIds) if (id) pageTagIds.add(id)
+    publishSubscription()
+  }
+
   function clearPageSubscription() {
-    subscribed.value = new Set()
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'unsubscribe' }))
+    pageTagIds.clear()
+    publishSubscription()
+  }
+
+  function setBackgroundSubscription(tagIds: string[]) {
+    const next = new Set(tagIds.filter(Boolean))
+    if (next.size === backgroundTagIds.size && [...next].every((id) => backgroundTagIds.has(id))) {
+      return
     }
+    backgroundTagIds.clear()
+    for (const id of next) backgroundTagIds.add(id)
+    publishSubscription()
   }
 
   function addListener(listener: TagListener) {
@@ -407,6 +429,7 @@ export const useTagStore = defineStore('tag', () => {
     ackAlarm,
     setPageSubscription,
     clearPageSubscription,
+    setBackgroundSubscription,
     addListener,
     hydrateFromServer,
     createTag,

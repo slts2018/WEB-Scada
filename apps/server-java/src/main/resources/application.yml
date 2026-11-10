@@ -34,12 +34,13 @@ webscada:
     required: ${SCADA_AUTH_REQUIRED:false}
   mcd4000:
     enabled: ${MCD4000_ENABLED:true}
+    # 无采集点时的连通探测间隔。有变量时按各变量扫描周期查询。
     poll-ms: ${MCD4000_POLL_MS:2000}
     lookback-sec: ${MCD4000_LOOKBACK_SEC:604800}
     timeout-ms: ${MCD4000_TIMEOUT_MS:15000}
     # 数据中台 HTTPS 证书常不被 JVM 信任；默认放行，可用 MCD4000_INSECURE_SSL=false 关闭
     insecure-ssl: ${MCD4000_INSECURE_SSL:true}
-  # 设备协议 modbus_tcp：按变量 address 轮询，写入 Tag 运行时（变量表实时值）
+  # 设备协议 modbus_tcp：按变量扫描周期读点。poll-ms 只用于没有采集点时的连通探测。
   modbus:
     enabled: ${MODBUS_ENABLED:true}
     poll-ms: ${MODBUS_POLL_MS:1000}

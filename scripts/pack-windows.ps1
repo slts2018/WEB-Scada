@@ -56,6 +56,8 @@ Write-Host '==> build Spring Boot server.jar'
   Copy-Item (Join-Path $Tpl 'start-site.bat') (Join-Path $OutDir 'start-site.bat') -Force
   Copy-Item (Join-Path $Tpl 'stop.bat') (Join-Path $OutDir 'stop.bat') -Force
   Copy-Item (Join-Path $Tpl 'launch.vbs') (Join-Path $OutDir 'launch.vbs') -Force
+  Copy-Item (Join-Path $Tpl 'splash.hta') (Join-Path $OutDir 'splash.hta') -Force
+  Copy-Item (Join-Path $Tpl 'run-hidden.vbs') (Join-Path $OutDir 'run-hidden.vbs') -Force
   Copy-Item (Join-Path $Tpl 'diagnose.bat') (Join-Path $OutDir 'diagnose.bat') -Force
   Copy-Item (Join-Path $Tpl 'README-SITE.txt') (Join-Path $OutDir 'README-SITE.txt') -Force
   Copy-Item (Join-Path $Tpl 'env.example') (Join-Path $OutDir '.env.example') -Force

@@ -219,6 +219,34 @@ function feedEchartCurves(
   feedTrendCurves({ ...widget, props: { ...widget.props, curves, maxPoints: 60 } }, getTag)
 }
 
+/** 这条实时趋势要订阅的变量：多曲线，以及旧的单曲线绑定。 */
+export function liveTrendSourceTagIds(widget: Widget2D): string[] {
+  if (widget.type !== 'trend') return []
+  const ids = trendCurveTagIds(widget.props)
+  const bound = boundTrendTagId(widget)
+  if (bound && !ids.includes(bound)) ids.push(bound)
+  return ids
+}
+
+/**
+ * 只把当前值推进实时趋势缓冲，不改图元、不重画。
+ * 页面切走后仍调用它，回来才不会把离开的那段时间连成一条横线。
+ * 同一次采样重复调用不会重复进点（按时间戳去重）。
+ */
+export function sampleLiveTrendWidget(
+  widget: Widget2D,
+  getTag: (tagId: string) => TagValue | undefined,
+): void {
+  if (widget.type !== 'trend') return
+  feedTrendCurves(widget, getTag)
+  if (trendCurvesTakeOver(widget)) return
+  const tagId = boundTrendTagId(widget)
+  if (!tagId) return
+  const tag = getTag(tagId)
+  if (!tag) return
+  applyTrendLiveSample(widget, tag)
+}
+
 /** 实时趋势多曲线：每条曲线按自己的采样时间戳入队（同一次求值重复跑不会重复进点） */
 function feedTrendCurves(
   widget: Widget2D,

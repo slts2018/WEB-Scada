@@ -76,7 +76,8 @@ export function syncNativeTrendCharts(opts: {
       setTrendHistoryTableHeight(widget.id, tableH)
       spec.chromeBottom = tableH
     }
-    spec.zoom = trendZoomOf(widget.id) ?? undefined
+    // 历史趋势的滑块是 ECharts 自己的显示缩放，不要再把百分比写进轴的最小/最大，否则会缩两次
+    spec.zoom = widget.type === 'trendHistory' ? undefined : (trendZoomOf(widget.id) ?? undefined)
     slots.push({
       widgetId: widget.id,
       rect: { x: rect.x, y: rect.y, width: rect.width, height: rect.height },

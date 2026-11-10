@@ -8,7 +8,7 @@
  *
  * 布局（单行，按功能分组；按图元宽度能放几组放几组，放不下的组整组收进「…」）：
  *
- *   时间 开始 结束 搜索 刷新 │ 浏览 ⇤ ⇥ 放大 缩小 表 │ 定位 时刻 间隔 │ 工具 导出 最大化 快捷键 …
+ *   时间 开始 结束 过去 搜索 刷新 │ 浏览 ⇤ ⇥ 放大 缩小 表 │ 定位 时刻 间隔 │ 工具 导出 最大化 快捷键 …
  *
  * 按钮一律只放图标，文字放在 title 里（鼠标悬停显示），省出地方给图表。
  */
@@ -45,11 +45,13 @@ import {
 import { onTrendAlarmBandsChanged, trendAlarmBandsOf, type AlarmBand } from '@/shared/runtime/trendAlarmEvents'
 import {
   TREND_INTERVALS,
+  TREND_PAST_RANGES,
   onTrendHistoryLoaded,
   refreshTrendHistory,
   setTrendHistoryFollow,
   setTrendHistoryInterval,
   setTrendHistoryWindow,
+  trendPresetSpanMs,
   shiftTrendHistoryWindow,
   trendHistoryExportRows,
   trendHistoryFollowOf,
@@ -224,6 +226,8 @@ const emit = defineEmits<{ change: []; toggleFullscreen: [] }>()
 const canEdit = () => props.allowEdit !== false
 
 const interval = ref('auto')
+/** 与当前窗口跨度吻合的预设；对不上（手改起止、缩放、平移）就空着 */
+const pastRange = ref('')
 const follow = ref(false)
 const aggWindow = ref<string | null>(null)
 const notice = ref<{ kind: 'error' | 'empty'; text: string } | null>(null)
@@ -359,12 +363,29 @@ function clearCursor(): void {
   after()
 }
 
+/** 窗口长度正好是某个预设时，下拉框显示该项；否则留空，避免标着「最近1小时」实际却不是 */
+function matchPastRange(from: number, to: number): string {
+  const span = to - from
+  if (!Number.isFinite(span) || span <= 0) return ''
+  for (const item of TREND_PAST_RANGES) {
+    if (Math.abs(span - trendPresetSpanMs(item.id)) < 2000) return item.id
+  }
+  return ''
+}
+
+function syncPastRange(): void {
+  const win = trendHistoryWindowOf(props.widgetId)
+  const next = win ? matchPastRange(win.from, win.to) : ''
+  if (pastRange.value !== next) pastRange.value = next
+}
+
 function sync(): void {
   interval.value = trendHistoryIntervalOf(props.widgetId)
   follow.value = trendHistoryFollowOf(props.widgetId)
   notice.value = trendHistoryNoticeOf(props.widgetId)
   aggWindow.value = trendHistoryStatusOf(props.widgetId)?.aggWindow ?? null
   syncRangeFields()
+  syncPastRange()
   syncCursor()
   syncAlarms()
 }
@@ -485,6 +506,17 @@ function after(): void {
  * search=true（点「搜索」或回车）= 这一对起止时间重查一遍；否则是改完自动应用。
  * 起止时间是用户明确指定的绝对区间 → 先关跟随，刷新时也保持这一段（不跳回最新）。
  */
+/** 按「过去一段时间」查询：结束时间取现在，开始时间往前推这段，并关掉跟随 */
+function applyPast(id: string): void {
+  if (!TREND_PAST_RANGES.some((item) => item.id === id)) return
+  const to = Date.now()
+  const from = to - trendPresetSpanMs(id)
+  setTrendHistoryFollow(props.widgetId, false)
+  setTrendHistoryWindow(props.widgetId, from, to)
+  refreshTrendHistory(props.widgetId)
+  after()
+}
+
 function applyRange(search = false): void {
   const f = fromAt.value?.getTime()
   const t = toAt.value?.getTime()
@@ -546,6 +578,7 @@ function exportCsv(): void {
 
 const SHORTCUTS: Array<{ key: string; text: string }> = [
   { key: '开始/结束', text: '起止时间各自一个输入框（秒精度）→ 改完自动查，或点「搜索」重查一遍' },
+  { key: '过去', text: '按现在往前查一段（5–30 分钟、1–3 小时，或 1 / 3 / 5 / 7 / 15 / 30 天）' },
   { key: '时刻', text: '看某一个瞬间 → 游标跳过去（不在起止区间里会自动把窗口挪过去）' },
   { key: '← / →', text: '游标按采样点前后移动' },
   { key: '+ / -', text: '以游标为中心放大 / 缩小时间窗' },
@@ -607,6 +640,18 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
               @change="applyRange()"
             />
           </span>
+          <el-select
+            v-model="pastRange"
+            size="small"
+            class="w-past"
+            placeholder="过去"
+            :teleported="false"
+            :disabled="!canEdit()"
+            title="查询过去一段时间（结束时间为现在）"
+            @change="applyPast"
+          >
+            <el-option v-for="item in TREND_PAST_RANGES" :key="item.id" :label="item.label" :value="item.id" />
+          </el-select>
           <el-button
             size="small"
             :icon="Search"
@@ -865,6 +910,10 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
 }
 .trend-bar :deep(.w-interval) {
   width: 72px;
+  flex: 0 0 auto;
+}
+.trend-bar :deep(.w-past) {
+  width: 112px;
   flex: 0 0 auto;
 }
 /* 快捷键提示面板：贴在图元左上角，不抢图内的鼠标 */

@@ -163,8 +163,9 @@ export function createKonvaStage(
       flushTrend(false)
     },
     onZoom: (widgetId, zoom) => {
+      // 历史趋势的滑块 / 滚轮 / 框选只在已查出的点里看，不改查询窗口
+      if (options.resolveWidget?.(widgetId)?.type === 'trendHistory') return
       setTrendZoom(widgetId, { start: zoom.start, end: zoom.end })
-      historyZoom.handleZoom(widgetId, zoom)
     },
     onReset: (widgetId) => historyZoom.handleReset(widgetId),
     cursorOf: (widgetId) => trendHistoryCursorOf(widgetId),
@@ -177,7 +178,6 @@ export function createKonvaStage(
   })
 
   const historyZoom = createTrendHistoryZoomBridge({
-    resolveWidget: (id) => options.resolveWidget?.(id),
     repaint: () => flushTrend(false),
   })
 

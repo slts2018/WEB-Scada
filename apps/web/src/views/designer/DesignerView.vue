@@ -26,21 +26,17 @@ import DatabaseSettingsDialog from '@/components/dialogs/DatabaseSettingsDialog.
 import PageTreePanel from '@/components/designer/PageTreePanel.vue'
 import VariableManageDialog from '@/components/dialogs/VariableManageDialog.vue'
 import ResourceManagerDialog from '@/components/dialogs/ResourceManagerDialog.vue'
-import PublishValidateDialog from '@/components/dialogs/PublishValidateDialog.vue'
 import AnimationConnectionDialog from '@/components/designer/AnimationConnectionDialog.vue'
 import Object3DModelEditorDialog from '@/components/designer/Object3DModelEditorDialog.vue'
 import Object3DPanelPageEditorDialog from '@/components/designer/Object3DPanelPageEditorDialog.vue'
 import Object3DLiquidDialog from '@/components/designer/Object3DLiquidDialog.vue'
 import Object3DFlowDialog from '@/components/designer/Object3DFlowDialog.vue'
-import { useProjectStore, type SiteExportPhase } from '@/stores/project'
+import { useProjectStore, type ProjectImportPhase, type SiteExportPhase } from '@/stores/project'
 import { useOutputLogStore } from '@/stores/outputLog'
 import { useTagStore } from '@/stores/tag'
-import {
-  validatePublishPackage,
-  type PublishValidationResult,
-} from '@/shared/project/publishValidate'
 import { useProjectAutoSave } from '@/shared/project/useProjectAutoSave'
 import { syncCurrentProjectAndOpenRuntime } from '@/shared/runtime/openRuntime'
+import { retainLiveTrendSampling } from '@/shared/runtime/liveTrendSampler'
 import { ApiError } from '@/shared/api/client'
 import {
   blurTypingTarget,
@@ -121,8 +117,6 @@ const scriptVisible = ref(false)
 const dbSettingsVisible = ref(false)
 const variableManageVisible = ref(false)
 const resourceManageVisible = ref(false)
-const publishValidateVisible = ref(false)
-const publishValidateResult = ref<PublishValidationResult | null>(null)
 const siteExportVisible = ref(false)
 const siteExporting = ref(false)
 const siteExportDone = ref(false)
@@ -293,21 +287,115 @@ function beforeSiteExportClose(done: () => void) {
   done()
 }
 
+const importVisible = ref(false)
+const importing = ref(false)
+const importDone = ref(false)
+const importError = ref('')
+const importPhase = ref<ProjectImportPhase>('upload')
+const importReceived = ref(0)
+const importTotal = ref(0)
+const importElapsed = ref(0)
+const importUnpackWait = ref(0)
+const importName = ref('')
+const importSteps = ['上传工程包', '解压资源', '打开工程']
+
+function importStepIndex(phase: ProjectImportPhase) {
+  if (phase === 'upload') return 0
+  if (phase === 'unpack') return 1
+  return 2
+}
+
+function importMark(index: number) {
+  const current = importStepIndex(importPhase.value)
+  if (importDone.value || index < current) return '完成'
+  if (importError.value && index === current) return '失败'
+  if (importing.value && index === current) return '进行中'
+  return '等待'
+}
+
+/** 上传按字节；解压发生在服务端，没有逐文件回调，按已等待时间往前走 */
+const importShownPercent = computed(() => {
+  if (importDone.value) return 100
+  if (importPhase.value === 'upload') {
+    if (importTotal.value > 0) {
+      return Math.min(78, Math.round((importReceived.value / importTotal.value) * 78))
+    }
+    return Math.min(12, importElapsed.value)
+  }
+  if (importPhase.value === 'unpack') {
+    return Math.min(96, 80 + Math.round(16 * (1 - Math.exp(-importUnpackWait.value / 12))))
+  }
+  return 98
+})
+
+const importDetail = computed(() => {
+  const sec = importElapsed.value
+  const clock = `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`
+  const pct = importShownPercent.value
+  if (importError.value) return importError.value
+  if (importDone.value) return `已完成 ${pct}%，用时 ${clock}。已打开「${importName.value}」。`
+  if (importPhase.value === 'upload') {
+    const got = formatExportSize(importReceived.value)
+    if (importTotal.value > 0) {
+      return `正在上传 ${got} / ${formatExportSize(importTotal.value)}… ${pct}% ，已用时 ${clock}`
+    }
+    return `正在上传 ${got}… ${pct}% ，已用时 ${clock}`
+  }
+  if (importPhase.value === 'unpack') return `正在解压并写入模型资源… ${pct}% ，已用时 ${clock}`
+  return `正在打开工程… ${pct}% ，已用时 ${clock}`
+})
+
+function beforeImportClose(done: () => void) {
+  if (importing.value) return
+  done()
+}
+
 async function onImportProject(file?: File | null) {
-  if (!file) return
+  if (!file || importing.value) return
+  let timer = 0
+  const started = Date.now()
+  let unpackAt = 0
+  importVisible.value = true
+  importing.value = true
+  importDone.value = false
+  importError.value = ''
+  importPhase.value = 'upload'
+  importReceived.value = 0
+  importTotal.value = file.size
+  importElapsed.value = 0
+  importUnpackWait.value = 0
+  importName.value = file.name
+  timer = window.setInterval(() => {
+    const now = Date.now()
+    importElapsed.value = Math.floor((now - started) / 1000)
+    if (unpackAt > 0) importUnpackWait.value = Math.floor((now - unpackAt) / 1000)
+  }, 500)
   try {
     cancelAutoSave()
-    const doc = await project.importProjectPackage(file)
+    log.info(`开始导入工程：${file.name}`, '设计端')
+    const doc = await project.importProjectPackage(file, (progress) => {
+      if (progress.phase === 'unpack' && importPhase.value !== 'unpack') unpackAt = Date.now()
+      importPhase.value = progress.phase
+      importReceived.value = progress.loaded
+      importTotal.value = progress.total
+    })
+    importName.value = doc.meta.name
+    importDone.value = true
     ElMessage.success(`已导入为新工程：${doc.meta.name}`)
     log.success(`导入工程：${doc.meta.name}`, '设计端')
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     if (msg === 'import_requires_api') {
-      ElMessage.warning('导入需要连接服务端')
+      importError.value = '导入需要连接服务端'
+      ElMessage.warning(importError.value)
     } else {
-      ElMessage.error('导入失败，请确认是 .webscada.zip 工程包')
+      importError.value = '导入失败，请确认是 .webscada.zip 工程包'
+      ElMessage.error(importError.value)
       log.error(`导入失败：${msg}`, '设计端')
     }
+  } finally {
+    window.clearInterval(timer)
+    importing.value = false
   }
 }
 
@@ -391,30 +479,6 @@ async function confirmRemoveExisting() {
   ElMessage.success('已删除')
   log.warn('已删除工程', '设计端')
   await project.refreshList()
-}
-
-async function onPublish() {
-  const result = validatePublishPackage(project.document, tags.metas)
-  publishValidateResult.value = result
-  publishValidateVisible.value = true
-  if (!result.ok) {
-    log.warn(
-      `发布校验未通过：错误 ${result.errors.length}，警告 ${result.warnings.length}`,
-      '设计端',
-    )
-  } else if (result.warnings.length) {
-    log.warn(`发布校验有 ${result.warnings.length} 条警告`, '设计端')
-  }
-}
-
-async function confirmPublish() {
-  const pkg = await project.publish()
-  const where = project.getStorageMode() === 'api' ? '服务端' : '本地'
-  ElMessage.success(`已发布 ${pkg.manifest.publishVersion} 并写入${where}`)
-  log.success(
-    `发布成功 ${pkg.manifest.projectName} v${pkg.manifest.publishVersion}（${where}）`,
-    '设计端',
-  )
 }
 
 /** 进入运行端 */
@@ -613,7 +677,6 @@ const anyDialogOpen = computed(
     dbSettingsVisible.value ||
     variableManageVisible.value ||
     resourceManageVisible.value ||
-    publishValidateVisible.value ||
     project.animationConnectionOpen,
 )
 
@@ -776,11 +839,14 @@ function onDesignerKeyDown(e: KeyboardEvent) {
   }
 }
 
+let stopLiveTrendSampling: (() => void) | null = null
+
 onMounted(async () => {
   window.addEventListener('keydown', onDesignerKeyDown, true)
   await project.hydrateFromStorage()
   await tags.hydrateFromServer()
   tags.connectRealtime()
+  stopLiveTrendSampling = retainLiveTrendSampling()
   const mode = project.getStorageMode()
   log.info(
     `加载工程：${project.document.meta.name}（存储：${mode === 'api' ? '服务端' : '本地'}；变量：${tags.mode === 'live' ? '服务端' : 'Mock'}）`,
@@ -790,6 +856,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', onDesignerKeyDown, true)
+  stopLiveTrendSampling?.()
+  stopLiveTrendSampling = null
 })
 </script>
 
@@ -817,7 +885,6 @@ onUnmounted(() => {
             <el-dropdown-item @click="onExportSite">导出网站包</el-dropdown-item>
             <el-dropdown-item @click="pickImportFile">导入工程包</el-dropdown-item>
             <el-dropdown-item @click="propertyVisible = true">工程属性</el-dropdown-item>
-            <el-dropdown-item divided @click="onPublish">发布</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
@@ -890,7 +957,6 @@ onUnmounted(() => {
       <span class="menu-item" @click="variableManageVisible = true">变量/设备</span>
       <span class="menu-item" @click="resourceManageVisible = true">资源</span>
       <span class="menu-item" @click="scriptVisible = true">脚本</span>
-      <span class="menu-item" @click="onPublish">发布</span>
       <el-dropdown trigger="click">
         <span class="menu-item">系统</span>
         <template #dropdown>
@@ -1012,11 +1078,6 @@ onUnmounted(() => {
   <DatabaseSettingsDialog v-model="dbSettingsVisible" />
   <VariableManageDialog v-model="variableManageVisible" />
   <ResourceManagerDialog v-model="resourceManageVisible" />
-  <PublishValidateDialog
-    v-model="publishValidateVisible"
-    :result="publishValidateResult"
-    @confirm="confirmPublish"
-  />
   <AnimationConnectionDialog />
   <Object3DModelEditorDialog />
   <Object3DPanelPageEditorDialog />
@@ -1066,6 +1127,41 @@ onUnmounted(() => {
     <p class="site-export-detail">{{ siteExportDetail }}</p>
     <template #footer>
       <el-button type="primary" :disabled="siteExporting" @click="siteExportVisible = false">关闭</el-button>
+    </template>
+  </el-dialog>
+
+  <el-dialog
+    v-model="importVisible"
+    title="导入工程包"
+    width="460px"
+    align-center
+    :close-on-click-modal="false"
+    :close-on-press-escape="!importing"
+    :show-close="!importing"
+    :before-close="beforeImportClose"
+  >
+    <p class="site-export-lead">正在把工程包传到服务端并写入模型资源。导入时请留在此窗口。</p>
+    <ol class="site-export-steps">
+      <li
+        v-for="(label, index) in importSteps"
+        :key="label"
+        :class="{
+          on: importing && importStepIndex(importPhase) === index,
+          ok: importDone || importStepIndex(importPhase) > index,
+        }"
+      >
+        <span>{{ label }}</span>
+        <span>{{ importMark(index) }}</span>
+      </li>
+    </ol>
+    <el-progress
+      :percentage="importShownPercent"
+      :status="importError ? 'exception' : importDone ? 'success' : undefined"
+      :stroke-width="8"
+    />
+    <p class="site-export-detail">{{ importDetail }}</p>
+    <template #footer>
+      <el-button type="primary" :disabled="importing" @click="importVisible = false">关闭</el-button>
     </template>
   </el-dialog>
 </template>

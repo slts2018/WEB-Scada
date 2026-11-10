@@ -190,12 +190,17 @@ export interface Scene3DBundle {
   camera: PerspectiveCamera
   renderer: WebGLRenderer
   controls: OrbitControls
-  setPage: (page: Page3D, resolveModelUrl: (resourceId: string) => string | undefined) => Promise<void>
+  setPage: (
+    page: Page3D,
+    resolveModelUrl: (resourceId: string) => string | undefined,
+    onProgress?: (event: SceneObjectLoadEvent) => void,
+  ) => Promise<void>
   /** 增量挂载（粘贴/新增），不清场景、不改相机 */
   mountObject: (
     node: Object3DNode,
     resolveModelUrl: (resourceId: string) => string | undefined,
     parentId?: string | null,
+    onProgress?: (event: SceneObjectLoadEvent) => void,
   ) => Promise<void>
   /** 增量卸载（删除），含子树 */
   unmountObjects: (objectIds: string[]) => void
@@ -489,6 +494,46 @@ function createPrimitiveMesh(node: Object3DNode): Object3D {
     ignoreGroupAnchorBounds(mesh)
   }
   return mesh
+}
+
+/** 设计端加载三维对象时逐条回调。运行端不传则无行为变化。 */
+export interface SceneObjectLoadEvent {
+  phase: 'start' | 'done'
+  index: number
+  total: number
+  id: string
+  name: string
+  kind: string
+  ok: boolean
+}
+
+interface SceneLoadCursor {
+  total: number
+  next: number
+  report?: (event: SceneObjectLoadEvent) => void
+}
+
+function objectLoadKind(node: Object3DNode): string {
+  if (node.liquid) return '液位'
+  if (node.modelResourceId) return '模型'
+  if (node.panel && !node.primitive) return '面板'
+  if (node.primitive === 'sphere') return '球体'
+  if (node.primitive === 'cylinder') return '圆柱'
+  if (node.primitive === 'arrow') return '箭头'
+  if (node.primitive === 'box') return '立方体'
+  return '对象'
+}
+
+function countObject3dNodes(nodes: Object3DNode[]): number {
+  let total = 0
+  const walk = (list: Object3DNode[]) => {
+    for (const node of list) {
+      total += 1
+      if (node.children?.length) walk(node.children)
+    }
+  }
+  walk(nodes)
+  return total
 }
 
 export function createScene3D(
@@ -1404,8 +1449,25 @@ const syncSelectionHelpers = (ids: string[]) => {
     node: Object3DNode,
     resolveModelUrl: (resourceId: string) => string | undefined,
     parent: Object3D = root,
+    cursor?: SceneLoadCursor,
   ) => {
     if (objectMap.has(node.id)) return
+    const loadIndex = cursor ? ++cursor.next : 0
+    let loadOk = true
+    let reportDone = Boolean(cursor?.report)
+    const reportLoad = (phase: 'start' | 'done') => {
+      cursor?.report?.({
+        phase,
+        index: loadIndex,
+        total: cursor?.total ?? 0,
+        id: node.id,
+        name: node.name?.trim() || '未命名',
+        kind: objectLoadKind(node),
+        ok: loadOk,
+      })
+    }
+    reportLoad('start')
+    try {
     nodeMap.set(node.id, node)
     let obj: Object3D
     if (node.modelResourceId) {
@@ -1416,6 +1478,7 @@ const syncSelectionHelpers = (ids: string[]) => {
           // await 期间另一路可能已挂上同 id：丢弃本份，避免「粘贴残影」
           if (objectMap.has(node.id)) {
             disposeObject3DResources(detail)
+            reportDone = false
             return
           }
           // 设计/运行均不用距离 LOD：拉远变代理盒会影响组态观感（管道变成大方块）。
@@ -1426,9 +1489,11 @@ const syncSelectionHelpers = (ids: string[]) => {
           wrap.add(detail)
           obj = wrap
         } catch {
+          loadOk = false
           obj = createPrimitiveMesh({ ...node, primitive: 'box' })
         }
       } else {
+        loadOk = false
         obj = createPrimitiveMesh({ ...node, primitive: node.primitive ?? 'box' })
       }
     } else {
@@ -1436,6 +1501,7 @@ const syncSelectionHelpers = (ids: string[]) => {
     }
     if (objectMap.has(node.id)) {
       disposeObject3DResources(obj)
+      reportDone = false
       return
     }
     obj.userData[USER_DATA_ID] = node.id
@@ -1473,8 +1539,17 @@ const syncSelectionHelpers = (ids: string[]) => {
     if (flowFromRawNode(node)) applyFlowVisual(obj, node)
     // 按需渲染：挂上对象后必须刷一帧，否则要等拖拽/滚轮才看得见（远程慢加载时像黑屏）
     invalidate()
+    if (reportDone) {
+      reportDone = false
+      reportLoad('done')
+    }
     for (const child of node.children ?? []) {
-      await mountNode(child, resolveModelUrl, obj)
+      await mountNode(child, resolveModelUrl, obj, cursor)
+    }
+    } catch (err) {
+      loadOk = false
+      if (reportDone) reportLoad('done')
+      throw err
     }
   }
 
@@ -1498,6 +1573,7 @@ const syncSelectionHelpers = (ids: string[]) => {
   const setPage = async (
     page: Page3D,
     resolveModelUrl: (resourceId: string) => string | undefined,
+    onProgress?: (event: SceneObjectLoadEvent) => void,
   ) => {
     resolveResourceUrlFn = resolveModelUrl
     clearObjects()
@@ -1507,9 +1583,14 @@ const syncSelectionHelpers = (ids: string[]) => {
     presentation.apply(page.presentation)
     syncGrid(page.presentation)
     applyPageCamera(page)
+    const cursor: SceneLoadCursor = {
+      total: countObject3dNodes(page.objects),
+      next: 0,
+      report: onProgress,
+    }
     for (const node of page.objects) {
       try {
-        await mountNode(node, resolveModelUrl)
+        await mountNode(node, resolveModelUrl, root, cursor)
       } catch (err) {
         console.error('[createScene3D] mountNode failed', node.id, err)
         // 单对象失败不拖垮整页：落一个占位盒子
@@ -1541,6 +1622,7 @@ const syncSelectionHelpers = (ids: string[]) => {
     node: Object3DNode,
     resolveModelUrl: (resourceId: string) => string | undefined,
     parentId?: string | null,
+    onProgress?: (event: SceneObjectLoadEvent) => void,
   ) => {
     resolveResourceUrlFn = resolveModelUrl
     if (disposed || objectMap.has(node.id) || mountingIds.has(node.id)) return
@@ -1555,8 +1637,13 @@ const syncSelectionHelpers = (ids: string[]) => {
         console.warn('[createScene3D] mountObject parent missing', parentId, node.id)
         return
       }
+      const cursor: SceneLoadCursor = {
+        total: countObject3dNodes([node]),
+        next: 0,
+        report: onProgress,
+      }
       try {
-        await mountNode(node, resolveModelUrl, parent ?? root)
+        await mountNode(node, resolveModelUrl, parent ?? root, cursor)
       } catch (err) {
         console.error('[createScene3D] mountObject failed', node.id, err)
         return

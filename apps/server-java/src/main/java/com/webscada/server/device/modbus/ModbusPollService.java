@@ -17,7 +17,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-/** 按设备轮询 Modbus 变量地址，写入 Tag 运行时（变量表实时值）。 */
+/** 按每个变量自己的扫描周期读 Modbus 点，写入 Tag 运行时。同一轮里只读到期的点。 */
 @Service
 public class ModbusPollService {
   private static final Logger log = LoggerFactory.getLogger(ModbusPollService.class);
@@ -30,6 +30,8 @@ public class ModbusPollService {
   private final ModbusAcqLog acqLog = new ModbusAcqLog();
   /** deviceId → 上一轮是否在线（用于掉线/恢复 INFO） */
   private final ConcurrentHashMap<String, Boolean> lastOnline = new ConcurrentHashMap<>();
+  /** tagId 或探测键 → 上次发起读取的时间 */
+  private final ConcurrentHashMap<String, Long> lastScanAt = new ConcurrentHashMap<>();
 
   public ModbusPollService(
       DeviceFileStore devices, TagRuntimeService runtime, ModbusTagIo io, ScadaProperties props) {
@@ -39,7 +41,7 @@ public class ModbusPollService {
     this.props = props;
   }
 
-  @Scheduled(fixedDelayString = "${webscada.modbus.poll-ms:1000}", initialDelay = 2500)
+  @Scheduled(fixedDelay = 50, initialDelay = 2500)
   public void poll() {
     if (!io.enabled()) return;
     if (!busy.compareAndSet(false, true)) return;
@@ -70,12 +72,16 @@ public class ModbusPollService {
     }
 
     boolean trace = props.getModbus().isTrace();
+    long now = System.currentTimeMillis();
+    long pingEvery = Math.max(1000L, props.getModbus().getPollMs());
     for (DeviceMeta dev : modbusDevs.values()) {
       String deviceId = dev.deviceId();
       List<TagMeta> tags = byDevice.getOrDefault(deviceId, List.of());
-      long t0 = System.currentTimeMillis();
+      long t0 = now;
 
       if (tags.isEmpty()) {
+        if (!scanDue("ping:" + deviceId, pingEvery, now)) continue;
+        lastScanAt.put("ping:" + deviceId, now);
         try {
           io.pingDevice(dev);
           noteOnline(deviceId, true, "connected (no tags)");
@@ -88,11 +94,19 @@ public class ModbusPollService {
         continue;
       }
 
+      List<TagMeta> due = new ArrayList<>();
+      for (TagMeta meta : tags) {
+        if (!scanDue(meta.tagId(), scanPeriod(meta), now)) continue;
+        due.add(meta);
+        lastScanAt.put(meta.tagId(), now);
+      }
+      if (due.isEmpty()) continue;
+
       int ok = 0;
       int fail = 0;
       String lastErr = null;
       boolean needReset = false;
-      for (TagMeta meta : tags) {
+      for (TagMeta meta : due) {
         try {
           ModbusTagIo.ReadOk r = io.read(meta);
           Object v = coerce(meta.dataType(), r.value());
@@ -159,6 +173,17 @@ public class ModbusPollService {
         io.reportOnline(deviceId, false, lastErr != null ? lastErr : "采集失败");
       }
     }
+  }
+
+  /** 变量扫描周期。缺省 1 秒，与界面默认一致，最小 50 毫秒。 */
+  private static int scanPeriod(TagMeta meta) {
+    int ms = meta.scanPeriodMs() == null ? 1000 : meta.scanPeriodMs();
+    return Math.max(50, ms);
+  }
+
+  private boolean scanDue(String key, long periodMs, long now) {
+    long last = lastScanAt.getOrDefault(key, 0L);
+    return last == 0L || now - last >= periodMs;
   }
 
   private String withSide(DeviceMeta dev, String message) {

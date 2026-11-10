@@ -70,7 +70,7 @@ if not errorlevel 1 (
   call :log "already running, open browser"
   echo Already running. Opening %SCADA_URL%
   start "" "%SCADA_URL%"
-  timeout /t 3 /nobreak >nul
+  if not defined SCADA_NO_PAUSE timeout /t 3 /nobreak >nul
   endlocal
   exit /b 0
 )
@@ -79,7 +79,7 @@ if not errorlevel 1 (
 echo Stopping old WebScada java (server.jar) if any...
 where powershell >nul 2>&1
 if not errorlevel 1 (
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process -Filter \"name='java.exe'\" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like '*server.jar*' } | ForEach-Object { Write-Host ('  stop PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Milliseconds 800"
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { ($_.Name -eq 'java.exe' -or $_.Name -eq 'javaw.exe') -and $_.CommandLine -like '*server.jar*' } | ForEach-Object { Write-Host ('  stop PID ' + $_.ProcessId); Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }; Start-Sleep -Milliseconds 800"
 )
 
 netstat -ano | findstr /R /C:":%SCADA_PORT% .*LISTENING" >nul 2>&1
@@ -126,7 +126,41 @@ if not defined INFLUX_ORG set "INFLUX_ORG=web-scada"
 if not defined INFLUX_BUCKET set "INFLUX_BUCKET=tags"
 if not defined INFLUX_MEASUREMENT set "INFLUX_MEASUREMENT=tag_value"
 
-start "WebScada-Server" /min cmd /c "set MYSQL_HOST=%MYSQL_HOST%&& set MYSQL_PORT=%MYSQL_PORT%&& set MYSQL_USER=%MYSQL_USER%&& set MYSQL_PASSWORD=%MYSQL_PASSWORD%&& set MYSQL_DATABASE=%MYSQL_DATABASE%&& set MYSQL_FALLBACK_FILE=%MYSQL_FALLBACK_FILE%&& set INFLUX_URL=%INFLUX_URL%&& set INFLUX_TOKEN=%INFLUX_TOKEN%&& set INFLUX_ORG=%INFLUX_ORG%&& set INFLUX_BUCKET=%INFLUX_BUCKET%&& set INFLUX_MEASUREMENT=%INFLUX_MEASUREMENT%&& set SCADA_DATA=%SCADA_DATA%&& set SCADA_WEB_ROOT=%SCADA_WEB_ROOT%&& set PORT=%PORT%&& set HOST=%HOST%&& "%JAVA_EXE%" -jar "%~dp0server.jar" 1>>"%~dp0data\server.log" 2>&1"
+REM javaw has no console. run-hidden.vbs detaches it so this window can exit.
+set "JAVAW_EXE=%JAVA_EXE%"
+if /I "%JAVA_EXE%"=="java" set "JAVAW_EXE=javaw"
+if /I not "%JAVA_EXE%"=="java" set "JAVAW_EXE=%JAVA_EXE:java.exe=javaw.exe%"
+if not exist "%JAVAW_EXE%" if /I not "%JAVAW_EXE%"=="javaw" (
+  call :log "javaw missing, fallback java"
+  set "JAVAW_EXE=%JAVA_EXE%"
+)
+call :log "javaw_exe=%JAVAW_EXE%"
+
+set "RUNNER=%~dp0data\run-server.cmd"
+> "%RUNNER%" echo @echo off
+>> "%RUNNER%" echo cd /d "%~dp0"
+>> "%RUNNER%" echo set "MYSQL_HOST=%MYSQL_HOST%"
+>> "%RUNNER%" echo set "MYSQL_PORT=%MYSQL_PORT%"
+>> "%RUNNER%" echo set "MYSQL_USER=%MYSQL_USER%"
+>> "%RUNNER%" echo set "MYSQL_PASSWORD=%MYSQL_PASSWORD%"
+>> "%RUNNER%" echo set "MYSQL_DATABASE=%MYSQL_DATABASE%"
+>> "%RUNNER%" echo set "MYSQL_FALLBACK_FILE=%MYSQL_FALLBACK_FILE%"
+>> "%RUNNER%" echo set "INFLUX_URL=%INFLUX_URL%"
+>> "%RUNNER%" echo set "INFLUX_TOKEN=%INFLUX_TOKEN%"
+>> "%RUNNER%" echo set "INFLUX_ORG=%INFLUX_ORG%"
+>> "%RUNNER%" echo set "INFLUX_BUCKET=%INFLUX_BUCKET%"
+>> "%RUNNER%" echo set "INFLUX_MEASUREMENT=%INFLUX_MEASUREMENT%"
+>> "%RUNNER%" echo set "SCADA_DATA=%SCADA_DATA%"
+>> "%RUNNER%" echo set "SCADA_WEB_ROOT=%SCADA_WEB_ROOT%"
+>> "%RUNNER%" echo set "PORT=%PORT%"
+>> "%RUNNER%" echo set "HOST=%HOST%"
+>> "%RUNNER%" echo "%JAVAW_EXE%" -jar "%~dp0server.jar" 1^>^>"%~dp0data\server.log" 2^>^&1
+
+if exist "%~dp0run-hidden.vbs" (
+  wscript //nologo "%~dp0run-hidden.vbs" "%RUNNER%"
+) else (
+  start "WebScada-Server" /min "%RUNNER%"
+)
 if errorlevel 1 (
   call :log "ERROR: start command failed"
   echo [ERROR] Failed to start server.jar
@@ -166,7 +200,7 @@ goto :fail
 call :log "OK ready, open browser"
 start "" "%SCADA_URL%"
 echo Started OK.
-timeout /t 4 /nobreak >nul
+if not defined SCADA_NO_PAUSE timeout /t 4 /nobreak >nul
 endlocal
 exit /b 0
 
@@ -175,7 +209,7 @@ echo.
 echo Log: %CD%\data\launch.log
 if defined SCADA_LAUNCH_LOG echo Also: %SCADA_LAUNCH_LOG%
 echo.
-pause
+if not defined SCADA_NO_PAUSE pause
 endlocal
 exit /b 1
 

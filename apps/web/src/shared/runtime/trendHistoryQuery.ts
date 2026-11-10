@@ -70,12 +70,43 @@ export const TREND_RANGES = [
   { id: '-7d', label: '最近7天' },
 ] as const
 
+/** 工具栏「过去」下拉：结束时间取现在，往前推这一段 */
+export const TREND_PAST_RANGES = [
+  { id: '-5m', label: '最近5分钟' },
+  { id: '-10m', label: '最近10分钟' },
+  { id: '-15m', label: '最近15分钟' },
+  { id: '-20m', label: '最近20分钟' },
+  { id: '-25m', label: '最近25分钟' },
+  { id: '-30m', label: '最近30分钟' },
+  { id: '-1h', label: '最近1小时' },
+  { id: '-2h', label: '最近2小时' },
+  { id: '-3h', label: '最近3小时' },
+  { id: '-1d', label: '最近1天' },
+  { id: '-3d', label: '最近3天' },
+  { id: '-5d', label: '最近5天' },
+  { id: '-7d', label: '最近7天' },
+  { id: '-15d', label: '最近15天' },
+  { id: '-30d', label: '最近30天' },
+] as const
+
 const PRESET_MS: Record<string, number> = {
+  '-5m': 5 * 60 * 1000,
+  '-10m': 10 * 60 * 1000,
   '-15m': 15 * 60 * 1000,
+  '-20m': 20 * 60 * 1000,
+  '-25m': 25 * 60 * 1000,
+  '-30m': 30 * 60 * 1000,
   '-1h': 60 * 60 * 1000,
+  '-2h': 2 * 60 * 60 * 1000,
+  '-3h': 3 * 60 * 60 * 1000,
+  '-1d': 24 * 60 * 60 * 1000,
+  '-3d': 3 * 24 * 60 * 60 * 1000,
+  '-5d': 5 * 24 * 60 * 60 * 1000,
   '-8h': 8 * 60 * 60 * 1000,
   '-24h': 24 * 60 * 60 * 1000,
   '-7d': 7 * 24 * 60 * 60 * 1000,
+  '-15d': 15 * 24 * 60 * 60 * 1000,
+  '-30d': 30 * 24 * 60 * 60 * 1000,
 }
 
 export function trendRangeLabel(id: string): string {
@@ -161,6 +192,17 @@ interface WidgetHistory {
 
 const widgets = new Map<string, WidgetHistory>()
 const loadedListeners = new Set<() => void>()
+/** 查询窗口被换成另一段时 +1。图表用它把底部滑块拨回整段，滑块本身不改这个数 */
+const viewEpoch = new Map<string, number>()
+
+function bumpViewEpoch(widgetId: string): void {
+  viewEpoch.set(widgetId, (viewEpoch.get(widgetId) ?? 0) + 1)
+}
+
+/** 查询窗口的代数。滑块 / 滚轮只改显示，不增加它 */
+export function trendHistoryViewEpoch(widgetId: string): number {
+  return viewEpoch.get(widgetId) ?? 0
+}
 
 function emitLoaded(): void {
   for (const listener of loadedListeners) listener()
@@ -367,6 +409,7 @@ export function requestTrendHistory(
     w.custom = null
     w.customRange = null
     w.autoFrozen = false
+    bumpViewEpoch(widgetId)
     changed = true
   }
   if (w.maxPoints !== nextLimit) {
@@ -500,11 +543,12 @@ export function trendHistoryNoticeOf(widgetId: string): { kind: 'error' | 'empty
   return null
 }
 
-/** 设置绝对窗口（工具栏自定义区间 / 缩放后重查都用它） */
+/** 设置绝对窗口（工具栏自定义区间 / 前后翻页 / 工具条上的放大缩小） */
 export function setTrendHistoryWindow(widgetId: string, from: number, to: number): void {
   if (!Number.isFinite(from) || !Number.isFinite(to) || to <= from) return
   const w = ensureWidget(widgetId)
   if (w.custom && w.custom.from === from && w.custom.to === to) return
+  bumpViewEpoch(widgetId)
   w.custom = { from, to }
   w.customRange = { from, to }
   // 用户自己定的窗口（自定义区间 / 缩放 / 平移 / 报警跳转）：刷新时原样重查，别跳到最新
@@ -529,6 +573,7 @@ export function setTrendHistoryPreset(widgetId: string, preset: string): void {
   w.custom = null
   w.customRange = null
   w.autoFrozen = false
+  bumpViewEpoch(widgetId)
   w.dirty = true
   emitLoaded()
   scheduleFlush()
@@ -575,6 +620,7 @@ export function setTrendHistoryFollow(widgetId: string, follow: boolean): void {
     w.custom = null
     w.customRange = null
     w.autoFrozen = false
+    bumpViewEpoch(widgetId)
   } else {
     w.follow = false
     w.custom = effectiveTrendWindow(w)
@@ -604,6 +650,7 @@ export function refreshTrendHistory(widgetId: string, force = true): void {
     w.custom = null
     w.customRange = null
     w.autoFrozen = false
+    bumpViewEpoch(widgetId)
   }
   w.dirty = true
   if (force) w.loadedKey = ''

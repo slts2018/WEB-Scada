@@ -1214,19 +1214,8 @@ async function removeAlarm(alarmId: string) {
         </el-select>
       </label>
 
-      <!-- Mock -->
-      <template v-if="formDeviceProtocol === 'mock'">
-        <label class="wide">
-          <span class="cfg-label">
-            模拟键
-            <HelpTip content="可选备注名；Mock 设备不依赖真实点位地址。" />
-          </span>
-          <el-input v-model="tagAddr.raw" placeholder="可选，如 level / pump_run" />
-        </label>
-      </template>
-
-      <!-- Modbus TCP：对齐 Flight —— 区 / 地址 / 长度(字) / 位号 -->
-      <div v-else-if="formDeviceProtocol === 'modbus_tcp'" class="wide mb-addr-row">
+      <!-- Mock：地址和采样都在「模拟」页 -->
+      <div v-if="formDeviceProtocol === 'modbus_tcp'" class="wide mb-addr-row">
         <label>
           <span class="cfg-label">
             类型(区)
@@ -1316,7 +1305,7 @@ async function removeAlarm(alarmId: string) {
       </template>
 
       <!-- 其他 -->
-      <template v-else>
+      <template v-else-if="formDeviceProtocol !== 'mock'">
         <label class="wide">
           <span class="cfg-label">
             地址
@@ -1350,10 +1339,10 @@ async function removeAlarm(alarmId: string) {
           <el-input v-model="io.offText" placeholder="false" maxlength="64" />
         </label>
       </template>
-      <label>
+      <label v-if="formDeviceProtocol !== 'mock'">
         <span class="cfg-label">
           扫描周期（毫秒）
-          <HelpTip content="模拟设备两次采样的最小间隔，最小 50 毫秒。仿真周期更长时，数值仍按仿真周期变化。其它协议先只保存，采集仍用设备自己的轮询。" />
+          <HelpTip content="到这个时间就读一次该设备点，最小 50 毫秒。同一台设备上同时到期的点一起读。设备忙或超时时，实际间隔会比设定值长。" />
         </span>
         <el-input-number v-model="io.scanPeriodMs" :min="50" :max="86400000" :step="50" controls-position="right" />
       </label>
@@ -1372,6 +1361,20 @@ async function removeAlarm(alarmId: string) {
       </el-tab-pane>
       <el-tab-pane v-if="formDeviceProtocol === 'mock'" label="模拟" name="sim">
         <div class="form">
+          <label class="wide">
+            <span class="cfg-label">
+              模拟键
+              <HelpTip content="可选备注名。模拟设备没有真实点位地址。" />
+            </span>
+            <el-input v-model="tagAddr.raw" placeholder="可选，如 level / pump_run" />
+          </label>
+          <label>
+            <span class="cfg-label">
+              扫描周期（毫秒）
+              <HelpTip content="模拟采样的最小间隔，最小 50 毫秒。下面的仿真周期更长时，数值仍按仿真周期变化。" />
+            </span>
+            <el-input-number v-model="io.scanPeriodMs" :min="50" :max="86400000" :step="50" controls-position="right" />
+          </label>
           <label class="wide check-row">
             <span class="cfg-label">
               启用
@@ -1637,7 +1640,7 @@ async function removeAlarm(alarmId: string) {
         type="info"
         :closable="false"
         show-icon
-        title="不用填连接。每个变量在编辑页里配置是否模拟、周期和范围。"
+        title="不用填连接。采样、自动变化和范围都在变量的「模拟」页里配置。"
       />
 
       <!-- Modbus TCP -->

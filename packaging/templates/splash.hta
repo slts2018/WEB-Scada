@@ -1,0 +1,47 @@
+﻿<html>
+<head>
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+<title>WebScada</title>
+<HTA:APPLICATION
+  ID="oHTA"
+  APPLICATIONNAME="WebScadaSplash"
+  BORDER="dialog"
+  BORDERSTYLE="normal"
+  CAPTION="yes"
+  SHOWINTASKBAR="yes"
+  SINGLEINSTANCE="yes"
+  SYSMENU="no"
+  SCROLL="no"
+  SELECTION="no"
+  CONTEXTMENU="no"
+/>
+<style>
+  body { margin: 0; background: #1a1d24; color: #e8eaed; font-family: "Microsoft YaHei", sans-serif; }
+  .box { padding: 36px 40px; font-size: 18px; }
+</style>
+<script language="VBScript">
+Sub Window_OnLoad
+  window.resizeTo 420, 160
+  window.moveTo (screen.availWidth - 420) / 2, (screen.availHeight - 160) / 2
+  window.setTimeout "CheckFlag()", 300
+End Sub
+
+Sub CheckFlag()
+  On Error Resume Next
+  Dim fso, path, flag
+  Set fso = CreateObject("Scripting.FileSystemObject")
+  path = Replace(location.pathname, "/", "\")
+  If Left(path, 1) = "\" Then path = Mid(path, 2)
+  flag = fso.GetParentFolderName(path) & "\data\splash.run"
+  If Not fso.FileExists(flag) Then
+    window.close
+    Exit Sub
+  End If
+  window.setTimeout "CheckFlag()", 400
+End Sub
+</script>
+</head>
+<body>
+<div class="box">正在启动中......</div>
+</body>
+</html>

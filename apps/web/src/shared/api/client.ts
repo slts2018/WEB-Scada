@@ -190,27 +190,52 @@ function zipFileName(res: Response, fallbackName: string): string {
   return fallbackName
 }
 
-/** 导入工程包 → 服务端新建工程并返回文档 */
-export async function apiImportProject(file: File): Promise<ProjectDocument> {
-  const form = new FormData()
-  form.append('file', file, file.name)
-  const res = await fetch(`${API_BASE}/projects/import`, {
-    method: 'POST',
-    body: form,
-    headers: {
-      ...authHeaders(),
-    },
-  })
-  if (!res.ok) {
-    let body: unknown
-    try {
-      body = await res.json()
-    } catch {
-      body = undefined
+export interface ImportUploadEvent {
+  /** upload：文件还在传到服务端；unpack：字节已到，服务端正在解压写入 */
+  phase: 'upload' | 'unpack'
+  loaded: number
+  total: number
+}
+
+/** 导入工程包 → 服务端新建工程并返回文档。上传进度走 XHR，fetch 拿不到已发送字节。 */
+export function apiImportProject(file: File, onProgress?: (event: ImportUploadEvent) => void): Promise<ProjectDocument> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest()
+    xhr.open('POST', `${API_BASE}/projects/import`)
+    xhr.responseType = 'text'
+    const headers = authHeaders()
+    for (const [key, value] of Object.entries(headers)) {
+      if (value) xhr.setRequestHeader(key, value)
     }
-    throw new ApiError(`API ${res.status} /projects/import`, res.status, body)
-  }
-  return (await res.json()) as ProjectDocument
+    const total = file.size
+    const report = (phase: ImportUploadEvent['phase'], loaded: number) => {
+      onProgress?.({ phase, loaded, total })
+    }
+    report('upload', 0)
+    xhr.upload.onprogress = (ev) => {
+      const known = ev.lengthComputable ? ev.total : total
+      report('upload', Math.min(known, ev.loaded))
+    }
+    xhr.upload.onload = () => report('unpack', total)
+    xhr.onload = () => {
+      let body: unknown
+      try {
+        body = xhr.responseText ? JSON.parse(xhr.responseText) : undefined
+      } catch {
+        body = undefined
+      }
+      if (xhr.status >= 200 && xhr.status < 300 && body && typeof body === 'object') {
+        resolve(body as ProjectDocument)
+        return
+      }
+      reject(new ApiError(`API ${xhr.status} /projects/import`, xhr.status, body))
+    }
+    xhr.onerror = () => reject(new ApiError('API network /projects/import', 0))
+    xhr.onabort = () => reject(new ApiError('API abort /projects/import', 0))
+    const form = new FormData()
+    form.append('file', file, file.name)
+    xhr.send(form)
+  })
 }
 
 export async function apiListPublishes(): Promise<{ items: PublishIndexItem[] }> {

@@ -11,7 +11,7 @@ export interface OutputEntry {
   message: string
 }
 
-const MAX = 200
+const MAX = 1000
 
 export const useOutputLogStore = defineStore('outputLog', () => {
   const entries = ref<OutputEntry[]>([])

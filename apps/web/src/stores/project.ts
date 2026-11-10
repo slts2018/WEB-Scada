@@ -74,6 +74,8 @@ const HISTORY_LIMIT = 50
 
 export type SiteExportPhase = 'save' | 'publish' | 'pack' | 'download'
 
+export type ProjectImportPhase = 'upload' | 'unpack' | 'open'
+
 export interface SiteExportProgress {
   phase: SiteExportPhase
   /** 下载阶段 0–100；打包阶段未知时为 null */
@@ -2689,12 +2691,18 @@ log('script ready · ' + (context.trigger || 'try'))
   }
 
   /** 导入工程包 → 服务端新建并打开（不覆盖当前工程 id） */
-  async function importProjectPackage(file: File): Promise<ProjectDocument> {
+  async function importProjectPackage(
+    file: File,
+    onProgress?: (progress: { phase: ProjectImportPhase; loaded: number; total: number }) => void,
+  ): Promise<ProjectDocument> {
     await probeStorage()
     if (getStorageMode() !== 'api') {
       throw new Error('import_requires_api')
     }
-    const doc = await apiImportProject(file)
+    const doc = await apiImportProject(file, (event) => {
+      onProgress?.({ phase: event.phase, loaded: event.loaded, total: event.total })
+    })
+    onProgress?.({ phase: 'open', loaded: file.size, total: file.size })
     document.value = normalizeProjectDocument(doc)
     activePageId.value = doc.homePageId ?? doc.pages[0]?.id
     syncActiveLayerForPage(activePageId.value!)

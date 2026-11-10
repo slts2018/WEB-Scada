@@ -13,6 +13,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,6 +31,8 @@ public class Mcd4000PollService {
   private final ObjectMapper mapper;
   private final AtomicBoolean busy = new AtomicBoolean(false);
   private volatile long lastWarnAt;
+  /** tagId 或探测键 → 上次发起读取的时间 */
+  private final ConcurrentHashMap<String, Long> lastScanAt = new ConcurrentHashMap<>();
 
   private volatile Mcd4000Client client;
 
@@ -61,7 +64,7 @@ public class Mcd4000PollService {
     return c;
   }
 
-  @Scheduled(fixedDelayString = "${webscada.mcd4000.poll-ms:2000}")
+  @Scheduled(fixedDelay = 50)
   public void poll() {
     if (!props.getMcd4000().isEnabled()) return;
     if (!busy.compareAndSet(false, true)) return;
@@ -97,21 +100,34 @@ public class Mcd4000PollService {
     }
 
     Mcd4000Client cli = client();
+    long now = System.currentTimeMillis();
+    long pingEvery = Math.max(1000L, props.getMcd4000().getPollMs());
     for (DeviceMeta dev : mcdById.values()) {
       List<BoundTag> tags = byDevice.getOrDefault(dev.deviceId(), List.of());
       Mcd4000Channel ch = Mcd4000Channel.parse(dev.channel());
       if (ch == null) {
+        if (!scanDue("badch:" + dev.deviceId(), pingEvery, now)) continue;
+        lastScanAt.put("badch:" + dev.deviceId(), now);
         linkStatus.report(dev.deviceId(), false, "offline", "通道无效");
         markBad(tags);
         continue;
       }
+      List<BoundTag> due = new ArrayList<>();
       try {
         if (tags.isEmpty()) {
+          if (!scanDue("ping:" + dev.deviceId(), pingEvery, now)) continue;
+          lastScanAt.put("ping:" + dev.deviceId(), now);
           cli.reachable(ch.baseUrl());
         } else {
-          List<Mcd4000Channel.TagAddr> addrs = tags.stream().map(BoundTag::addr).toList();
-          Map<String, Mcd4000Client.Point> latest = cli.queryLatest(ch, addrs);
           for (BoundTag bt : tags) {
+            if (!scanDue(bt.meta.tagId(), scanPeriod(bt.meta), now)) continue;
+            due.add(bt);
+            lastScanAt.put(bt.meta.tagId(), now);
+          }
+          if (due.isEmpty()) continue;
+          List<Mcd4000Channel.TagAddr> addrs = due.stream().map(BoundTag::addr).toList();
+          Map<String, Mcd4000Client.Point> latest = cli.queryLatest(ch, addrs);
+          for (BoundTag bt : due) {
             Mcd4000Client.Point point =
                 latest.get(Mcd4000Client.key(bt.addr.sensor(), bt.addr.field()));
             if (point == null || point.value() == null) {
@@ -130,9 +146,19 @@ public class Mcd4000PollService {
       } catch (Exception ex) {
         warn("device " + dev.deviceId() + " query failed", ex);
         linkStatus.report(dev.deviceId(), false, "offline", "连接失败");
-        markBad(tags);
+        markBad(due);
       }
     }
+  }
+
+  private static int scanPeriod(TagMeta meta) {
+    int ms = meta.scanPeriodMs() == null ? 1000 : meta.scanPeriodMs();
+    return Math.max(50, ms);
+  }
+
+  private boolean scanDue(String key, long periodMs, long now) {
+    long last = lastScanAt.getOrDefault(key, 0L);
+    return last == 0L || now - last >= periodMs;
   }
 
   private void markBad(List<BoundTag> tags) {

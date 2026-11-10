@@ -153,9 +153,9 @@ export function createRuntimeStage(
       syncTrendOverlays()
     },
     onZoom: (widgetId, zoom) => {
+      // 历史趋势的滑块 / 滚轮 / 框选只在已查出的点里看，不改查询窗口
+      if (sourceWidgetOf(widgetId)?.type === 'trendHistory') return
       setTrendZoom(widgetId, { start: zoom.start, end: zoom.end })
-      // 历史趋势：缩放/框选结束后按新窗口重查（否则放大后点数不够）
-      historyZoom.handleZoom(widgetId, zoom)
     },
     onReset: (widgetId) => historyZoom.handleReset(widgetId),
     cursorOf: (widgetId) => trendHistoryCursorOf(widgetId),
@@ -170,7 +170,6 @@ export function createRuntimeStage(
   })
 
   const historyZoom = createTrendHistoryZoomBridge({
-    resolveWidget: (id) => sourceWidgetOf(id),
     repaint: () => syncTrendOverlays(),
   })
 
