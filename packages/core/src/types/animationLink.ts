@@ -238,7 +238,7 @@ export const ANIMATION_LINK_TREE: Array<{
 
 /**
  * 3D 动画连接树（独立文案：位移 XYZ、缩放含长度、旋转）。
- * fillH/fillV 不进树（与缩放重复），旧数据仍可运行。
+ * 辅色与主体色同一通道；百分比填充与缩放重复。二者不进三维菜单。
  */
 export const OBJECT3D_LINK_TREE: Array<{
   group: string
@@ -282,7 +282,6 @@ export const OBJECT3D_LINK_TREE: Array<{
     items: [
       { type: 'colorFill', label: '主体色' },
       { type: 'colorStroke', label: '发光' },
-      { type: 'colorFill2', label: '辅色' },
     ],
   },
   {

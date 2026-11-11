@@ -139,11 +139,10 @@ function matchColorRange(
   return range.min !== undefined || range.max !== undefined
 }
 
-/** 3D 支持的动画连接子集（含 XYZ 位移/缩放/旋转；fillH/V 兼容旧数据） */
+/** 3D 支持的动画连接。辅色、百分比填充、数值/文本显示不在此列。 */
 export const OBJECT3D_LINK_TYPES = [
   'hide',
   'colorFill',
-  'colorFill2',
   'colorStroke',
   'moveH',
   'moveV',
@@ -154,8 +153,6 @@ export const OBJECT3D_LINK_TYPES = [
   'rotX',
   'rotY',
   'rotZ',
-  'fillH',
-  'fillV',
   'dragH',
   'dragV',
   'dragZ',
@@ -205,7 +202,7 @@ function applyObject3DLink(
     return
   }
 
-  if (link.type === 'colorFill' || link.type === 'colorFill2') {
+  if (link.type === 'colorFill') {
     for (const range of link.ranges) {
       if (!matchColorRange(tag.value, range)) continue
       object.style = { ...object.style, color: range.color }
@@ -245,19 +242,12 @@ function applyObject3DLink(
     return
   }
 
-  // 填充 / 宽高 / 长度：映射到非均匀缩放；拖拽连接不在此写外观
-  if (
-    link.type === 'fillH' ||
-    link.type === 'fillV' ||
-    link.type === 'width' ||
-    link.type === 'height' ||
-    link.type === 'scaleZ'
-  ) {
+  // 宽高 / 长度：映射到非均匀缩放；拖拽连接不在此写外观
+  if (link.type === 'width' || link.type === 'height' || link.type === 'scaleZ') {
     const n = asNumber(tag.value)
     if (n === null) return
     const mapped = mapRange(n, link.inMin, link.inMax, link.outMin, link.outMax)
-    const axisIndex =
-      link.type === 'fillH' || link.type === 'width' ? 0 : link.type === 'fillV' || link.type === 'height' ? 1 : 2
+    const axisIndex = link.type === 'width' ? 0 : link.type === 'height' ? 1 : 2
     setAxis(object.transform, 'scale', axisIndex, Math.max(1e-4, mapped))
     return
   }

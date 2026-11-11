@@ -65,7 +65,6 @@ const widgetRails = [
 ] as const
 
 const rails = [
-  { id: 'template', label: '模板' },
   ...widgetRails.map((item) => ({ id: item.id, label: item.label })),
   { id: 'symbol', label: '组件' },
 ] as const
@@ -99,11 +98,6 @@ const visibleFolders = computed(() => {
       }
     })
     .filter((folder) => !q || folder.items.length > 0)
-})
-
-const templates = computed(() => {
-  const q = query.value.trim().toLowerCase()
-  return (project.document.pageTemplates ?? []).filter((item) => !q || matches(item.name, q))
 })
 
 const symbols = computed(() => {
@@ -236,15 +230,6 @@ function onDragStart(e: DragEvent, type: BuiltinWidgetType) {
   e.dataTransfer!.effectAllowed = 'copy'
 }
 
-function useTemplate(id: string) {
-  const page = project.createPageFromTemplate(id)
-  if (!page) {
-    ElMessage.warning('模板不存在')
-    return
-  }
-  ElMessage.success(`已按模板新建页面「${page.name}」`)
-}
-
 function useSymbol(id: string) {
   if (!project.activePage2d) {
     ElMessage.warning('请先选择 2D 页面')
@@ -288,12 +273,7 @@ async function onFileChange(e: Event) {
         @click="selectRail(rail.id)"
       >
         <svg viewBox="0 0 24 24" aria-hidden="true">
-          <template v-if="rail.id === 'template'">
-            <rect x="4" y="3" width="12" height="16" rx="1.5" />
-            <path d="M8 7h6M8 11h6M8 15h4" />
-            <path d="M14 14h6v7h-6z" />
-          </template>
-          <template v-else-if="rail.id === 'shape'">
+          <template v-if="rail.id === 'shape'">
             <rect x="4" y="4" width="7" height="7" rx="1" />
             <rect x="13" y="4" width="7" height="7" rx="1" />
             <rect x="4" y="13" width="7" height="7" rx="1" />
@@ -332,24 +312,7 @@ async function onFileChange(e: Event) {
         <input v-model="query" type="search" placeholder="搜索" />
       </label>
 
-      <div v-if="active === 'template'" class="list">
-        <div v-if="templates.length" class="mat-grid">
-          <button
-            v-for="item in templates"
-            :key="item.id"
-            type="button"
-            class="mat-card"
-            :title="item.pageType === '3d' ? '三维页面模板' : '二维页面模板'"
-            @click="useTemplate(item.id)"
-          >
-            <span class="preview doc" />
-            <span class="name">{{ item.name }}</span>
-          </button>
-        </div>
-        <p v-else class="empty">{{ query ? '没有匹配的模板' : '还没有模板。在页面树里把页面存成模板。' }}</p>
-      </div>
-
-      <div v-else-if="active === 'symbol'" class="list">
+      <div v-if="active === 'symbol'" class="list">
         <div v-if="symbols.length" class="mat-grid">
           <button
             v-for="item in symbols"
@@ -363,7 +326,7 @@ async function onFileChange(e: Event) {
             <span class="name">{{ item.name }}</span>
           </button>
         </div>
-        <p v-else class="empty">{{ query ? '没有匹配的组件' : '还没有组件。选中图元后用工具栏「存为符号」。' }}</p>
+        <p v-else class="empty">{{ query ? '没有匹配的组件' : '还没有组件。选中图元后右键「存为符号」。' }}</p>
       </div>
 
       <div v-else class="list">
@@ -654,7 +617,6 @@ async function onFileChange(e: Event) {
   transform: scale(2.2);
 }
 
-.preview.doc,
 .preview.symbol {
   width: 72%;
   height: 64px;

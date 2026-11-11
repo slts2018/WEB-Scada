@@ -34,6 +34,8 @@ import { onTrendToolbarHeight, trendToolbarClientRect } from '@/shared/runtime/t
 import AlarmHistorySearchBar from '@/components/runtime/AlarmHistorySearchBar.vue'
 import TrendHistoryToolbar from '@/components/runtime/TrendHistoryToolbar.vue'
 import AlarmHistoryPager from '@/components/runtime/AlarmHistoryPager.vue'
+import { ElMessage } from 'element-plus'
+import { scadaPrompt } from '@/shared/ui/scadaMessageBox'
 
 const RULER = 24
 const DND_TYPE = 'application/x-scada-widget'
@@ -1198,9 +1200,36 @@ function ctxAction(action: string) {
     case 'ungroup':
       project.ungroupSelected()
       break
+    case 'symbol':
+      void saveSelectionAsSymbol()
+      break
     case 'animation':
       if (ids.length) project.openAnimationConnection()
       break
+  }
+}
+
+async function saveSelectionAsSymbol() {
+  if (!project.selectedWidgetIds.length) {
+    ElMessage.warning('请先选中图元')
+    return
+  }
+  try {
+    const def =
+      project.selectedWidgetIds.length > 1
+        ? '组合符号'
+        : project.selectedWidget?.name || '符号'
+    const { value } = await scadaPrompt('符号名称（多选将先自动组合）', '存为符号', {
+      inputValue: def,
+      confirmButtonText: '保存',
+    })
+    const name = String(value ?? '').trim()
+    if (!name) return
+    const sym = project.saveSymbolFromSelection(name)
+    if (sym) ElMessage.success(`已保存符号：${sym.name}`)
+    else ElMessage.warning('保存失败')
+  } catch {
+    /* 取消 */
   }
 }
 
@@ -1430,6 +1459,13 @@ defineExpose({ fitView, zoomBy, zoomExact, toggleHand, handMode })
       <button type="button" @click="ctxAction('back')">置底</button>
       <button type="button" @click="ctxAction('group')">组合</button>
       <button type="button" @click="ctxAction('ungroup')">解组</button>
+      <button
+        type="button"
+        :disabled="!project.selectedWidgetIds.length"
+        @click="ctxAction('symbol')"
+      >
+        存为符号
+      </button>
       <button type="button" @click="ctxAction('lock')">锁定/解锁</button>
       <button type="button" @click="ctxAction('hide')">显示/隐藏</button>
       <hr />

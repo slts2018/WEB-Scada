@@ -14,6 +14,8 @@ import {
   Expand,
   Fold,
   Grid,
+  Hide,
+  Lock,
   Magnet,
   Monitor,
   RefreshLeft,
@@ -23,6 +25,7 @@ import {
   SortUp,
   Upload,
   VideoPlay,
+  View,
 } from '@element-plus/icons-vue'
 
 const emit = defineEmits<{
@@ -218,6 +221,25 @@ async function saveSymbol() {
         :disabled="!canSaveSymbol()"
         :icon="CollectionTag"
         @click="saveSymbol"
+      />
+    </el-button-group>
+
+    <el-button-group>
+      <el-button
+        size="small"
+        title="可见"
+        :disabled="!hasSel()"
+        :type="hasSel() && project.selectedWidget?.visible !== false ? 'primary' : 'default'"
+        :icon="project.selectedWidget?.visible === false ? Hide : View"
+        @click="project.setSelectedFlags('visible')"
+      />
+      <el-button
+        size="small"
+        title="锁定"
+        :disabled="!hasSel()"
+        :type="hasSel() && project.selectedWidget?.locked ? 'primary' : 'default'"
+        :icon="Lock"
+        @click="project.setSelectedFlags('locked')"
       />
     </el-button-group>
 

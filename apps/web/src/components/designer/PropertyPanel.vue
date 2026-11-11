@@ -49,8 +49,8 @@ import WidgetBindingPanel from '@/components/designer/WidgetBindingPanel.vue'
 const project = useProjectStore()
 const tags = useTagStore()
 const fileInput = ref<HTMLInputElement | null>(null)
-/** 与三维属性一致：默认全部折叠，点标题再展开 */
-const propCollapse = ref<string[]>([])
+/** 与三维属性一致：默认全部展开 */
+const propCollapse = ref<string[]>(['basic', 'transform', 'look', 'content', 'anim'])
 /** 「4·内容」用弹出框编辑（侧栏太窄，曲线/列表等表单在弹窗里配） */
 const contentDialogOpen = ref(false)
 
@@ -518,7 +518,6 @@ async function replaceImage(e: Event) {
 
 <template>
   <div class="props">
-    <div class="panel-title">属性</div>
     <div v-if="multiCount === 0" class="empty">选中画布上的图元</div>
     <div v-else-if="multiCount > 1" class="form">
       <div class="multi">
@@ -551,10 +550,6 @@ async function replaceImage(e: Event) {
       <label>
         <span>名称</span>
         <el-input size="small" :model-value="widget.name" @update:model-value="updateName" />
-      </label>
-      <label>
-        <span>类型</span>
-        <el-input size="small" :model-value="widget.type" disabled />
       </label>
       <div class="flags">
         <el-checkbox
@@ -639,6 +634,17 @@ async function replaceImage(e: Event) {
         </el-collapse-item>
 
         <el-collapse-item v-if="hasAppearance" :title="sectionTitle.look" name="look">
+      <div
+        class="look-fields"
+        :class="
+          widget.type === 'rect' || widget.type === 'roundRect'
+            ? 'look-3'
+            : widget.type === 'text' ||
+                (widget.style.fill !== undefined && widget.style.stroke !== undefined)
+              ? 'look-2'
+              : ''
+        "
+      >
       <label v-if="widget.type === 'text'">
         <span>文字颜色</span>
         <el-color-picker
@@ -688,6 +694,7 @@ async function replaceImage(e: Event) {
           @update:model-value="(v: number | undefined) => updateStyle('cornerRadius', Number(v) || 0)"
         />
       </label>
+      </div>
         </el-collapse-item>
 
         <el-collapse-item v-if="hasContent" :title="sectionTitle.content" name="content">
@@ -703,8 +710,6 @@ async function replaceImage(e: Event) {
           <WidgetBindingPanel />
         </el-collapse-item>
       </el-collapse>
-
-      <el-button size="small" type="danger" plain @click="remove">删除图元</el-button>
 
       <el-dialog
         v-model="contentDialogOpen"
@@ -1414,14 +1419,6 @@ async function replaceImage(e: Event) {
 </template>
 
 <style scoped>
-.panel-title {
-  margin: 8px 0;
-  font-size: 12px;
-  color: var(--scada-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-}
-
 .empty,
 .hint {
   color: var(--scada-muted);
@@ -1508,6 +1505,19 @@ label.top :deep(.el-textarea__inner) {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 8px;
+}
+
+.look-fields.look-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.look-fields.look-3 {
+  display: grid;
+  grid-template-columns: 64px 64px minmax(0, 1fr);
+  gap: 8px;
+  align-items: end;
 }
 
 .flags,

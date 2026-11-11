@@ -251,9 +251,13 @@ function migrateOnePanelToPage(
   return next
 }
 
+/** 三维不再使用：辅色与主体色重复，百分比填充与缩放重复，数值/文本显示只属于二维。 */
+const DROPPED_OBJECT3D_LINK_TYPES = new Set(['colorFill2', 'fillH', 'fillV', 'valueOut', 'textOut'])
+
 function ensureObject3dAnimationLinks(objects: Object3DNode[]) {
   walkObject3dNodes(objects, (obj) => {
     if (!Array.isArray(obj.animationLinks)) obj.animationLinks = []
+    else obj.animationLinks = obj.animationLinks.filter((link) => !DROPPED_OBJECT3D_LINK_TYPES.has(link.type))
     if (!Array.isArray(obj.events)) obj.events = []
     if (!Array.isArray(obj.bindings)) obj.bindings = []
   })

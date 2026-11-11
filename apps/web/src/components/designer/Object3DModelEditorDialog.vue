@@ -60,23 +60,6 @@ function disposePreview() {
   preview = null
 }
 
-const typeLabel = computed(() => {
-  if (!obj.value) return '—'
-  if (obj.value.modelResourceId) return '模型'
-  if (obj.value.panel && !obj.value.modelResourceId) return '面板锚点'
-  switch (obj.value.primitive) {
-    case 'sphere':
-      return '球体'
-    case 'cylinder':
-      return '圆柱'
-    case 'arrow':
-      return '箭头'
-    case 'box':
-    default:
-      return '立方体'
-  }
-})
-
 const material = computed(() => obj.value?.material)
 
 function ensureMaterial(): Object3DMaterial {
@@ -353,10 +336,6 @@ onBeforeUnmount(() => disposePreview())
         <div v-show="tab === 'basic'" class="pane">
           <div class="pane-title">基础</div>
           <label class="row">
-            <span>类型</span>
-            <el-input size="small" :model-value="typeLabel" disabled />
-          </label>
-          <label class="row">
             <span>名称</span>
             <el-input
               size="small"
@@ -455,10 +434,6 @@ onBeforeUnmount(() => disposePreview())
               <span>材质</span>
               <HelpTip content="PBR 物理材质：颜色/贴图会互相相乘。想看贴图效果，优先加「漫反射纹理」。" />
             </div>
-            <label class="row">
-              <span>材质类型</span>
-              <el-input size="small" model-value="PBR材质" disabled />
-            </label>
             <div class="field-label row-inline-start">
               <span>金属因子</span>
               <HelpTip content="0=非金属（塑料/油漆），1=纯金属；越高越像金属反光。" />
@@ -674,8 +649,6 @@ onBeforeUnmount(() => disposePreview())
         <div v-show="tab === 'effects'" class="pane">
           <div class="pane-title">特效</div>
           <p class="aside-hint">描边 / 辉光后续支持。可用「自发光色」做简易高亮。</p>
-          <el-checkbox disabled>边框</el-checkbox>
-          <el-checkbox disabled>开启辉光</el-checkbox>
         </div>
       </section>
     </div>

@@ -29,9 +29,9 @@ const obj = computed(() => project.selectedObject3d)
 const multiCount = computed(() => project.selectedObject3dIds.length)
 const page3d = computed(() => project.activePage3d)
 const scenePres = computed(() => resolvePage3DPresentation(page3d.value?.presentation))
-/** 场景 / 对象属性分类：默认全部折叠，点标题再展开 */
-const sceneCollapse = ref<string[]>([])
-const objectCollapse = ref<string[]>([])
+/** 场景 / 对象属性分类：默认全部展开 */
+const sceneCollapse = ref<string[]>(['env', 'grid', 'sun', 'camera'])
+const objectCollapse = ref<string[]>(['basic', 'transform', 'panel', 'liquid', 'flow', 'animLink'])
 
 /** 纯面板：无模型，属性栏不显示旋转，缩放改控面板宽高 */
 const isPanelOnly = computed(
@@ -213,30 +213,14 @@ const panelSummary = computed(() => {
   <div v-if="multiCount > 1" class="prop3d">
     <div class="panel-title">
       已选 {{ multiCount }} 个对象
-      <HelpTip content="属性编辑针对主选（列表首项）。可批量复制 / 删除 / 组合。" />
+      <HelpTip content="属性编辑针对主选（列表首项）。可批量组合。" />
     </div>
     <div class="ops">
-      <el-button size="small" @click="project.duplicateObject3ds(project.selectedObject3dIds)">
-        批量复制
-      </el-button>
       <el-button size="small" @click="groupMulti">组合</el-button>
-      <el-button
-        size="small"
-        type="danger"
-        plain
-        @click="project.removeObject3ds(project.selectedObject3dIds)"
-      >
-        批量删除
-      </el-button>
     </div>
     <div v-if="obj" class="panel-title">主选：{{ obj.name }}</div>
   </div>
   <div v-if="obj" class="prop3d object-edit">
-    <div class="panel-title">
-      对象属性
-      <HelpTip content="按分类编辑当前选中对象" />
-    </div>
-
     <el-collapse v-model="objectCollapse" class="scene-collapse">
       <el-collapse-item title="1 · 基础" name="basic">
         <label class="row">
@@ -247,26 +231,28 @@ const panelSummary = computed(() => {
             @update:model-value="(v: string) => patch({ name: v })"
           />
         </label>
-        <label class="row">
-          <span>颜色</span>
-          <el-color-picker
-            size="small"
-            :model-value="obj.style?.color || '#3d8bfd'"
-            @update:model-value="(v: string | null) => v && patch({ style: { ...obj!.style, color: v } })"
-          />
-        </label>
-        <el-checkbox
-          :model-value="obj.visible !== false"
-          @update:model-value="(v: boolean | string | number) => patch({ visible: Boolean(v) })"
-        >
-          可见
-        </el-checkbox>
-        <el-checkbox
-          :model-value="Boolean(obj.locked)"
-          @update:model-value="(v: boolean | string | number) => patch({ locked: Boolean(v) })"
-        >
-          锁定变换
-        </el-checkbox>
+        <div class="flag-line">
+          <label>
+            <span>颜色</span>
+            <el-color-picker
+              size="small"
+              :model-value="obj.style?.color || '#3d8bfd'"
+              @update:model-value="(v: string | null) => v && patch({ style: { ...obj!.style, color: v } })"
+            />
+          </label>
+          <el-checkbox
+            :model-value="obj.visible !== false"
+            @update:model-value="(v: boolean | string | number) => patch({ visible: Boolean(v) })"
+          >
+            可见
+          </el-checkbox>
+          <el-checkbox
+            :model-value="Boolean(obj.locked)"
+            @update:model-value="(v: boolean | string | number) => patch({ locked: Boolean(v) })"
+          >
+            锁定变换
+          </el-checkbox>
+        </div>
         <template v-if="!isPanelOnly">
           <div class="sub-label">
             模型外观
@@ -492,13 +478,6 @@ const panelSummary = computed(() => {
         </div>
       </el-collapse-item>
     </el-collapse>
-
-    <div class="ops">
-      <el-button size="small" @click="project.duplicateObject3d(obj.id)">复制</el-button>
-      <el-button size="small" type="danger" plain @click="project.removeObject3d(obj.id)">
-        删除对象
-      </el-button>
-    </div>
   </div>
   <div v-else-if="multiCount > 0" class="empty">
     选中对象未找到，请再点一次模型
@@ -592,24 +571,26 @@ const panelSummary = computed(() => {
             @update:model-value="(v: boolean | string | number) => patchPresentation({ gridVisible: Boolean(v) })"
           />
         </label>
-        <label class="row">
-          <span>主线颜色</span>
-          <el-color-picker
-            size="small"
-            :disabled="!scenePres.gridVisible"
-            :model-value="scenePres.gridColor"
-            @update:model-value="(v: string | null) => patchPresentation({ gridColor: v || DEFAULT_PAGE3D_PRESENTATION.gridColor })"
-          />
-        </label>
-        <label class="row">
-          <span>次线颜色</span>
-          <el-color-picker
-            size="small"
-            :disabled="!scenePres.gridVisible"
-            :model-value="scenePres.gridDivisionColor"
-            @update:model-value="(v: string | null) => patchPresentation({ gridDivisionColor: v || DEFAULT_PAGE3D_PRESENTATION.gridDivisionColor })"
-          />
-        </label>
+        <div class="pair">
+          <label>
+            <span>主线颜色</span>
+            <el-color-picker
+              size="small"
+              :disabled="!scenePres.gridVisible"
+              :model-value="scenePres.gridColor"
+              @update:model-value="(v: string | null) => patchPresentation({ gridColor: v || DEFAULT_PAGE3D_PRESENTATION.gridColor })"
+            />
+          </label>
+          <label>
+            <span>次线颜色</span>
+            <el-color-picker
+              size="small"
+              :disabled="!scenePres.gridVisible"
+              :model-value="scenePres.gridDivisionColor"
+              @update:model-value="(v: string | null) => patchPresentation({ gridDivisionColor: v || DEFAULT_PAGE3D_PRESENTATION.gridDivisionColor })"
+            />
+          </label>
+        </div>
         <label class="row">
           <span>地面不透明度</span>
           <el-slider
@@ -639,13 +620,21 @@ const panelSummary = computed(() => {
             <HelpTip content="平行光方向、亮度与阴影质量" />
           </span>
         </template>
-        <label class="row">
-          <span>开启太阳光</span>
+        <div class="flag-line">
           <el-checkbox
             :model-value="scenePres.sunEnabled"
             @update:model-value="(v: boolean | string | number) => patchPresentation({ sunEnabled: Boolean(v) })"
-          />
-        </label>
+          >
+            开启太阳光
+          </el-checkbox>
+          <el-checkbox
+            :model-value="scenePres.shadowsEnabled"
+            :disabled="!scenePres.sunEnabled"
+            @update:model-value="(v: boolean | string | number) => patchPresentation({ shadowsEnabled: Boolean(v) })"
+          >
+            产生阴影
+          </el-checkbox>
+        </div>
         <label class="row">
           <span>阳光亮度</span>
           <el-slider
@@ -712,39 +701,33 @@ const panelSummary = computed(() => {
             @update:model-value="(v: number | undefined) => patchPresentation({ sunElevationDeg: Number(v) || 55 })"
           />
         </label>
-        <label class="row">
-          <span>产生阴影</span>
-          <el-checkbox
-            :model-value="scenePres.shadowsEnabled"
-            :disabled="!scenePres.sunEnabled"
-            @update:model-value="(v: boolean | string | number) => patchPresentation({ shadowsEnabled: Boolean(v) })"
-          />
-        </label>
-        <label class="row">
-          <span>阴影质量</span>
-          <el-select
-            size="small"
-            :disabled="!scenePres.sunEnabled || !scenePres.shadowsEnabled"
-            :model-value="scenePres.shadowMapSize"
-            @update:model-value="(v: number) => patchPresentation({ shadowMapSize: v })"
-          >
-            <el-option label="低 (512)" :value="512" />
-            <el-option label="中 (1024)" :value="1024" />
-            <el-option label="高 (2048)" :value="2048" />
-            <el-option label="极高 (4096)" :value="4096" />
-          </el-select>
-        </label>
-        <label class="row">
-          <span>阴影偏移</span>
-          <el-input-number
-            size="small"
-            :step="0.0001"
-            :disabled="!scenePres.sunEnabled || !scenePres.shadowsEnabled"
-            controls-position="right"
-            :model-value="scenePres.shadowBias"
-            @update:model-value="(v: number | undefined) => patchPresentation({ shadowBias: Number(v) || 0 })"
-          />
-        </label>
+        <div class="pair">
+          <label>
+            <span>阴影质量</span>
+            <el-select
+              size="small"
+              :disabled="!scenePres.sunEnabled || !scenePres.shadowsEnabled"
+              :model-value="scenePres.shadowMapSize"
+              @update:model-value="(v: number) => patchPresentation({ shadowMapSize: v })"
+            >
+              <el-option label="低 (512)" :value="512" />
+              <el-option label="中 (1024)" :value="1024" />
+              <el-option label="高 (2048)" :value="2048" />
+              <el-option label="极高 (4096)" :value="4096" />
+            </el-select>
+          </label>
+          <label>
+            <span>阴影偏移</span>
+            <el-input-number
+              size="small"
+              :step="0.0001"
+              :disabled="!scenePres.sunEnabled || !scenePres.shadowsEnabled"
+              controls-position="right"
+              :model-value="scenePres.shadowBias"
+              @update:model-value="(v: number | undefined) => patchPresentation({ shadowBias: Number(v) || 0 })"
+            />
+          </label>
+        </div>
       </el-collapse-item>
 
       <el-collapse-item name="camera">
@@ -1037,8 +1020,34 @@ label {
   gap: 4px;
 }
 
-.scene-edit .pair :deep(.el-input-number) {
+.scene-edit .pair :deep(.el-input-number),
+.scene-edit .pair :deep(.el-select) {
   width: 100%;
+}
+
+.scene-edit .flag-line,
+.object-edit .flag-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 8px 12px;
+}
+
+.scene-edit .flag-line :deep(.el-checkbox),
+.object-edit .flag-line :deep(.el-checkbox) {
+  display: inline-flex;
+  grid-template-columns: none;
+  gap: 0;
+  width: auto;
+  margin-right: 0;
+}
+
+.object-edit .flag-line > label {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  width: auto;
 }
 
 .scene-collapse {
