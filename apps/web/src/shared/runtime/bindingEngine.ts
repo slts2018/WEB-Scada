@@ -412,7 +412,12 @@ function applyAnimationLink(
         } else if (link.type === 'colorStroke') {
           widget.style = { ...widget.style, stroke: range.color }
         } else {
-          widget.style = { ...widget.style, fill2: range.color, accent: range.color }
+          widget.style = {
+            ...widget.style,
+            fill2: range.color,
+            accent: range.color,
+            emptyFill: range.color,
+          }
         }
         if (range.blink) flags.blink = true
         break

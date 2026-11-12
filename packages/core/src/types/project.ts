@@ -323,6 +323,8 @@ export interface Page3DPresentation {
   gridColor?: string
   /** 网格次线颜色 */
   gridDivisionColor?: string
+  /** 地面网格边长（米），每格 1 米。默认 20 */
+  gridSize?: number
   /** 阴影接收地面透明度 0–1，默认 0.32 */
   groundOpacity?: number
   /** 相机最小距离，默认 0.5 */

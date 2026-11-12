@@ -16,6 +16,7 @@ export const DEFAULT_PAGE3D_PRESENTATION = {
   gridVisible: true,
   gridColor: '#3d8bfd',
   gridDivisionColor: '#2a3140',
+  gridSize: 20,
   groundOpacity: 0.32,
   cameraMinDistance: 0.5,
   cameraMaxDistance: 500,
@@ -39,6 +40,7 @@ export type ResolvedPage3DPresentation = {
   gridVisible: boolean
   gridColor: string
   gridDivisionColor: string
+  gridSize: number
   groundOpacity: number
   cameraMinDistance: number
   cameraMaxDistance: number
@@ -86,6 +88,7 @@ export function resolvePage3DPresentation(
     gridVisible: p.gridVisible !== false,
     gridColor: p.gridColor?.trim() || d.gridColor,
     gridDivisionColor: p.gridDivisionColor?.trim() || d.gridDivisionColor,
+    gridSize: clamp(Math.round(finiteOr(p.gridSize, d.gridSize)), 4, 400),
     groundOpacity: clamp(finiteOr(p.groundOpacity, d.groundOpacity), 0, 1),
     cameraMinDistance: minDist,
     cameraMaxDistance: maxDist,

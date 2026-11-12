@@ -59,6 +59,7 @@ import {
 } from '@/shared/api/client'
 import { computeAlignPatches, type AlignMode } from '@/shared/designer/geometry'
 import { computeAlignPatches3d } from '@/shared/designer/geometry3d'
+import { objectIdsAfterHistory, widgetIdsAfterHistory } from '@/shared/designer/historySelection'
 import { clearResourceRefs, countRefsByResource, replaceResourceRefs } from '@/shared/project/resourceRefs'
 import {
   cloneObject3dWithNewIds,
@@ -244,9 +245,10 @@ export const useProjectStore = defineStore('project', () => {
     if (!parsed?.kind && Array.isArray(parsed)) {
       const page = activePage2d.value
       if (!page) return
-      historyFuture.value.push(JSON.stringify({ kind: '2d', data: page.layers }))
+      const from = page.layers
+      historyFuture.value.push(JSON.stringify({ kind: '2d', data: from }))
       page.layers = parsed as unknown as Page2D['layers']
-      selectedWidgetIds.value = []
+      selectedWidgetIds.value = widgetIdsAfterHistory(from, page.layers)
       touch()
       return
     }
@@ -254,9 +256,10 @@ export const useProjectStore = defineStore('project', () => {
     if (parsed.kind === '2d') {
       const page = activePage2d.value
       if (!page) return
-      historyFuture.value.push(JSON.stringify({ kind: '2d', data: page.layers }))
+      const from = page.layers
+      historyFuture.value.push(JSON.stringify({ kind: '2d', data: from }))
       page.layers = parsed.data as Page2D['layers']
-      selectedWidgetIds.value = []
+      selectedWidgetIds.value = widgetIdsAfterHistory(from, page.layers)
       touch()
       return
     }
@@ -264,9 +267,10 @@ export const useProjectStore = defineStore('project', () => {
     if (parsed.kind === '3d') {
       const page = activePage3d.value
       if (!page) return
-      historyFuture.value.push(JSON.stringify({ kind: '3d', data: page.objects }))
+      const from = page.objects
+      historyFuture.value.push(JSON.stringify({ kind: '3d', data: from }))
       page.objects = parsed.data as Object3DNode[]
-      selectedObject3dIds.value = []
+      selectedObject3dIds.value = objectIdsAfterHistory(from, page.objects)
       touch()
     }
   }
@@ -284,9 +288,10 @@ export const useProjectStore = defineStore('project', () => {
     if (parsed.kind === '2d' || (!parsed.kind && Array.isArray(parsed))) {
       const page = activePage2d.value
       if (!page) return
-      historyPast.value.push(JSON.stringify({ kind: '2d', data: page.layers }))
+      const from = page.layers
+      historyPast.value.push(JSON.stringify({ kind: '2d', data: from }))
       page.layers = (parsed.kind ? parsed.data : parsed) as Page2D['layers']
-      selectedWidgetIds.value = []
+      selectedWidgetIds.value = widgetIdsAfterHistory(from, page.layers)
       touch()
       return
     }
@@ -294,9 +299,10 @@ export const useProjectStore = defineStore('project', () => {
     if (parsed.kind === '3d') {
       const page = activePage3d.value
       if (!page) return
-      historyPast.value.push(JSON.stringify({ kind: '3d', data: page.objects }))
+      const from = page.objects
+      historyPast.value.push(JSON.stringify({ kind: '3d', data: from }))
       page.objects = parsed.data as Object3DNode[]
-      selectedObject3dIds.value = []
+      selectedObject3dIds.value = objectIdsAfterHistory(from, page.objects)
       touch()
     }
   }
@@ -2644,13 +2650,25 @@ log('script ready · ' + (context.trigger || 'try'))
   async function exportProjectPackage(opts?: {
     /** 浏览器下载文件名；不传则用服务端 Content-Disposition */
     downloadName?: string
+    /** save：先落盘；pack：服务端还在打包，没有字节；download：压缩包已开始下发 */
+    onProgress?: (event: { phase: 'save' | 'pack' | 'download'; received: number; total: number }) => void
   }): Promise<{ fileName: string }> {
     await probeStorage()
     if (getStorageMode() !== 'api') {
       throw new Error('export_requires_api')
     }
-    if (dirty.value) await save()
-    const { blob, fileName } = await apiExportProject(document.value.meta.id)
+    if (dirty.value) {
+      opts?.onProgress?.({ phase: 'save', received: 0, total: 0 })
+      await save()
+    }
+    opts?.onProgress?.({ phase: 'pack', received: 0, total: 0 })
+    const { blob, fileName } = await apiExportProject(document.value.meta.id, (download) => {
+      opts?.onProgress?.({
+        phase: 'download',
+        received: download.received,
+        total: download.total,
+      })
+    })
     const saveAs = (opts?.downloadName?.trim() || fileName).trim() || fileName
     const url = URL.createObjectURL(blob)
     const a = window.document.createElement('a')

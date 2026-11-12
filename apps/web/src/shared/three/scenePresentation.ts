@@ -80,12 +80,13 @@ export function applyScenePresentation(
         dirLight.shadow.map = null as unknown as typeof dirLight.shadow.map
       }
     }
+    const shadowHalf = Math.max(25, p.gridSize / 2)
     dirLight.shadow.camera.near = 0.5
-    dirLight.shadow.camera.far = 80
-    dirLight.shadow.camera.left = -25
-    dirLight.shadow.camera.right = 25
-    dirLight.shadow.camera.top = 25
-    dirLight.shadow.camera.bottom = -25
+    dirLight.shadow.camera.far = Math.max(80, p.gridSize * 2)
+    dirLight.shadow.camera.left = -shadowHalf
+    dirLight.shadow.camera.right = shadowHalf
+    dirLight.shadow.camera.top = shadowHalf
+    dirLight.shadow.camera.bottom = -shadowHalf
     dirLight.shadow.camera.updateProjectionMatrix()
 
     if (opts.shadowFloor) {

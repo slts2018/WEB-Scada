@@ -1117,17 +1117,47 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
     case 'bar':
       return buildCategoryChart(widget, width, height, opacity)
     case 'circle': {
-      return new Konva.Ellipse({
-        name: 'shape',
-        x: width / 2,
-        y: height / 2,
-        radiusX: Math.max(width / 2, 1),
-        radiusY: Math.max(height / 2, 1),
-        fill: str(style, 'fill', '#22c55e'),
-        stroke: str(style, 'stroke', '#86efac'),
-        strokeWidth: num(style, 'strokeWidth', 2),
-        opacity,
-      })
+      const radiusX = Math.max(width / 2, 1)
+      const radiusY = Math.max(height / 2, 1)
+      const fill2 = str(style, 'fill2', '')
+      if (!fill2) {
+        return new Konva.Ellipse({
+          name: 'shape',
+          x: width / 2,
+          y: height / 2,
+          radiusX,
+          radiusY,
+          fill: str(style, 'fill', '#22c55e'),
+          stroke: str(style, 'stroke', '#86efac'),
+          strokeWidth: num(style, 'strokeWidth', 2),
+          opacity,
+        })
+      }
+      const g = new Konva.Group({ name: 'shape' })
+      g.add(
+        new Konva.Ellipse({
+          x: width / 2,
+          y: height / 2,
+          radiusX,
+          radiusY,
+          fill: fill2,
+          stroke: str(style, 'stroke', '#86efac'),
+          strokeWidth: num(style, 'strokeWidth', 2),
+          opacity,
+        }),
+      )
+      g.add(
+        new Konva.Ellipse({
+          x: width / 2,
+          y: height / 2,
+          radiusX: radiusX * 0.62,
+          radiusY: radiusY * 0.62,
+          fill: str(style, 'fill', '#22c55e'),
+          opacity,
+          listening: false,
+        }),
+      )
+      return g
     }
     case 'line': {
       return new Konva.Line({
@@ -1364,7 +1394,7 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
           sides: 3,
           radius: Math.min(width, height) * 0.28,
           rotation: running ? 90 : 0,
-          fill: '#e0f2fe',
+          fill: str(style, 'fill2', '#e0f2fe'),
           listening: false,
         }),
       )
@@ -2061,24 +2091,51 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
       const fillRatio = Number(widget.props.fillRatio)
       const hasFill = Number.isFinite(fillRatio) && fillRatio >= 0
       const defaultRadius = widget.type === 'roundRect' ? 20 : 4
+      const radius = num(style, 'cornerRadius', defaultRadius)
+      const fill2 = str(style, 'fill2', '')
       if (!hasFill) {
-        return new Konva.Rect({
-          name: 'shape',
-          width,
-          height,
-          fill: str(style, 'fill', '#3d8bfd'),
-          stroke: str(style, 'stroke', '#93c5fd'),
-          strokeWidth: num(style, 'strokeWidth', 2),
-          cornerRadius: num(style, 'cornerRadius', defaultRadius),
-          opacity,
-        })
+        if (!fill2) {
+          return new Konva.Rect({
+            name: 'shape',
+            width,
+            height,
+            fill: str(style, 'fill', '#3d8bfd'),
+            stroke: str(style, 'stroke', '#93c5fd'),
+            strokeWidth: num(style, 'strokeWidth', 2),
+            cornerRadius: radius,
+            opacity,
+          })
+        }
+        const g = new Konva.Group({ name: 'shape' })
+        g.add(
+          new Konva.Rect({
+            width,
+            height,
+            fill: fill2,
+            stroke: str(style, 'stroke', '#93c5fd'),
+            strokeWidth: num(style, 'strokeWidth', 2),
+            cornerRadius: radius,
+            opacity,
+          }),
+        )
+        g.add(
+          new Konva.Rect({
+            width: Math.max(0, width * 0.62),
+            height,
+            fill: str(style, 'fill', '#3d8bfd'),
+            cornerRadius: [radius, 0, 0, radius],
+            opacity,
+            listening: false,
+          }),
+        )
+        return g
       }
       const g = new Konva.Group({ name: 'shape' })
       const orient = String(widget.props.fillOrient ?? 'v')
       const dir = String(widget.props.fillDirection ?? 'start')
       const pct = Math.min(100, Math.max(0, fillRatio)) / 100
       const fillColor = str(style, 'fill', '#3d8bfd')
-      const emptyColor = str(style, 'emptyFill', '#1e293b')
+      const emptyColor = fill2 || str(style, 'emptyFill', '#1e293b')
       g.add(
         new Konva.Rect({
           width,

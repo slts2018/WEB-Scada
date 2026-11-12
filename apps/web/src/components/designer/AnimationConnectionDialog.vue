@@ -773,6 +773,30 @@ function outLabel(type: AnimationLinkType): string {
             </label>
           </template>
 
+          <template v-else-if="activeLink.type === 'flow'">
+            <div class="field-row">
+              <label class="field">
+                <span>变量最小值</span>
+                <el-input-number
+                  size="small"
+                  controls-position="right"
+                  :model-value="activeLink.inMin"
+                  @update:model-value="(v: number | undefined) => updateRangeField('inMin', v)"
+                />
+              </label>
+              <label class="field">
+                <span>变量最大值</span>
+                <el-input-number
+                  size="small"
+                  controls-position="right"
+                  :model-value="activeLink.inMax"
+                  @update:model-value="(v: number | undefined) => updateRangeField('inMax', v)"
+                />
+              </label>
+            </div>
+            <p class="flow-hint">速度和箭头样式在对象属性的「流动配置」里。变量达到最大值时为满速。</p>
+          </template>
+
           <template v-else-if="activeRangeLink">
             <div class="field-row">
               <label class="field">
@@ -916,7 +940,7 @@ function outLabel(type: AnimationLinkType): string {
               activeLink.type === 'textIn'
             "
           >
-            <label class="field">
+            <label v-if="activeLink.type === 'digitalIn'" class="field">
               <el-checkbox
                 :model-value="activeLink.confirm !== false"
                 @update:model-value="(v: boolean | string | number) => updateActiveLink({ confirm: Boolean(v) })"
@@ -1079,6 +1103,13 @@ function outLabel(type: AnimationLinkType): string {
 .field :deep(.el-input) {
   width: 100%;
   max-width: 420px;
+}
+
+.flow-hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--scada-muted);
 }
 
 .field-row {

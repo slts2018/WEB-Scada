@@ -90,8 +90,11 @@ export async function apiDeleteProject(id: string): Promise<void> {
   await request(`/projects/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
-/** 下载完整工程包（JSON + 资源 zip） */
-export async function apiExportProject(id: string): Promise<{ blob: Blob; fileName: string }> {
+/** 下载完整工程包（JSON + 资源 zip）。响应头到达后按字节回报下载进度。 */
+export async function apiExportProject(
+  id: string,
+  onDownload?: (progress: SiteDownloadProgress) => void,
+): Promise<{ blob: Blob; fileName: string }> {
   const res = await fetch(`${API_BASE}/projects/${encodeURIComponent(id)}/export`, {
     method: 'GET',
     headers: {
@@ -108,7 +111,7 @@ export async function apiExportProject(id: string): Promise<{ blob: Blob; fileNa
     }
     throw new ApiError(`API ${res.status} /projects/${id}/export`, res.status, body)
   }
-  return parseZipDownload(res, 'project.webscada.zip')
+  return readZipDownload(res, 'project.webscada.zip', onDownload)
 }
 
 export interface SiteDownloadProgress {
@@ -138,15 +141,6 @@ export async function apiExportSite(
     throw new ApiError(`API ${res.status} /projects/${id}/export/site`, res.status, body)
   }
   return readZipDownload(res, 'WebScada-Site.zip', onDownload)
-}
-
-async function parseZipDownload(
-  res: Response,
-  fallbackName: string,
-): Promise<{ blob: Blob; fileName: string }> {
-  const fileName = zipFileName(res, fallbackName)
-  const blob = await res.blob()
-  return { blob, fileName }
 }
 
 async function readZipDownload(

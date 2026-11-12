@@ -709,13 +709,22 @@ export function createScene3D(
   dir.position.set(8, 14, 6)
   scene.add(dir)
 
-  /** 地面网格：颜色变更时重建；显隐由 presentation / options.showGrid 共同决定 */
+  // 阴影接收面（网格下方）。边长由网格范围决定，默认与原来的 40 米一致
+  const shadowFloor = new Mesh(new PlaneGeometry(40, 40), new ShadowMaterial({ opacity: 0.32 }))
+  shadowFloor.rotation.x = -Math.PI / 2
+  shadowFloor.position.y = -0.002
+  shadowFloor.receiveShadow = true
+  shadowFloor.userData.floorSize = 40
+  scene.add(shadowFloor)
+
+  /** 地面网格：颜色或范围变更时重建；显隐由 presentation / options.showGrid 共同决定 */
   let gridHelper: GridHelper | null = null
   let gridSig = ''
   const syncGrid = (pres?: Page3DPresentation | null) => {
     const p = resolvePage3DPresentation(pres)
     const visible = options.showGrid ?? p.gridVisible
-    const nextSig = `${p.gridColor}|${p.gridDivisionColor}`
+    const size = p.gridSize
+    const nextSig = `${p.gridColor}|${p.gridDivisionColor}|${size}`
     if (!gridHelper || gridSig !== nextSig) {
       if (gridHelper) {
         scene.remove(gridHelper)
@@ -725,21 +734,20 @@ export function createScene3D(
         else gmat.dispose()
         gridHelper = null
       }
-      gridHelper = new GridHelper(20, 20, p.gridColor, p.gridDivisionColor)
+      gridHelper = new GridHelper(size, size, p.gridColor, p.gridDivisionColor)
       gridHelper.name = 'scada-grid'
       scene.add(gridHelper)
       gridSig = nextSig
     }
     gridHelper.visible = visible
+    const floorSize = size * 2
+    if (shadowFloor.userData.floorSize !== floorSize) {
+      shadowFloor.geometry.dispose()
+      shadowFloor.geometry = new PlaneGeometry(floorSize, floorSize)
+      shadowFloor.userData.floorSize = floorSize
+    }
   }
   syncGrid(null)
-
-  // 阴影接收面（网格下方）
-  const shadowFloor = new Mesh(new PlaneGeometry(40, 40), new ShadowMaterial({ opacity: 0.32 }))
-  shadowFloor.rotation.x = -Math.PI / 2
-  shadowFloor.position.y = -0.002
-  shadowFloor.receiveShadow = true
-  scene.add(shadowFloor)
 
   const presentation = applyScenePresentation(renderer, scene, dir, ambient, {
     shadowFloor,

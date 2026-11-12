@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { scadaConfirm } from '@/shared/ui/scadaMessageBox'
 import WorkbenchShell from '@/layouts/WorkbenchShell.vue'
 import Canvas2DBoard from '@/components/designer/Canvas2DBoard.vue'
@@ -291,19 +291,35 @@ const importVisible = ref(false)
 const importing = ref(false)
 const importDone = ref(false)
 const importError = ref('')
-const importPhase = ref<ProjectImportPhase>('upload')
+/** 备份三步在进度窗里，不进服务端导入阶段 */
+type ImportUiPhase = 'save' | 'pack' | 'download' | ProjectImportPhase
+const importPhase = ref<ImportUiPhase>('upload')
+const importWithBackup = ref(false)
 const importReceived = ref(0)
 const importTotal = ref(0)
 const importElapsed = ref(0)
 const importUnpackWait = ref(0)
 const importName = ref('')
-const importSteps = ['上传工程包', '解压资源', '打开工程']
+const importSteps = computed(() =>
+  importWithBackup.value
+    ? ['备份当前工程', '上传工程包', '解压资源', '打开工程']
+    : ['上传工程包', '解压资源', '打开工程'],
+)
 
-function importStepIndex(phase: ProjectImportPhase) {
-  if (phase === 'upload') return 0
-  if (phase === 'unpack') return 1
-  return 2
+function importStepIndex(phase: ImportUiPhase) {
+  const offset = importWithBackup.value ? 1 : 0
+  if (phase === 'save' || phase === 'pack' || phase === 'download') return 0
+  if (phase === 'upload') return offset
+  if (phase === 'unpack') return offset + 1
+  return offset + 2
 }
+
+const importBackingUp = computed(
+  () =>
+    importing.value &&
+    !importError.value &&
+    (importPhase.value === 'save' || importPhase.value === 'pack'),
+)
 
 function importMark(index: number) {
   const current = importStepIndex(importPhase.value)
@@ -313,14 +329,24 @@ function importMark(index: number) {
   return '等待'
 }
 
-/** 上传按字节；解压发生在服务端，没有逐文件回调，按已等待时间往前走 */
+/** 上传按字节；解压发生在服务端，没有逐文件回调，按已等待时间往前走。备份打包阶段没有字节。 */
 const importShownPercent = computed(() => {
   if (importDone.value) return 100
+  const withBackup = importWithBackup.value
+  const uploadFloor = withBackup ? 42 : 0
+  const uploadSpan = withBackup ? 36 : 78
+  if (importPhase.value === 'save' || importPhase.value === 'pack') return 0
+  if (importPhase.value === 'download') {
+    if (importTotal.value > 0) {
+      return Math.min(40, Math.round((importReceived.value / importTotal.value) * 40))
+    }
+    return 8
+  }
   if (importPhase.value === 'upload') {
     if (importTotal.value > 0) {
-      return Math.min(78, Math.round((importReceived.value / importTotal.value) * 78))
+      return Math.min(78, uploadFloor + Math.round((importReceived.value / importTotal.value) * uploadSpan))
     }
-    return Math.min(12, importElapsed.value)
+    return Math.min(uploadFloor + 12, uploadFloor + importElapsed.value)
   }
   if (importPhase.value === 'unpack') {
     return Math.min(96, 80 + Math.round(16 * (1 - Math.exp(-importUnpackWait.value / 12))))
@@ -334,6 +360,15 @@ const importDetail = computed(() => {
   const pct = importShownPercent.value
   if (importError.value) return importError.value
   if (importDone.value) return `已完成 ${pct}%，用时 ${clock}。已打开「${importName.value}」。`
+  if (importPhase.value === 'save') return `正在保存并打包当前工程… 已用时 ${clock}`
+  if (importPhase.value === 'pack') return `正在打包当前工程… 已用时 ${clock}`
+  if (importPhase.value === 'download') {
+    const got = formatExportSize(importReceived.value)
+    if (importTotal.value > 0) {
+      return `正在下载备份 ${got} / ${formatExportSize(importTotal.value)}… 已用时 ${clock}`
+    }
+    return `正在下载备份 ${got}… 已用时 ${clock}`
+  }
   if (importPhase.value === 'upload') {
     const got = formatExportSize(importReceived.value)
     if (importTotal.value > 0) {
@@ -344,6 +379,19 @@ const importDetail = computed(() => {
   if (importPhase.value === 'unpack') return `正在解压并写入模型资源… ${pct}% ，已用时 ${clock}`
   return `正在打开工程… ${pct}% ，已用时 ${clock}`
 })
+
+const importLead = computed(() => {
+  if (importPhase.value === 'save' || importPhase.value === 'pack' || importPhase.value === 'download') {
+    return '正在备份当前工程。请留在此窗口，不要点击设计端的其他位置。'
+  }
+  return '正在把工程包传到服务端并写入模型资源。请留在此窗口。'
+})
+
+const importWarn = computed(() =>
+  importWithBackup.value
+    ? '备份会下载到浏览器的「下载」文件夹。导入会用包内设备、变量、报警替换本机配置。'
+    : '这次没有备份。导入会用包内设备、变量、报警替换本机配置，本机原有项会被删除。',
+)
 
 function beforeImportClose(done: () => void) {
   if (importing.value) return
@@ -361,32 +409,38 @@ function importBackupDownloadName(projectName: string): string {
   return `${safe}_${stamp}.webscada.zip`
 }
 
+/** 备份并导入 / 直接导入 / 关掉。关掉返回 null。 */
+async function askImportChoice(): Promise<'backup' | 'direct' | null> {
+  try {
+    await ElMessageBox.confirm(
+      '导入会用包内的设备、变量、报警整表替换本机配置，本机原有项会被删除。当前工程文件会保留。\n\n备份会把当前工程（含模型）下载到浏览器的「下载」文件夹。工程较大时打包要等一会儿，这段时间不能操作设计端。',
+      '导入工程包',
+      {
+        confirmButtonText: '备份并导入',
+        cancelButtonText: '直接导入',
+        distinguishCancelAndClose: true,
+        closeOnClickModal: false,
+        type: 'warning',
+        customClass: 'scada-message-box',
+      },
+    )
+    return 'backup'
+  } catch (action) {
+    if (action === 'cancel') return 'direct'
+    return null
+  }
+}
+
 async function onImportProject(file?: File | null) {
   if (!file || importing.value) return
-  try {
-    await scadaConfirm(
-      '导入前会先把当前工程（含设备/变量）自动下载备份到浏览器的「下载」文件夹。\n\n注意：这会覆盖目标电脑上的设备/变量配置，导入前请确认。\n\n将用工程包内的设备、变量、报警整表替换本机配置，本机原有项会被删除。',
-      '导入工程包',
-      { confirmButtonText: '备份并导入', cancelButtonText: '取消', type: 'warning' },
-    )
-  } catch {
-    return
-  }
-
-  // 浏览器下载到「下载」目录（跟随浏览器设置，不写死磁盘路径）
-  try {
-    const backupName = importBackupDownloadName(project.document.meta.name || 'project')
-    const { fileName } = await project.exportProjectPackage({ downloadName: backupName })
-    ElMessage.success(`已备份到下载：${fileName}`)
-    log.success(`导入前自动备份：${fileName}`, '设计端')
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    log.error(`导入前自动备份失败：${msg}`, '设计端')
+  const mode = await askImportChoice()
+  if (!mode) return
+  if (mode === 'direct') {
     try {
       await scadaConfirm(
-        '当前工程自动备份失败，是否仍继续导入？\n继续将覆盖本机设备/变量且可能无法恢复。',
-        '备份失败',
-        { confirmButtonText: '仍继续导入', cancelButtonText: '取消', type: 'warning' },
+        '不备份就直接导入。\n\n包内的设备、变量、报警会整表替换本机配置，本机原有项会被删除，这次操作无法再恢复。',
+        '直接导入',
+        { confirmButtonText: '仍要导入', cancelButtonText: '取消', type: 'warning' },
       )
     } catch {
       return
@@ -396,13 +450,14 @@ async function onImportProject(file?: File | null) {
   let timer = 0
   const started = Date.now()
   let unpackAt = 0
+  importWithBackup.value = mode === 'backup'
   importVisible.value = true
   importing.value = true
   importDone.value = false
   importError.value = ''
-  importPhase.value = 'upload'
+  importPhase.value = mode === 'backup' ? 'pack' : 'upload'
   importReceived.value = 0
-  importTotal.value = file.size
+  importTotal.value = mode === 'backup' ? 0 : file.size
   importElapsed.value = 0
   importUnpackWait.value = 0
   importName.value = file.name
@@ -412,7 +467,39 @@ async function onImportProject(file?: File | null) {
     if (unpackAt > 0) importUnpackWait.value = Math.floor((now - unpackAt) / 1000)
   }, 500)
   try {
+    if (mode === 'backup') {
+      try {
+        const backupName = importBackupDownloadName(project.document.meta.name || 'project')
+        const { fileName } = await project.exportProjectPackage({
+          downloadName: backupName,
+          onProgress: (event) => {
+            importPhase.value = event.phase
+            importReceived.value = event.received
+            importTotal.value = event.total
+          },
+        })
+        log.success(`导入前备份：${fileName}`, '设计端')
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        log.error(`导入前备份失败：${msg}`, '设计端')
+        importError.value = '当前工程备份失败'
+        try {
+          await scadaConfirm(
+            '当前工程备份失败，是否仍继续导入？\n继续将覆盖本机设备/变量且可能无法恢复。',
+            '备份失败',
+            { confirmButtonText: '仍继续导入', cancelButtonText: '取消', type: 'warning' },
+          )
+        } catch {
+          return
+        }
+        importError.value = ''
+      }
+    }
+
     cancelAutoSave()
+    importPhase.value = 'upload'
+    importReceived.value = 0
+    importTotal.value = file.size
     log.info(`开始导入工程：${file.name}`, '设计端')
     const doc = await project.importProjectPackage(file, (progress) => {
       if (progress.phase === 'unpack' && importPhase.value !== 'unpack') unpackAt = Date.now()
@@ -721,6 +808,7 @@ const anyDialogOpen = computed(
     dbSettingsVisible.value ||
     variableManageVisible.value ||
     resourceManageVisible.value ||
+    importVisible.value ||
     project.animationConnectionOpen,
 )
 
@@ -1179,13 +1267,15 @@ onUnmounted(() => {
     title="导入工程包"
     width="460px"
     align-center
+    append-to-body
+    :modal="true"
     :close-on-click-modal="false"
     :close-on-press-escape="!importing"
     :show-close="!importing"
     :before-close="beforeImportClose"
   >
-    <p class="site-export-lead">正在把工程包传到服务端并写入模型资源。导入时请留在此窗口。</p>
-    <p class="site-export-lead import-warn">导入前已尝试把当前工程备份下载到「下载」文件夹。注意：导入会覆盖本机设备/变量配置。</p>
+    <p class="site-export-lead">{{ importLead }}</p>
+    <p class="site-export-lead import-warn">{{ importWarn }}</p>
     <ol class="site-export-steps">
       <li
         v-for="(label, index) in importSteps"
@@ -1201,6 +1291,8 @@ onUnmounted(() => {
     </ol>
     <el-progress
       :percentage="importShownPercent"
+      :indeterminate="importBackingUp"
+      :show-text="!importBackingUp"
       :status="importError ? 'exception' : importDone ? 'success' : undefined"
       :stroke-width="8"
     />

@@ -571,6 +571,22 @@ const panelSummary = computed(() => {
             @update:model-value="(v: boolean | string | number) => patchPresentation({ gridVisible: Boolean(v) })"
           />
         </label>
+        <label class="row">
+          <span>
+            网格范围
+            <HelpTip content="边长，单位米。每格 1 米。加减改变地面铺多大。" />
+          </span>
+          <el-input-number
+            size="small"
+            :min="4"
+            :max="400"
+            :step="2"
+            :disabled="!scenePres.gridVisible"
+            controls-position="right"
+            :model-value="scenePres.gridSize"
+            @update:model-value="(v: number | undefined) => patchPresentation({ gridSize: Number(v) || 20 })"
+          />
+        </label>
         <div class="pair">
           <label>
             <span>主线颜色</span>

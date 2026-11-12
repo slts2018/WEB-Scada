@@ -26,6 +26,33 @@ function writeJson(key: string, value: unknown) {
   localStorage.setItem(key, JSON.stringify(value))
 }
 
+/** 浏览器 localStorage 约 5MB，整份工程或发布包经常超限。 */
+export function isStorageQuotaError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false
+  const name = 'name' in err ? String((err as { name?: unknown }).name) : ''
+  const code = 'code' in err ? Number((err as { code?: unknown }).code) : NaN
+  const message = err instanceof Error ? err.message : ''
+  return (
+    name === 'QuotaExceededError' ||
+    name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+    code === 22 ||
+    /quota/i.test(message)
+  )
+}
+
+/** 删掉其他工程的本地副本，给当前这份腾位置。不删 keepId 自己的条目。 */
+export function evictOtherDocuments(keepId: string): void {
+  const keepDoc = docKey(keepId)
+  const keepPublish = publishKey(keepId)
+  const drop: string[] = []
+  for (let i = 0; i < localStorage.length; i += 1) {
+    const key = localStorage.key(i)
+    if (!key || key === keepDoc || key === keepPublish) continue
+    if (key.startsWith('web-scada:project:') || key.startsWith('web-scada:publish:')) drop.push(key)
+  }
+  for (const key of drop) localStorage.removeItem(key)
+}
+
 export function listProjectIndex(): ProjectIndexItem[] {
   return readJson<ProjectIndexItem[]>(INDEX_KEY) ?? []
 }
