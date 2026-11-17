@@ -34,7 +34,6 @@ import {
   setTrendHistoryTableVisible,
   trendHistoryTableVisibleOf,
 } from '@/shared/runtime/trendHistoryTable'
-import { ElMessage } from 'element-plus'
 import {
   clearTrendHistoryCursor,
   onTrendHistoryCursor,
@@ -521,7 +520,6 @@ function applyRange(search = false): void {
   const f = fromAt.value?.getTime()
   const t = toAt.value?.getTime()
   if (!Number.isFinite(f) || !Number.isFinite(t) || (t as number) <= (f as number)) {
-    ElMessage.warning('开始时间要早于结束时间')
     return
   }
   setTrendHistoryFollow(props.widgetId, false)
@@ -554,7 +552,6 @@ function refresh(): void {
 function exportCsv(): void {
   const rows = trendHistoryExportRows(props.widgetId)
   if (!rows || !rows.times.length) {
-    ElMessage.warning('当前区间没有历史数据可导出')
     return
   }
   const head = ['time', ...rows.tagIds.map((tagId) => headerOf(tagId))].join(',')

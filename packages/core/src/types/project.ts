@@ -408,4 +408,6 @@ export interface ProjectDocument {
   pageTemplates?: PageTemplate[]
   /** 首页 pageId */
   homePageId?: string
+  /** 运行时显示页面 pageId；未设置时「运行」打开当前编辑页 */
+  runtimePageId?: string
 }

@@ -32,7 +32,7 @@ import Object3DPanelPageEditorDialog from '@/components/designer/Object3DPanelPa
 import Object3DLiquidDialog from '@/components/designer/Object3DLiquidDialog.vue'
 import Object3DFlowDialog from '@/components/designer/Object3DFlowDialog.vue'
 import { useProjectStore, type ProjectImportPhase, type SiteExportPhase } from '@/stores/project'
-import { useOutputLogStore } from '@/stores/outputLog'
+import { ensureOutputLogSync, useOutputLogStore } from '@/stores/outputLog'
 import { useTagStore } from '@/stores/tag'
 import { useProjectAutoSave } from '@/shared/project/useProjectAutoSave'
 import { syncCurrentProjectAndOpenRuntime } from '@/shared/runtime/openRuntime'
@@ -43,11 +43,17 @@ import {
   hasMod,
   isDesignerCanvasContext,
 } from '@/shared/designer/designerHotkeys'
-import type { Page2D, Page3D } from '@web-scada/core'
+import { listNavigationPages, isObject3dPanelPage, type Page2D, type Page3D } from '@web-scada/core'
 
 const router = useRouter()
 const project = useProjectStore()
 const log = useOutputLogStore()
+
+function openLogManager() {
+  const href = router.resolve({ name: 'logs' }).href
+  window.open(href, 'scada-logs')
+}
+
 const tags = useTagStore()
 const {
   status: autoSaveStatus,
@@ -612,31 +618,29 @@ async function confirmRemoveExisting() {
   await project.refreshList()
 }
 
-/** 进入运行端 */
+/** 进入运行端：默认不显示地面网格，不再弹窗询问。若设置了运行时显示页面则打开该页。 */
 async function onOpenRuntime() {
   if (previewBusy.value) return
-  let showGrid = false
-  try {
-    await scadaConfirm('运行时是否显示地面网格？', '进入运行', {
-      confirmButtonText: '显示网格',
-      cancelButtonText: '不显示',
-      distinguishCancelAndClose: true,
-      type: 'info',
-    })
-    showGrid = true
-  } catch (action) {
-    if (action === 'cancel') {
-      showGrid = false
+  const showGrid = false
+  const currentId = project.activePageId
+  let openPageId = currentId
+  const designated = project.document.runtimePageId?.trim()
+  if (designated) {
+    const page = project.document.pages.find((p) => p.id === designated)
+    if (page && !isObject3dPanelPage(page)) {
+      openPageId = designated
     } else {
-      return
+      ElMessage.warning('指定的运行时显示页面已不存在或无法打开，将打开当前编辑页')
+      log.warn('指定的运行时显示页面已不存在或无法打开，将打开当前编辑页', '设计端')
+      openPageId = currentId
     }
   }
   previewBusy.value = true
   try {
-    const info = await syncCurrentProjectAndOpenRuntime(router, 'designer', { showGrid })
-    ElMessage.success(`已进入运行 v${info.publishVersion}`)
+    const info = await syncCurrentProjectAndOpenRuntime(router, 'designer', { showGrid, pageId: openPageId })
+    const opened = openPageId ? project.document.pages.find((p) => p.id === openPageId) : undefined
     log.success(
-      `进入运行 ${info.projectName} v${info.publishVersion}${showGrid ? '（显示网格）' : ''}`,
+      `进入运行 ${info.projectName} v${info.publishVersion}${opened ? `（${opened.name}）` : ''}${showGrid ? '（显示网格）' : ''}`,
       '设计端',
     )
   } catch (err) {
@@ -647,11 +651,16 @@ async function onOpenRuntime() {
   }
 }
 
-function onProjectPropertyConfirm(payload: { name: string; description: string }) {
+function onProjectPropertyConfirm(payload: { name: string; description: string; runtimePageId?: string }) {
   project.renameProject(payload.name, payload.description)
+  project.setRuntimePageId(payload.runtimePageId)
   ElMessage.success('工程属性已更新')
   log.info('已更新工程属性', '设计端')
 }
+
+const propertyPages = computed(() =>
+  listNavigationPages(project.document).map((p) => ({ id: p.id, name: p.name, type: p.type })),
+)
 
 const canGroup = () =>
   active3dPage.value
@@ -974,6 +983,7 @@ function onDesignerKeyDown(e: KeyboardEvent) {
 let stopLiveTrendSampling: (() => void) | null = null
 
 onMounted(async () => {
+  ensureOutputLogSync()
   window.addEventListener('keydown', onDesignerKeyDown, true)
   await project.hydrateFromStorage()
   await tags.hydrateFromServer()
@@ -1094,6 +1104,7 @@ onUnmounted(() => {
         <template #dropdown>
           <el-dropdown-menu>
             <el-dropdown-item @click="dbSettingsVisible = true">数据库配置</el-dropdown-item>
+            <el-dropdown-item @click="openLogManager">日志管理</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>
@@ -1149,11 +1160,21 @@ onUnmounted(() => {
       <WidgetPalette v-else />
     </template>
 
+    <template #notice>
+      <div v-if="tags.realtimeOffline" class="designer-offline-banner" role="alert">
+        {{ tags.realtimeOfflineMessage }}
+      </div>
+    </template>
+
     <template #output>
       <OutputPanel />
     </template>
 
     <template #status>
+      <span
+        v-if="tags.realtimeOffline"
+        class="offline-hint"
+      >{{ tags.realtimeOfflineMessage }}</span>
       <span>{{ project.document.meta.name }}</span>
       <span v-if="project.dirty" class="dirty">未保存</span>
       <span
@@ -1190,6 +1211,8 @@ onUnmounted(() => {
     :name="project.document.meta.name"
     :description="project.document.meta.description"
     :project-id="project.document.meta.id"
+    :runtime-page-id="project.document.runtimePageId"
+    :pages="propertyPages"
     @confirm="onProjectPropertyConfirm"
   />
   <UnsavedChangesDialog
@@ -1395,5 +1418,19 @@ onUnmounted(() => {
   display: grid;
   place-content: center;
   color: var(--scada-muted);
+}
+
+.designer-offline-banner {
+  padding: 6px 12px;
+  background: #7f1d1d;
+  color: #fecaca;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.offline-hint {
+  color: #fecaca;
+  font-weight: 600;
 }
 </style>

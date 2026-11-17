@@ -80,13 +80,21 @@ function matches(text: string, q: string) {
   return text.toLowerCase().includes(q)
 }
 
+const hideScene3d = computed(() => {
+  if (project.isPanelEditMode()) return true
+  return project.activePage2d?.usage === 'object3d-panel'
+})
+
 const visibleFolders = computed(() => {
   const rail = widgetRails.find((item) => item.id === active.value)
   if (!rail) return []
   const q = query.value.trim().toLowerCase()
   return rail.folders
     .map((folder) => {
-      const items = folder.types
+      const types = hideScene3d.value
+        ? folder.types.filter((type) => type !== 'scene3d')
+        : folder.types
+      const items = types
         .map((type) => byType.get(type))
         .filter((item): item is NonNullable<typeof item> => Boolean(item))
       const folderHit = q && matches(folder.name, q)

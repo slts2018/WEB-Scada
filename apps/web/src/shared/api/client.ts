@@ -581,3 +581,49 @@ export async function apiUploadResource(
     size: number
   }
 }
+
+export type AppLogLevel = 'info' | 'success' | 'warn' | 'error'
+
+export interface AppLogItem {
+  id: string
+  time: number
+  level: AppLogLevel
+  source: string
+  message: string
+}
+
+export interface AppLogListResult {
+  items: AppLogItem[]
+  total: number
+  filePath: string
+  sources: string[]
+}
+
+export async function apiListLogs(opts?: {
+  from?: number
+  to?: number
+  level?: string
+  source?: string
+  limit?: number
+  offset?: number
+}): Promise<AppLogListResult> {
+  const q = new URLSearchParams()
+  if (opts?.from != null) q.set('from', String(opts.from))
+  if (opts?.to != null) q.set('to', String(opts.to))
+  if (opts?.level) q.set('level', opts.level)
+  if (opts?.source) q.set('source', opts.source)
+  if (opts?.limit != null) q.set('limit', String(opts.limit))
+  if (opts?.offset != null) q.set('offset', String(opts.offset))
+  const qs = q.toString()
+  return request(`/logs${qs ? `?${qs}` : ''}`)
+}
+
+export async function apiPostLog(entry: {
+  id?: string
+  time?: number
+  level: AppLogLevel
+  source?: string
+  message: string
+}): Promise<{ ok: boolean; item: AppLogItem }> {
+  return request('/logs', { method: 'POST', body: JSON.stringify(entry) })
+}

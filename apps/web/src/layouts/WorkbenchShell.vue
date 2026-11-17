@@ -106,6 +106,10 @@ defineExpose({
       </div>
     </header>
 
+    <div v-if="$slots.notice" class="notice">
+      <slot name="notice" />
+    </div>
+
     <div class="body">
       <aside v-show="showLeft" class="left">
         <div class="tab-row">
@@ -205,6 +209,10 @@ defineExpose({
   flex-shrink: 0;
   border-bottom: 1px solid var(--scada-border);
   background: var(--scada-panel);
+}
+
+.notice {
+  flex-shrink: 0;
 }
 
 .menubar {

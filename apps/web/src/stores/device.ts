@@ -10,7 +10,7 @@ import {
   apiUpdateDevice,
 } from '@/shared/api/client'
 
-const PROBEABLE = new Set(['modbus_tcp', 'opcua', 'mqtt', 'http'])
+const PROBEABLE = new Set(['modbus_tcp', 'modbus_udp', 'opcua', 'mqtt', 'http'])
 
 function localLinkStatus(device: DeviceMeta): DeviceLinkStatus {
   if (!device.enabled) {

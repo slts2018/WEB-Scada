@@ -6,8 +6,12 @@ import com.webscada.server.device.mcd4000.Mcd4000Channel;
 import com.webscada.server.device.mcd4000.Mcd4000Client;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -46,6 +50,7 @@ public class DeviceConnectionProbeService {
     return switch (proto) {
       case "mock" -> ok("Mock 设备无需网络连接");
       case "modbus_tcp", "modbus-tcp" -> modbus(ch);
+      case "modbus_udp", "modbus-udp" -> modbusUdp(ch);
       case "opcua" -> opcua(ch);
       case "mqtt" -> mqtt(ch);
       case "http" -> httpGet(ch, "HTTP");
@@ -101,6 +106,62 @@ public class DeviceConnectionProbeService {
                 + "，属正常应答，说明链路可用）");
       }
       return ok("Modbus TCP 已连通 " + hp.host + ":" + hp.port);
+    } catch (Exception e) {
+      return fail(shortMsg(e));
+    }
+  }
+
+  private Map<String, Object> modbusUdp(String channel) {
+    HostPort hp = parseHostPort(channel, 502);
+    if (hp == null) return fail("请填写主机和端口，如 192.168.1.10:502");
+    Map<String, Object> primary = modbusUdpOnce(hp);
+    if (Boolean.TRUE.equals(primary.get("ok"))) return primary;
+    HostPort backup = parseBackup(channel, hp.port);
+    if (backup == null) return primary;
+    Map<String, Object> standby = modbusUdpOnce(backup);
+    if (Boolean.TRUE.equals(standby.get("ok"))) {
+      return ok("主地址不可达，已连通备用 " + backup.host() + ":" + backup.port());
+    }
+    return fail("主 " + primary.get("message") + "；备 " + standby.get("message"));
+  }
+
+  /** 事务号固定 00 00。首字节自增会触发现场设备的下载程序。 */
+  private Map<String, Object> modbusUdpOnce(HostPort hp) {
+    byte[] req =
+        new byte[] {
+          0x00, 0x00, 0x00, 0x00, 0x00, 0x06, 0x01, 0x03, 0x00, 0x00, 0x00, 0x01
+        };
+    try (DatagramSocket socket = new DatagramSocket()) {
+      socket.setSoTimeout(IO_MS);
+      InetAddress addr = InetAddress.getByName(hp.host);
+      socket.send(new DatagramPacket(req, req.length, addr, hp.port));
+      byte[] buf = new byte[260];
+      DatagramPacket packet = new DatagramPacket(buf, buf.length);
+      long deadline = System.nanoTime() + IO_MS * 1_000_000L;
+      while (true) {
+        int remain = (int) ((deadline - System.nanoTime()) / 1_000_000L);
+        if (remain <= 0) return fail("等待 Modbus UDP 响应超时");
+        socket.setSoTimeout(Math.max(1, remain));
+        try {
+          socket.receive(packet);
+        } catch (SocketTimeoutException e) {
+          return fail("等待 Modbus UDP 响应超时");
+        }
+        if (packet.getAddress() != null && !packet.getAddress().equals(addr)) continue;
+        break;
+      }
+      int n = packet.getLength();
+      int off = packet.getOffset();
+      if (n < 9) return fail("已发出 UDP，但未收到有效 Modbus 响应");
+      int txn = ((buf[off] & 0xff) << 8) | (buf[off + 1] & 0xff);
+      int protoId = ((buf[off + 2] & 0xff) << 8) | (buf[off + 3] & 0xff);
+      if (txn != 0 || protoId != 0) return fail("收到的 UDP 不是事务号为 0 的 Modbus 响应");
+      int fc = buf[off + 7] & 0xff;
+      if ((fc & 0x80) != 0) {
+        int ex = n > 8 ? (buf[off + 8] & 0xff) : -1;
+        return ok("Modbus UDP 已连通（设备返回异常码 " + ex + "，属正常应答，说明链路可用）");
+      }
+      return ok("Modbus UDP 已连通 " + hp.host + ":" + hp.port);
     } catch (Exception e) {
       return fail(shortMsg(e));
     }

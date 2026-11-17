@@ -6,7 +6,7 @@ import org.springframework.stereotype.Controller;
 import org.springframework.web.bind.annotation.GetMapping;
 
 /**
- * Vue history 模式：/designer、/runtime 等无实体文件，需回退到 index.html（对齐 Node setNotFoundHandler）。
+ * Vue history 模式：/designer、/runtime、/logs 等无实体文件，需回退到 index.html（对齐 Node setNotFoundHandler）。
  */
 @Controller
 public class SpaForwardController {
@@ -27,7 +27,10 @@ public class SpaForwardController {
     "/designer/**",
     "/runtime",
     "/runtime/",
-    "/runtime/**"
+    "/runtime/**",
+    "/logs",
+    "/logs/",
+    "/logs/**"
   })
   public String spa() {
     if (!spaReady()) {

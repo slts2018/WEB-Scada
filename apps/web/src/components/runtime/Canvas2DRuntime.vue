@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, nextTick, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
 import type {
   AnimationLinkInput,
   EventBinding,
@@ -189,13 +188,14 @@ function syncTrendLinks(bars: TrendBar[]) {
 function onHistoryRowPick(_widgetId: string, at: number, tagId?: string) {
   const jump = jumpTrendHistoryToTime(at, tagId)
   if (!jump) {
-    ElMessage.warning('当前画面没有可联动的历史趋势图元')
+    log.warn('当前画面没有可联动的历史趋势图元', '运行端')
     return
   }
   const d = new Date(jump.at)
   const p2 = (n: number) => String(n).padStart(2, '0')
-  ElMessage.success(
+  log.info(
     `历史趋势已跳到 ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}${jump.windowMoved ? '（窗口已前移）' : ''}`,
+    '运行端',
   )
   refreshAllVisuals()
 }
@@ -583,8 +583,11 @@ function onWriteCancel() {
 }
 
 async function doWrite(tagId: string, value: string | number | boolean) {
+  if (!tagId?.trim()) {
+    log.warn('请先绑定要写入的变量', '运行端')
+    return
+  }
   const res = await tags.writeValue(tagId, value)
-  ElMessage[res.ok ? 'success' : 'error'](res.message)
   if (res.ok) log.success(`写值 ${tagId} = ${String(value)}`, '运行端')
   else log.error(res.message, '运行端')
 }
@@ -594,7 +597,7 @@ async function runEventActions(widgetId: string, events: EventBinding[]) {
   if (!widget) return
   const resolved = resolveWidgetVisual(widget, (id) => tags.getValue(id))
   if (!isWidgetRuntimeEnabled(resolved.widget)) {
-    ElMessage.warning('图元当前禁止操作')
+    log.warn('图元当前禁止操作', '运行端')
     return
   }
 
@@ -602,9 +605,12 @@ async function runEventActions(widgetId: string, events: EventBinding[]) {
     for (const action of evt.actions) {
       if (action.type === 'navigate') {
         project.setActivePage(action.pageId)
-        ElMessage.success('已切换页面')
         log.info(`跳转页面：${action.pageId}`, '运行端')
       } else if (action.type === 'writeTag') {
+        if (!action.tagId?.trim()) {
+          log.warn('请先绑定要写入的变量', '运行端')
+          continue
+        }
         let value = action.value
         if (action.confirm) {
           const ok = await askWrite(action.tagId, action.value, { mode: 'confirm' })
@@ -615,7 +621,7 @@ async function runEventActions(widgetId: string, events: EventBinding[]) {
       } else if (action.type === 'openDialog') {
         const page = project.document.pages.find((p) => p.id === action.dialogId && p.type === '2d')
         if (!page) {
-          ElMessage.warning(`对话框页面不存在：${action.dialogId}`)
+          log.warn(`对话框页面不存在：${action.dialogId}`, '运行端')
           continue
         }
         emit('openDialog', action.dialogId)
@@ -623,7 +629,7 @@ async function runEventActions(widgetId: string, events: EventBinding[]) {
       } else if (action.type === 'runScript') {
         const script = project.document.scripts.find((s) => s.id === action.scriptId)
         if (!script) {
-          ElMessage.warning('脚本不存在')
+          log.warn('脚本不存在', '运行端')
           continue
         }
         runScriptSource(
@@ -652,7 +658,7 @@ async function handleAnimationInput(widgetId: string) {
   if (!widget) return
   const resolved = resolveWidgetVisual(widget, (id) => tags.getValue(id))
   if (!isWidgetRuntimeEnabled(resolved.widget)) {
-    ElMessage.warning('图元当前禁止操作')
+    log.warn('图元当前禁止操作', '运行端')
     return
   }
 

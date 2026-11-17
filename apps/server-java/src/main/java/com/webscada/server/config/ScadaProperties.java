@@ -226,7 +226,7 @@ public class ScadaProperties {
     }
   }
 
-  /** 设备协议 modbus_tcp：按变量 address 轮询/写值 */
+  /** 设备协议 modbus_tcp / modbus_udp：按变量 address 轮询/写值 */
   public static class Modbus {
     private boolean enabled = true;
     private long pollMs = 1000;
@@ -241,10 +241,10 @@ public class ScadaProperties {
      * 调度模式：{@code isolated}=每设备独立队列（默认）；{@code legacy}=全局单线程串行（回滚用）。
      */
     private String scheduler = "isolated";
-    /** 设备连续失败后冷却，冷却期内不发起 TCP 连接 */
+    /** 套接字连续连不上之后的冷却时间。读超时不进冷却。 */
     private long deviceCooldownMs = 3000;
-    /** 连续失败几次进入冷却 */
-    private int maxFailBeforeCooldown = 1;
+    /** 套接字连续连不上几次才冷却 */
+    private int maxFailBeforeCooldown = 3;
 
     public boolean isEnabled() {
       return enabled;

@@ -428,7 +428,9 @@ public class TagRuntimeService {
 
     if (!meta.writable()) return WriteResult.fail("Tag is read-only");
 
-
+    if (isDeviceDisabled(meta)) {
+      return WriteResult.fail("设备已停用");
+    }
 
     Object normalized = value;
     String dt = meta.dataType() == null ? "" : meta.dataType();
@@ -466,6 +468,38 @@ public class TagRuntimeService {
     if (meta == null || modbusIoProvider == null) return false;
     ModbusTagIo io = modbusIoProvider.getIfAvailable();
     return io != null && io.drivesDevice(meta.deviceId());
+  }
+
+  /** 设备存在且已停用时禁止读写成功。deviceStore 为空（单测内存模式）则不过问。 */
+  private boolean isDeviceDisabled(TagMeta meta) {
+    if (meta == null || meta.deviceId() == null || deviceStore == null) return false;
+    try {
+      DeviceMeta dev = deviceStore.get(meta.deviceId());
+      return dev != null && !dev.enabled();
+    } catch (IOException e) {
+      return false;
+    }
+  }
+
+  /** 已停用设备上的点保持最后一值，品质改为 Bad，避免看起来仍在采集。 */
+  private void markDisabledDeviceTags() {
+    if (deviceStore == null) return;
+    Set<String> disabled = new HashSet<>();
+    try {
+      for (DeviceMeta d : deviceStore.list()) {
+        if (d != null && d.deviceId() != null && !d.enabled()) disabled.add(d.deviceId());
+      }
+    } catch (IOException e) {
+      return;
+    }
+    if (disabled.isEmpty()) return;
+    for (TagMeta meta : metas) {
+      if (meta == null || meta.deviceId() == null || !disabled.contains(meta.deviceId())) continue;
+      TagValue cur = values.get(meta.tagId());
+      if (cur != null && ("Bad".equals(cur.quality()) || "Offline".equals(cur.quality())) ) continue;
+      Object v = cur != null ? cur.value() : defaultValueForType(meta.dataType());
+      setTagValue(meta.tagId(), v, "Bad");
+    }
   }
 
   private WriteResult writeModbus(TagMeta meta, Object value) {
@@ -527,9 +561,10 @@ public class TagRuntimeService {
   @Scheduled(fixedRate = 50)
   public void tick() {
     long nowMs = System.currentTimeMillis();
-    if (nowMs - lastDeviceRefresh > 10_000) {
+    if (nowMs - lastDeviceRefresh > 1_000) {
       lastDeviceRefresh = nowMs;
       refreshMcdDevices();
+      markDisabledDeviceTags();
     }
 
     List<TagValue> changed = new ArrayList<>();

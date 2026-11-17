@@ -5,10 +5,11 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.util.Arrays;
 
 /** 轻量 Modbus TCP（MBAP）会话，供变量轮询/写值使用。 */
-public final class ModbusTcpClient implements AutoCloseable {
+public final class ModbusTcpClient implements ModbusClient {
   private final String host;
   private final int port;
   private final int unitId;
@@ -40,12 +41,23 @@ public final class ModbusTcpClient implements AutoCloseable {
     if (socket != null && socket.isConnected() && !socket.isClosed()) return;
     closeQuietly();
     Socket s = new Socket();
-    s.connect(new InetSocketAddress(host, port), connectTimeoutMs);
-    s.setTcpNoDelay(true);
-    s.setSoTimeout(responseTimeoutMs);
-    socket = s;
-    in = s.getInputStream();
-    out = s.getOutputStream();
+    try {
+      s.connect(new InetSocketAddress(host, port), connectTimeoutMs);
+      s.setTcpNoDelay(true);
+      s.setSoTimeout(responseTimeoutMs);
+      socket = s;
+      in = s.getInputStream();
+      out = s.getOutputStream();
+    } catch (IOException e) {
+      try {
+        s.close();
+      } catch (IOException ignored) {
+      }
+      socket = null;
+      in = null;
+      out = null;
+      throw e;
+    }
   }
 
   public synchronized byte[] exchange(byte[] pdu) throws IOException {
@@ -61,8 +73,13 @@ public final class ModbusTcpClient implements AutoCloseable {
     frame[5] = (byte) (len & 0xff);
     frame[6] = (byte) unitId;
     System.arraycopy(pdu, 0, frame, 7, pdu.length);
-    out.write(frame);
-    out.flush();
+    try {
+      out.write(frame);
+      out.flush();
+    } catch (IOException e) {
+      closeQuietly();
+      throw e;
+    }
 
     byte[] header = readFully(6);
     int proto = ((header[2] & 0xff) << 8) | (header[3] & 0xff);
@@ -163,7 +180,14 @@ public final class ModbusTcpClient implements AutoCloseable {
     byte[] buf = new byte[n];
     int off = 0;
     while (off < n) {
-      int r = in.read(buf, off, n - off);
+      int r;
+      try {
+        r = in.read(buf, off, n - off);
+      } catch (SocketTimeoutException e) {
+        if (off == 0) throw e;
+        closeQuietly();
+        throw new IOException("connection closed");
+      }
       if (r < 0) {
         closeQuietly();
         throw new IOException("connection closed");

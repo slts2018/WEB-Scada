@@ -19,7 +19,6 @@ import {
   CylinderGeometry,
   DirectionalLight,
   DoubleSide,
-  Euler,
   GridHelper,
   Group,
   MathUtils,
@@ -29,6 +28,7 @@ import {
   MOUSE,
   Plane,
   PerspectiveCamera,
+  Quaternion,
   PlaneGeometry,
   Raycaster,
   Scene,
@@ -53,9 +53,11 @@ import {
   resolveFlowSideBasis,
   resolveFlowStripe,
   resolvePage3DPresentation,
+  resolvePanelContentSize,
   resolveSourceSize,
 } from '@web-scada/core'
 import { isAdditivePointer, installPointerModifierTracker } from '@/shared/designer/designerHotkeys'
+import { closestEulerDegrees, roundDeg } from '@/shared/three/eulerDegrees'
 import { fitCameraToBox, unionObjectBoxes } from '@/shared/three/modelFit'
 import { classifyRuntimeTap } from '@/shared/three/runtimeTapGate'
 import { loadModelObject } from '@/shared/three/modelLoader'
@@ -216,6 +218,8 @@ export interface Scene3DBundle {
     opts?: { applyModelColor?: boolean },
   ) => void
   setGizmoMode: (mode: TransformGizmoMode) => void
+  /** 手掌：卸下手柄。点选、框选、转视角仍可用 */
+  setHandMode: (on: boolean) => void
   getGizmoMode: () => TransformGizmoMode
   getObjectIds: () => string[]
   getSelectedObjectIds: () => string[]
@@ -267,6 +271,8 @@ export interface Scene3DBundle {
 
 const USER_DATA_ID = 'scadaObjectId'
 const USER_DATA_ORIG_MAT = 'scadaOrigMat'
+/** 工程里的角度（度）。平移松手时写回这个，不再从弧度反算 */
+const USER_DATA_ROT_DEG = 'scadaRotationDeg'
 
 type OrigMatSnapshot = {
   color: Color
@@ -346,6 +352,26 @@ function applyNodeShadowFlags(root: Object3D, node: Object3DNode) {
   })
 }
 
+function rememberRotation(obj: Object3D, rotation: [number, number, number]) {
+  obj.userData[USER_DATA_ROT_DEG] = [rotation[0], rotation[1], rotation[2]]
+}
+
+function rememberedRotation(obj: Object3D): [number, number, number] {
+  const saved = obj.userData[USER_DATA_ROT_DEG]
+  if (
+    Array.isArray(saved) &&
+    saved.length >= 3 &&
+    saved.every((n) => typeof n === 'number' && Number.isFinite(n))
+  ) {
+    return [saved[0], saved[1], saved[2]]
+  }
+  return [
+    roundDeg(MathUtils.radToDeg(obj.rotation.x)),
+    roundDeg(MathUtils.radToDeg(obj.rotation.y)),
+    roundDeg(MathUtils.radToDeg(obj.rotation.z)),
+  ]
+}
+
 function applyTransform(obj: Object3D, node: Object3DNode) {
   const [px, py, pz] = node.transform.position
   const [rx, ry, rz] = node.transform.rotation
@@ -353,18 +379,29 @@ function applyTransform(obj: Object3D, node: Object3DNode) {
   obj.position.set(px, py, pz)
   // 工程模型存度；Three.js Euler 用弧度
   obj.rotation.set(MathUtils.degToRad(rx), MathUtils.degToRad(ry), MathUtils.degToRad(rz))
+  rememberRotation(obj, [rx, ry, rz])
   obj.scale.set(sx, sy, sz)
   obj.visible = node.visible !== false
 }
 
-function readTransform(obj: Object3D): Transform3D {
+function readTransform(obj: Object3D, mode: TransformGizmoMode): Transform3D {
+  const prev = rememberedRotation(obj)
+  // 平移和缩放不改朝向。弧度再换回度会把 90 变成 90.000…，这里沿用工程里的度数。
+  const rotation: [number, number, number] =
+    mode === 'rotate'
+      ? closestEulerDegrees(
+          [
+            MathUtils.radToDeg(obj.rotation.x),
+            MathUtils.radToDeg(obj.rotation.y),
+            MathUtils.radToDeg(obj.rotation.z),
+          ],
+          prev,
+        )
+      : [roundDeg(prev[0]), roundDeg(prev[1]), roundDeg(prev[2])]
+  rememberRotation(obj, rotation)
   return {
     position: [obj.position.x, obj.position.y, obj.position.z],
-    rotation: [
-      MathUtils.radToDeg(obj.rotation.x),
-      MathUtils.radToDeg(obj.rotation.y),
-      MathUtils.radToDeg(obj.rotation.z),
-    ],
+    rotation,
     scale: [obj.scale.x, obj.scale.y, obj.scale.z],
   }
 }
@@ -534,6 +571,179 @@ function countObject3dNodes(nodes: Object3DNode[]): number {
   }
   walk(nodes)
   return total
+}
+
+/**
+ * Official TransformControls pickers are much fatter than the visible handles
+ * (translate/scale: CylinderGeometry(0.2, 0, 0.6) vs shaft 0.0075 / arrow 0.04;
+ * rotate: TorusGeometry tube 0.1 vs visible 0.0075, plus SphereGeometry(0.25) for XYZE).
+ * Mutate picker geometries in-place so the hit area hugs the visible gizmo.
+ * Call once after constructing the controls; mode switches / re-attach reuse the same meshes.
+ */
+function shrinkTransformControlPickers(controls: TransformControls) {
+  const gizmo = (controls as unknown as { _gizmo?: { picker?: Record<string, Object3D> } })._gizmo
+  const pickerMap = gizmo?.picker
+  if (!pickerMap) return
+
+  const scratch = new Vector3()
+  const size = new Vector3()
+  const center = new Vector3()
+  const normal = new Vector3()
+  const planar = new Vector3()
+  const ringPoint = new Vector3()
+  const offset = new Vector3()
+
+  type PickerGeom = {
+    type?: string
+    parameters?: {
+      radiusTop?: number
+      radiusBottom?: number
+      radius?: number
+      tube?: number
+      width?: number
+      height?: number
+      depth?: number
+    }
+    attributes: {
+      position?: {
+        count: number
+        getX: (i: number) => number
+        getY: (i: number) => number
+        getZ: (i: number) => number
+        setXYZ: (i: number, x: number, y: number, z: number) => void
+        needsUpdate: boolean
+      }
+    }
+    boundingBox: { getSize: (t: Vector3) => Vector3; getCenter: (t: Vector3) => Vector3 } | null
+    computeBoundingBox: () => void
+    computeBoundingSphere: () => void
+  }
+
+  const finish = (geometry: PickerGeom, mesh: Object3D) => {
+    if (geometry.attributes.position) geometry.attributes.position.needsUpdate = true
+    geometry.computeBoundingBox()
+    geometry.computeBoundingSphere()
+    mesh.userData.scadaPickerShrunk = true
+  }
+
+  const shrinkTowardLongAxis = (geometry: PickerGeom, radiusScale: number) => {
+    const pos = geometry.attributes.position
+    if (!pos) return
+    geometry.computeBoundingBox()
+    const box = geometry.boundingBox
+    if (!box) return
+    box.getSize(size)
+    box.getCenter(center)
+    let axis: 'x' | 'y' | 'z' = 'x'
+    if (size.y >= size.x && size.y >= size.z) axis = 'y'
+    else if (size.z >= size.x && size.z >= size.y) axis = 'z'
+    for (let i = 0; i < pos.count; i++) {
+      let x = pos.getX(i)
+      let y = pos.getY(i)
+      let z = pos.getZ(i)
+      if (axis !== 'x') x = center.x + (x - center.x) * radiusScale
+      if (axis !== 'y') y = center.y + (y - center.y) * radiusScale
+      if (axis !== 'z') z = center.z + (z - center.z) * radiusScale
+      pos.setXYZ(i, x, y, z)
+    }
+  }
+
+  const scaleFromPoint = (geometry: PickerGeom, origin: Vector3, factor: number) => {
+    const pos = geometry.attributes.position
+    if (!pos) return
+    for (let i = 0; i < pos.count; i++) {
+      pos.setXYZ(
+        i,
+        origin.x + (pos.getX(i) - origin.x) * factor,
+        origin.y + (pos.getY(i) - origin.y) * factor,
+        origin.z + (pos.getZ(i) - origin.z) * factor,
+      )
+    }
+  }
+
+  const shrinkTorusTube = (geometry: PickerGeom, newTube: number) => {
+    const oldTube = geometry.parameters?.tube
+    const ringR = geometry.parameters?.radius
+    const pos = geometry.attributes.position
+    if (!oldTube || oldTube <= 0 || !ringR || !pos) return
+    const factor = newTube / oldTube
+    geometry.computeBoundingBox()
+    const box = geometry.boundingBox
+    if (!box) return
+    box.getSize(size)
+    if (size.x <= size.y && size.x <= size.z) normal.set(1, 0, 0)
+    else if (size.y <= size.x && size.y <= size.z) normal.set(0, 1, 0)
+    else normal.set(0, 0, 1)
+    for (let i = 0; i < pos.count; i++) {
+      scratch.set(pos.getX(i), pos.getY(i), pos.getZ(i))
+      const along = scratch.dot(normal)
+      planar.copy(scratch).addScaledVector(normal, -along)
+      if (planar.lengthSq() < 1e-12) continue
+      ringPoint.copy(planar).setLength(ringR)
+      offset.copy(scratch).sub(ringPoint).multiplyScalar(factor)
+      scratch.copy(ringPoint).add(offset)
+      pos.setXYZ(i, scratch.x, scratch.y, scratch.z)
+    }
+  }
+
+  // Picker vs visible (Three r172): cylinder radius 0.2 vs shaft 0.0075 / arrow 0.04;
+  // torus tube 0.1 vs 0.0075; XYZE sphere 0.25 (no solid visible); XYZ octahedron 0.2 vs 0.1;
+  // scale cube 0.2 vs 0.1; plane box 0.2 vs 0.15.
+  const CYLINDER_RADIUS_SCALE = 0.06 / 0.2
+  const TORUS_TUBE = 0.03
+  const XYZ_OCTA_SCALE = 0.12 / 0.2
+  const XYZE_SPHERE_SCALE = 0.12 / 0.25
+  const SCALE_CUBE_SCALE = 0.12 / 0.2
+  const PLANE_SCALE = 0.16 / 0.2
+
+  for (const mode of ['translate', 'rotate', 'scale'] as const) {
+    const group = pickerMap[mode]
+    if (!group) continue
+    group.traverse((obj) => {
+      const mesh = obj as Mesh
+      const geometry = mesh.geometry as PickerGeom | undefined
+      if (!geometry?.attributes?.position || mesh.userData.scadaPickerShrunk) return
+      const typ = geometry.type || ''
+      const params = geometry.parameters || {}
+      if (typ === 'CylinderGeometry' || params.radiusTop !== undefined || params.radiusBottom !== undefined) {
+        shrinkTowardLongAxis(geometry, CYLINDER_RADIUS_SCALE)
+      } else if (typ === 'TorusGeometry' || params.tube !== undefined) {
+        shrinkTorusTube(geometry, TORUS_TUBE)
+      } else if (typ === 'SphereGeometry') {
+        scaleFromPoint(geometry, center.set(0, 0, 0), XYZE_SPHERE_SCALE)
+      } else if (typ === 'OctahedronGeometry') {
+        scaleFromPoint(geometry, center.set(0, 0, 0), XYZ_OCTA_SCALE)
+      } else if (params.width !== undefined && params.height !== undefined && params.depth !== undefined) {
+        const thin = Math.min(params.width, params.height, params.depth)
+        const thick = Math.max(params.width, params.height, params.depth)
+        if (thin < thick * 0.2) {
+          geometry.computeBoundingBox()
+          const box = geometry.boundingBox
+          if (!box) return
+          box.getCenter(center)
+          box.getSize(size)
+          let thinAxis: 'x' | 'y' | 'z' = 'z'
+          if (size.x <= size.y && size.x <= size.z) thinAxis = 'x'
+          else if (size.y <= size.x && size.y <= size.z) thinAxis = 'y'
+          const pos = geometry.attributes.position
+          for (let i = 0; i < pos.count; i++) {
+            let x = pos.getX(i)
+            let y = pos.getY(i)
+            let z = pos.getZ(i)
+            if (thinAxis !== 'x') x = center.x + (x - center.x) * PLANE_SCALE
+            if (thinAxis !== 'y') y = center.y + (y - center.y) * PLANE_SCALE
+            if (thinAxis !== 'z') z = center.z + (z - center.z) * PLANE_SCALE
+            pos.setXYZ(i, x, y, z)
+          }
+        } else {
+          scaleFromPoint(geometry, center.set(0, 0, 0), SCALE_CUBE_SCALE)
+        }
+      } else {
+        return
+      }
+      finish(geometry, mesh)
+    })
+  }
 }
 
 export function createScene3D(
@@ -772,6 +982,7 @@ export function createScene3D(
   let selectedId: string | null = null
   let selectedIds: string[] = []
   let gizmoMode: TransformGizmoMode = 'translate'
+  let handMode = false
   let raf = 0
   let disposed = false
   let suppressTimer: ReturnType<typeof setTimeout> | null = null
@@ -781,9 +992,14 @@ export function createScene3D(
   let attachError: string | null = null
   let multiDragStarts: Map<
     string,
-    { position: Vector3; rotation: Vector3; scale: Vector3 }
+    { position: Vector3; rotation: Vector3; quaternion: Quaternion; scale: Vector3 }
   > | null = null
-  let primaryDragStart: { position: Vector3; rotation: Vector3; scale: Vector3 } | null = null
+  let primaryDragStart: {
+    position: Vector3
+    rotation: Vector3
+    quaternion: Quaternion
+    scale: Vector3
+  } | null = null
 
   let transformControls: TransformControls | null = null
   let gizmoHelper: Object3D | null = null
@@ -802,6 +1018,7 @@ export function createScene3D(
   const snapshotLocal = (obj: Object3D) => ({
     position: obj.position.clone(),
     rotation: new Vector3(obj.rotation.x, obj.rotation.y, obj.rotation.z),
+    quaternion: obj.quaternion.clone(),
     scale: obj.scale.clone(),
   })
 
@@ -839,7 +1056,9 @@ export function createScene3D(
     // 官方用法：connect 保持开启，由 TC 自己处理手柄拖拽
     transformControls = new TransformControls(camera, renderer.domElement)
     transformControls.setMode('translate')
-    transformControls.setSize(1.25)
+    // Default is 1; 1.25 made visible handles and (especially) hidden pickers oversized.
+    transformControls.setSize(1)
+    shrinkTransformControlPickers(transformControls)
     // 未选中时禁用，避免每次 pointerdown 都 setPointerCapture 干扰点选
     transformControls.enabled = false
     gizmoHelper = transformControls.getHelper()
@@ -880,13 +1099,13 @@ export function createScene3D(
         const patches: Record<string, Transform3D> = {}
         for (const id of selectedIds) {
           const o = objectMap.get(id)
-          if (o) patches[id] = readTransform(o)
+          if (o) patches[id] = readTransform(o, gizmoMode)
         }
         if (handlers.onTransformsCommit && Object.keys(patches).length) {
           handlers.onTransformsCommit(patches)
         } else if (selectedId) {
           const obj = objectMap.get(selectedId)
-          if (obj) handlers.onTransformCommit?.(selectedId, readTransform(obj))
+          if (obj) handlers.onTransformCommit?.(selectedId, readTransform(obj, gizmoMode))
         }
         // 松手后把手柄重新钉到选区中心
         if (selectedIds.length > 1) placeSelectionPivot()
@@ -909,16 +1128,12 @@ export function createScene3D(
 
       if (selectedIds.length > 1 && pivotDragStart) {
         const dPos = selectionPivot.position.clone().sub(pivotDragStart.position)
-        const dRot = new Vector3(
-          selectionPivot.rotation.x - pivotDragStart.rotation.x,
-          selectionPivot.rotation.y - pivotDragStart.rotation.y,
-          selectionPivot.rotation.z - pivotDragStart.rotation.z,
-        )
         const sx = selectionPivot.scale.x / Math.max(1e-6, pivotDragStart.scale.x)
         const sy = selectionPivot.scale.y / Math.max(1e-6, pivotDragStart.scale.y)
         const sz = selectionPivot.scale.z / Math.max(1e-6, pivotDragStart.scale.z)
         const center = pivotDragStart.position.clone()
-        const rotEuler = new Euler(dRot.x, dRot.y, dRot.z, 'XYZ')
+        // 枢轴从 0 转起，四元数就是世界增量。分量相加会在 ±90° 跳成另一组欧拉角。
+        const qDelta = selectionPivot.quaternion
 
         for (const id of selectedIds) {
           const o = objectMap.get(id)
@@ -931,14 +1146,10 @@ export function createScene3D(
             o.position.copy(start.position).add(dPos)
           } else if (gizmoMode === 'rotate') {
             if (startWorld) {
-              const offset = startWorld.clone().sub(center).applyEuler(rotEuler)
+              const offset = startWorld.clone().sub(center).applyQuaternion(qDelta)
               o.position.copy(center.clone().add(offset))
             }
-            o.rotation.set(
-              start.rotation.x + dRot.x,
-              start.rotation.y + dRot.y,
-              start.rotation.z + dRot.z,
-            )
+            o.quaternion.copy(qDelta).multiply(start.quaternion)
           } else {
             o.scale.set(
               Math.max(1e-4, start.scale.x * sx),
@@ -961,11 +1172,7 @@ export function createScene3D(
       const primary = objectMap.get(selectedId)
       if (!primary) return
       const dPos = primary.position.clone().sub(primaryDragStart.position)
-      const dRot = new Vector3(
-        primary.rotation.x - primaryDragStart.rotation.x,
-        primary.rotation.y - primaryDragStart.rotation.y,
-        primary.rotation.z - primaryDragStart.rotation.z,
-      )
+      const qDelta = primary.quaternion.clone().multiply(primaryDragStart.quaternion.clone().invert())
       const dScale = new Vector3(
         primary.scale.x / Math.max(1e-6, primaryDragStart.scale.x),
         primary.scale.y / Math.max(1e-6, primaryDragStart.scale.y),
@@ -979,11 +1186,7 @@ export function createScene3D(
         if (gizmoMode === 'translate') {
           o.position.copy(start.position).add(dPos)
         } else if (gizmoMode === 'rotate') {
-          o.rotation.set(
-            start.rotation.x + dRot.x,
-            start.rotation.y + dRot.y,
-            start.rotation.z + dRot.z,
-          )
+          o.quaternion.copy(qDelta).multiply(start.quaternion)
         } else {
           o.scale.set(
             Math.max(1e-4, start.scale.x * dScale.x),
@@ -1149,24 +1352,76 @@ const syncSelectionHelpers = (ids: string[]) => {
 
   /** 参考视距：约等于默认相机到原点距离，此时面板为设计稿像素大小 */
   const PANEL_WORLD_REF_DIST = 10
+  /** 「看选中」时面板锚点盒子很小，把包围盒抬到这个尺寸，避免镜头贴到锚点上把面板放大出画面 */
+  const PANEL_FOCUS_MIN_M = 4
   const _panelCamPos = new Vector3()
   const _panelWorldPos = new Vector3()
+  const _panelNdc = new Vector3()
+
+  /** 设计稿像素尺寸。不用 offsetWidth：CSS zoom 会把它一起放大，下一帧就会算错。 */
+  const panelLayoutSize = (wrap: HTMLElement, objectId?: string) => {
+    const zoom = Number.parseFloat(wrap.style.zoom || '')
+    const z = Number.isFinite(zoom) && zoom > 0 ? zoom : 1
+    const panelEl = wrap.querySelector('.scada-3d-panel')
+    if (panelEl instanceof HTMLElement) {
+      const rect = panelEl.getBoundingClientRect()
+      const width = rect.width / z
+      const height = rect.height / z
+      if (width >= 1 && height >= 1) return { width, height }
+    }
+    // 首帧尚未布局时，用面板设计稿尺寸做视口约束，避免先以错误 zoom 撑出画面
+    const node = objectId ? nodeMap.get(objectId) : undefined
+    if (node?.panel) {
+      const size = resolvePanelContentSize(node.panel.width, node.panel.height)
+      if (size.width >= 1 && size.height >= 1) return { width: size.width, height: size.height }
+    }
+    return null
+  }
+
+  /**
+   * 底边对齐锚点。近大远小，但放不进视口就缩小，避免标题和按钮跑到画面外。
+   */
+  const clampPanelZoom = (s: number, layout: { width: number; height: number }) => {
+    const viewW = container.clientWidth
+    const viewH = container.clientHeight
+    if (viewW < 2 || viewH < 2) return s
+    _panelNdc.copy(_panelWorldPos).project(camera)
+    if (_panelNdc.z < -1 || _panelNdc.z > 1) return s
+    const sx = (_panelNdc.x * 0.5 + 0.5) * viewW
+    const sy = (-_panelNdc.y * 0.5 + 0.5) * viewH
+    const margin = 8
+    const roomUp = sy - margin
+    const roomX = Math.min(sx, viewW - sx) * 2 - margin * 2
+    const maxH = roomUp >= 32 ? roomUp : Math.max(viewH - margin * 2, 32)
+    const maxW = roomX >= 32 ? roomX : Math.max(viewW - margin * 2, 32)
+    let next = s
+    if (next * layout.height > maxH) next = maxH / layout.height
+    if (next * layout.width > maxW) next = Math.min(next, maxW / layout.width)
+    return next
+  }
 
   /**
    * CSS2D 按距离缩放，近大远小（参考视距时为设计稿像素大小）。
    * 必须用 zoom，不能用 transform:scale：后者先按设计稿栅格化再拉伸，近处字体会糊。
    */
+  let panelScaleLayoutRetries = 0
   const updatePanelWorldScales = () => {
     if (panelMap.size === 0) return
+    camera.updateMatrixWorld(true)
     camera.getWorldPosition(_panelCamPos)
-    for (const [, pan] of panelMap) {
+    let needRelayout = false
+    for (const [objectId, pan] of panelMap) {
       const wrap = pan.element.querySelector(
         '.scada-3d-panel__world-scale',
       ) as HTMLElement | null
       if (!wrap) continue
+      pan.updateWorldMatrix(true, false)
       pan.getWorldPosition(_panelWorldPos)
       const dist = Math.max(0.35, _panelWorldPos.distanceTo(_panelCamPos))
-      const s = PANEL_WORLD_REF_DIST / dist
+      const layout = panelLayoutSize(wrap, objectId)
+      if (!layout) needRelayout = true
+      let s = PANEL_WORLD_REF_DIST / dist
+      if (layout) s = clampPanelZoom(s, layout)
       if (Math.abs(s - 1) < 0.001) {
         wrap.style.zoom = ''
         wrap.style.transform = ''
@@ -1177,6 +1432,14 @@ const syncSelectionHelpers = (ids: string[]) => {
       }
       // Konva 画布不会随 zoom 重绘；提高 pixelRatio 抵消放大糊边
       getPanelKonvaRuntime(pan.element as HTMLElement)?.setWorldScale(s)
+    }
+    if (needRelayout) {
+      if (panelScaleLayoutRetries < 4) {
+        panelScaleLayoutRetries += 1
+        invalidate()
+      }
+    } else {
+      panelScaleLayoutRetries = 0
     }
   }
 
@@ -1569,7 +1832,7 @@ const syncSelectionHelpers = (ids: string[]) => {
     gizmoMode = clampGizmoModeForSelection(gizmoMode)
     const nodeLocked = selectedId ? Boolean(nodeMap.get(selectedId)?.locked) : false
     gizmoWanted =
-      enableGizmo && Boolean(selectedId) && opts?.gizmo !== false && !nodeLocked
+      enableGizmo && !handMode && Boolean(selectedId) && opts?.gizmo !== false && !nodeLocked
     if (gizmoWanted) attachGizmo(selectedId)
     else attachGizmo(null)
     syncPanelGizmoPass()
@@ -1995,6 +2258,16 @@ const syncSelectionHelpers = (ids: string[]) => {
     schedule()
   }
 
+  let runtimeDrag: {
+    pointerId: number
+    objectId: string
+    axis: 'h' | 'v' | 'd'
+    link: { tagId: string; inMin: number; inMax: number; outMin: number; outMax: number }
+    startClientX: number
+    startClientY: number
+    startPos: Vector3
+  } | null = null
+
   const applyVisual = (
     objectId: string,
     visual: Object3DNode,
@@ -2009,7 +2282,7 @@ const syncSelectionHelpers = (ids: string[]) => {
       })
       ignoreGroupAnchorBounds(obj)
     }
-    if (!gizmoDragging || selectedId !== objectId) {
+    if ((!gizmoDragging || selectedId !== objectId) && runtimeDrag?.objectId !== objectId) {
       const [px, py, pz] = visual.transform.position
       const [rx, ry, rz] = visual.transform.rotation
       const [sx, sy, sz] = visual.transform.scale
@@ -2097,6 +2370,19 @@ const syncSelectionHelpers = (ids: string[]) => {
     invalidate()
   }
 
+  const setHandMode = (on: boolean) => {
+    handMode = on
+    if (on) {
+      gizmoWanted = false
+      attachGizmo(null)
+    } else if (enableGizmo && selectedId && !nodeMap.get(selectedId)?.locked) {
+      gizmoWanted = true
+      attachGizmo(selectedId)
+    }
+    syncPanelGizmoPass()
+    invalidate()
+  }
+
   const setGizmoMode = (mode: TransformGizmoMode) => {
     gizmoMode = clampGizmoModeForSelection(mode)
     if (!transformControls) return
@@ -2159,6 +2445,24 @@ const syncSelectionHelpers = (ids: string[]) => {
       const center = objs[0].getWorldPosition(new Vector3())
       box.setFromCenterAndSize(center, new Vector3(1, 1, 1))
     }
+    const panelFocusOnly = ids.every((id) => {
+      const node = nodeMap.get(id)
+      return Boolean(node?.panel) && !node?.modelResourceId
+    })
+    if (panelFocusOnly) {
+      const center = new Vector3()
+      const size = new Vector3()
+      box.getCenter(center)
+      box.getSize(size)
+      box.setFromCenterAndSize(
+        center,
+        new Vector3(
+          Math.max(size.x, PANEL_FOCUS_MIN_M),
+          Math.max(size.y, PANEL_FOCUS_MIN_M),
+          Math.max(size.z, PANEL_FOCUS_MIN_M),
+        ),
+      )
+    }
     restoreDampingAfterSuppress = controls.enableDamping
     const ok = fitCameraToBox(camera, controls, box, { leaveDampingOff: true })
     if (ok) {
@@ -2178,14 +2482,6 @@ const syncSelectionHelpers = (ids: string[]) => {
     return ok
   }
 
-  let runtimeDrag: {
-    objectId: string
-    axis: 'h' | 'v' | 'd'
-    link: { tagId: string; inMin: number; inMax: number; outMin: number; outMax: number }
-    startClientX: number
-    startClientY: number
-    startPos: Vector3
-  } | null = null
   let suppressNextClick = false
   /**
    * 运行端轻点（键位不变）：
@@ -2650,6 +2946,7 @@ const syncSelectionHelpers = (ids: string[]) => {
           runtimeTap.forcedGesture = true
           endOrbitPointer(e.pointerId)
           runtimeDrag = {
+            pointerId: e.pointerId,
             objectId: pendingRuntimeDrag.objectId,
             axis: resolved.axis,
             link: resolved.link,
@@ -2692,47 +2989,41 @@ const syncSelectionHelpers = (ids: string[]) => {
     invalidate()
   }
 
+  const finishRuntimeDrag = (pointerId?: number) => {
+    if (!runtimeDrag) return false
+    const drag = runtimeDrag
+    const id = pointerId ?? drag.pointerId
+    try {
+      renderer.domElement.releasePointerCapture(id)
+    } catch {
+      /* ignore */
+    }
+    const obj = objectMap.get(drag.objectId)
+    if (obj) {
+      const offset =
+        drag.axis === 'h' ? obj.position.x : drag.axis === 'v' ? obj.position.y : obj.position.z
+      const value = mapDragOffsetToTag(offset, drag.link)
+      handlers.onDragWrite?.(drag.objectId, drag.axis, drag.link.tagId, value)
+    }
+    runtimeDrag = null
+    if (!gizmoDragging) controls.enabled = true
+    invalidate()
+    runtimeTap = null
+    pendingRuntimeDrag = null
+    suppressNextClick = true
+    return true
+  }
+
   const onPointerUp = (e: PointerEvent) => {
     if (enableGizmo) return
-
-    if (runtimeDrag) {
-      try {
-        renderer.domElement.releasePointerCapture(e.pointerId)
-      } catch {
-        /* ignore */
-      }
-      const obj = objectMap.get(runtimeDrag.objectId)
-      if (obj) {
-        const offset =
-          runtimeDrag.axis === 'h'
-            ? obj.position.x
-            : runtimeDrag.axis === 'v'
-              ? obj.position.y
-              : obj.position.z
-        const value = mapDragOffsetToTag(offset, runtimeDrag.link)
-        handlers.onDragWrite?.(
-          runtimeDrag.objectId,
-          runtimeDrag.axis,
-          runtimeDrag.link.tagId,
-          value,
-        )
-      }
-      runtimeDrag = null
-      controls.enabled = true
-      invalidate()
-      runtimeTap = null
-      pendingRuntimeDrag = null
-      suppressNextClick = false
-      return
-    }
-
+    if (finishRuntimeDrag(e.pointerId)) return
     finishRuntimeTapFromEvent(e)
   }
 
   /** canvas 丢 pointerup 时的兜底（capture 在 window 上） */
   const onWindowRuntimePointerUp = (e: PointerEvent) => {
     if (enableGizmo || e.button !== 0) return
-    if (runtimeDrag) return
+    if (finishRuntimeDrag(e.pointerId)) return
     if (!runtimeTap || runtimeTap.pointerId !== e.pointerId) return
     finishRuntimeTapFromEvent(e)
   }
@@ -2743,6 +3034,7 @@ const syncSelectionHelpers = (ids: string[]) => {
    */
   const onRuntimePointerCancel = (e: PointerEvent) => {
     if (enableGizmo) return
+    if (finishRuntimeDrag(e.pointerId)) return
     if (!runtimeTap || runtimeTap.pointerId !== e.pointerId) return
     runtimeTap = null
     pendingRuntimeDrag = null
@@ -2820,10 +3112,8 @@ const syncSelectionHelpers = (ids: string[]) => {
       orbitPointer = false
     }
 
-    if (runtimeDrag) {
-      runtimeDrag = null
-      if (!gizmoDragging) controls.enabled = true
-    }
+    // 指针被吞掉时仍要提交拖拽写值，不能只清状态
+    if (runtimeDrag) finishRuntimeDrag()
     pendingRuntimeDrag = null
     // runtimeTap 留给 canvas/window pointerup 消费
     if (orbitSuppressGesture) restoreOrbitAfterGesture()
@@ -2834,8 +3124,9 @@ const syncSelectionHelpers = (ids: string[]) => {
     if (disposed) return
     if (e.buttons !== 0) return
     if (e.type === 'pointerup') {
-      // 正常松手：单击交由 onWindowRuntimePointerUp / canvas pointerup 收尾
-      if (runtimeTap || pendingRuntimeDrag) return
+      // 正常松手：单击 / 拖拽写值交由 onWindowRuntimePointerUp / canvas pointerup 收尾。
+      // 不能在这里清掉 runtimeDrag，否则写值回调还没跑就被丢掉。
+      if (runtimeTap || pendingRuntimeDrag || runtimeDrag) return
     } else if (runtimeTap || pendingRuntimeDrag) {
       // 已经抬起却没收到 pointerup（被系统菜单/浏览器手势吞掉）：
       // 候选已失效，先清掉再收尾，否则 Orbit 会一直跟着鼠标转
@@ -2968,6 +3259,7 @@ const syncSelectionHelpers = (ids: string[]) => {
     selectObjects,
     applyVisual,
     setGizmoMode,
+    setHandMode,
     getGizmoMode: () => gizmoMode,
     getObjectIds: () => [...objectMap.keys()],
     getSelectedObjectIds: () => [...selectedIds],

@@ -1,12 +1,11 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
 import Canvas2DRuntime from '@/components/runtime/Canvas2DRuntime.vue'
 import Canvas3DRuntime from '@/components/runtime/Canvas3DRuntime.vue'
 import { useProjectStore } from '@/stores/project'
 import { useTagStore } from '@/stores/tag'
-import { useOutputLogStore } from '@/stores/outputLog'
+import { ensureOutputLogSync, useOutputLogStore } from '@/stores/outputLog'
 import {
   loadLatestPublishPackage,
   loadPublishPackage,
@@ -21,6 +20,11 @@ const router = useRouter()
 const project = useProjectStore()
 const tags = useTagStore()
 const log = useOutputLogStore()
+
+function openLogManager() {
+  window.open('/logs', 'scada-logs')
+}
+
 
 const ready = ref(false)
 const loadError = ref('')
@@ -235,6 +239,7 @@ function onStorage(e: StorageEvent) {
 let stopLiveTrendSampling: (() => void) | null = null
 
 onMounted(async () => {
+  ensureOutputLogSync()
   try {
     syncShowGridFromRoute()
     await ensurePublished()
@@ -250,7 +255,7 @@ onMounted(async () => {
     }
   } catch (err) {
     loadError.value = err instanceof Error ? err.message : '运行端加载失败'
-    ElMessage.error(loadError.value)
+    log.error(loadError.value, '运行端')
   } finally {
     ready.value = true
   }
@@ -328,6 +333,10 @@ watch(
           </div>
         </div>
       </div>
+      <div v-if="tags.realtimeOffline" class="runtime-offline-banner" role="alert">
+        {{ tags.realtimeOfflineMessage }}
+      </div>
+      <button type="button" class="runtime-log-entry" title="日志管理" @click="openLogManager">日志</button>
     </template>
   </div>
 </template>
@@ -342,12 +351,48 @@ watch(
   overflow: hidden;
 }
 
+.runtime-offline-banner {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 99999;
+  padding: 8px 16px;
+  background: #7f1d1d;
+  color: #fecaca;
+  font-size: 14px;
+  font-weight: 600;
+  text-align: center;
+  letter-spacing: 0.02em;
+  pointer-events: none;
+}
+
 .boot {
   display: grid;
   place-items: center;
   height: 100%;
   color: var(--scada-muted, #9aa3b2);
   font-size: 14px;
+}
+
+.runtime-log-entry {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  z-index: 99990;
+  padding: 4px 10px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.72);
+  color: #cbd5e1;
+  font-size: 12px;
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.runtime-log-entry:hover {
+  color: #f8fafc;
+  border-color: rgba(61, 139, 253, 0.7);
 }
 
 .boot.error {

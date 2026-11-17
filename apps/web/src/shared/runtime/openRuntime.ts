@@ -11,16 +11,18 @@ const RUNTIME_BOOT_KEY = 'scada.runtime.boot'
 export async function syncCurrentProjectAndOpenRuntime(
   _router: unknown,
   from: OpenRuntimeFrom = 'designer',
-  opts?: { showGrid?: boolean },
+  opts?: { showGrid?: boolean; pageId?: string },
 ): Promise<{ publishVersion: string; projectName: string }> {
   const project = useProjectStore()
   const keepPageId = project.activePageId
+  const openPageId = opts?.pageId || keepPageId
   const pkg = await project.publish()
   if (keepPageId && project.document.pages.some((p) => p.id === keepPageId)) {
     project.setActivePage(keepPageId)
   }
 
-  const active = project.activePage
+  const active =
+    (openPageId && project.document.pages.find((p) => p.id === openPageId)) || project.activePage
   const pageW = active && 'width' in active ? Number(active.width) || 1920 : 1920
   const pageH = active && 'height' in active ? Number(active.height) || 1080 : 1080
 
@@ -39,7 +41,7 @@ export async function syncCurrentProjectAndOpenRuntime(
   qs.set('projectId', pkg.manifest.projectId)
   qs.set('v', pkg.manifest.publishVersion)
   qs.set('publishedAt', String(pkg.manifest.publishedAt))
-  if (keepPageId) qs.set('page', keepPageId)
+  if (openPageId) qs.set('page', openPageId)
   qs.set('showGrid', opts?.showGrid ? '1' : '0')
   qs.set('_ts', String(Date.now()))
 
@@ -51,7 +53,7 @@ export async function syncCurrentProjectAndOpenRuntime(
         projectId: pkg.manifest.projectId,
         publishVersion: pkg.manifest.publishVersion,
         publishedAt: pkg.manifest.publishedAt,
-        pageId: keepPageId ?? null,
+        pageId: openPageId ?? null,
         showGrid: opts?.showGrid === true,
         at: Date.now(),
       }),

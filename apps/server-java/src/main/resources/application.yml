@@ -40,7 +40,7 @@ webscada:
     timeout-ms: ${MCD4000_TIMEOUT_MS:15000}
     # 数据中台 HTTPS 证书常不被 JVM 信任；默认放行，可用 MCD4000_INSECURE_SSL=false 关闭
     insecure-ssl: ${MCD4000_INSECURE_SSL:true}
-  # 设备协议 modbus_tcp：按变量扫描周期读点。poll-ms 只用于没有采集点时的连通探测。
+  # 设备协议 modbus_tcp / modbus_udp：按变量扫描周期读点。poll-ms 只用于没有采集点时的连通探测。
   modbus:
     enabled: ${MODBUS_ENABLED:true}
     poll-ms: ${MODBUS_POLL_MS:1000}
@@ -50,9 +50,9 @@ webscada:
     low-word-first: ${MODBUS_LOW_WORD_FIRST:true}
     # isolated=每设备独立队列（默认）；legacy=全局串行（回滚）
     scheduler: ${MODBUS_SCHEDULER:isolated}
-    # 设备连失败后冷却，冷却期内不发起 TCP
+    # 只有套接字连不上才计。连续 3 次才冷却，冷却期内不再连接。读超时和 UDP 丢包不进冷却。
     device-cooldown-ms: ${MODBUS_DEVICE_COOLDOWN_MS:3000}
-    max-fail-before-cooldown: ${MODBUS_MAX_FAIL_BEFORE_COOLDOWN:1}
+    max-fail-before-cooldown: ${MODBUS_MAX_FAIL_BEFORE_COOLDOWN:3}
     # 逐点成功 DEBUG；掉线/写值/点失败仍走 INFO/WARN
     trace: ${MODBUS_TRACE:false}
   # 通信骨架默认关闭，避免没有链路配置时启动失败。打开后才会拉起 Supervisor。

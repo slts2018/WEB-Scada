@@ -385,6 +385,77 @@ function liveAlarmHistory(widgetId: string, columns: unknown) {
   }
 }
 
+/** 品质变坏时记住并回放上次有效外观，避免从组态默认值重新渲染。 */
+type CachedVisual = {
+  visible?: boolean
+  transform?: Partial<Widget2D['transform']>
+  style?: Record<string, unknown>
+  props?: Record<string, unknown>
+}
+
+const lastGoodVisual = new Map<string, CachedVisual>()
+
+const STYLE_KEYS = ['fill', 'stroke', 'fill2', 'accent', 'emptyFill', 'opacity'] as const
+const PROP_KEYS = ['level', 'fillRatio', 'fillOrient', 'fillDirection', '_runtimeEnabled', 'on', 'running', 'open'] as const
+
+function visualCacheKey(widgetId: string, kind: string, type: string, tagId: string): string {
+  return `${widgetId}|${kind}|${type}|${tagId}`
+}
+
+function captureVisual(widget: Widget2D): CachedVisual {
+  const style: Record<string, unknown> = {}
+  for (const key of STYLE_KEYS) {
+    if (widget.style && key in widget.style) style[key] = (widget.style as Record<string, unknown>)[key]
+  }
+  const props: Record<string, unknown> = {}
+  for (const key of PROP_KEYS) {
+    if (widget.props && key in widget.props) props[key] = widget.props[key]
+  }
+  return {
+    visible: widget.visible,
+    transform: { ...widget.transform },
+    style,
+    props,
+  }
+}
+
+function rememberVisualDiff(widget: Widget2D, before: CachedVisual, key: string) {
+  const snap: CachedVisual = {}
+  if (widget.visible !== before.visible) snap.visible = widget.visible
+  const transform: Partial<Widget2D['transform']> = {}
+  const curT = widget.transform
+  const prevT = before.transform
+  if (curT && prevT) {
+    for (const k of Object.keys(curT) as (keyof Widget2D['transform'])[]) {
+      if (curT[k] !== prevT[k]) (transform as Record<string, unknown>)[String(k)] = curT[k]
+    }
+  }
+  if (Object.keys(transform).length) snap.transform = transform
+  const style: Record<string, unknown> = {}
+  const curStyle = (widget.style || {}) as Record<string, unknown>
+  for (const key of STYLE_KEYS) {
+    if (curStyle[key] !== before.style?.[key]) style[key] = curStyle[key]
+  }
+  if (Object.keys(style).length) snap.style = style
+  const props: Record<string, unknown> = {}
+  const curProps = widget.props || {}
+  for (const key of PROP_KEYS) {
+    if (curProps[key] !== before.props?.[key]) props[key] = curProps[key]
+  }
+  if (Object.keys(props).length) snap.props = props
+  if (snap.visible === undefined && !snap.transform && !snap.style && !snap.props) return
+  lastGoodVisual.set(key, snap)
+}
+
+function restoreLastGoodVisual(widget: Widget2D, key: string) {
+  const snap = lastGoodVisual.get(key)
+  if (!snap) return
+  if (snap.visible !== undefined) widget.visible = snap.visible
+  if (snap.transform) widget.transform = { ...widget.transform, ...snap.transform }
+  if (snap.style) widget.style = { ...widget.style, ...snap.style }
+  if (snap.props) widget.props = { ...widget.props, ...snap.props }
+}
+
 /** 执行单条动画连接（相对设计态 source 做位移） */
 function applyAnimationLink(
   widget: Widget2D,
@@ -394,7 +465,18 @@ function applyAnimationLink(
   flags: { blink: boolean },
 ): void {
   if (!link.enabled || !tag) return
-  if (tag.quality === 'Bad' || tag.quality === 'Offline') return
+  // Bad/Offline：数值/文本仍套用最后一值；位移/显隐/颜色等不按坏点重新驱动。
+  // 本会话已有有效外观则回放缓存；冷启动尚未见过 Good 帧时，用服务端最后一值
+  // 按连接映射算出外观并记下，避免退回组态默认值。
+  const qualityBad = tag.quality === 'Bad' || tag.quality === 'Offline'
+  const visualKey = visualCacheKey(widget.id, 'link', link.type, tag.tagId)
+  if (qualityBad && link.type !== 'valueOut' && link.type !== 'textOut') {
+    if (lastGoodVisual.has(visualKey)) {
+      restoreLastGoodVisual(widget, visualKey)
+      return
+    }
+  }
+  const before = captureVisual(widget)
 
   switch (link.type) {
     case 'hide': {
@@ -469,7 +551,7 @@ function applyAnimationLink(
     }
     case 'valueOut': {
       if (trendCurvesTakeOver(widget)) break
-      if (applyTrendLiveSample(widget, tag)) break
+      if (!qualityBad && applyTrendLiveSample(widget, tag)) break
       applyValueToWidget(widget, tag.value, link.format, boolLabels(tag.tagId), tag.tagId)
       break
     }
@@ -495,6 +577,10 @@ function applyAnimationLink(
       break
     }
   }
+  if (before && link.type !== 'valueOut' && link.type !== 'textOut') {
+    rememberVisualDiff(widget, before, visualKey)
+    if (qualityBad && !lastGoodVisual.has(visualKey)) lastGoodVisual.set(visualKey, {})
+  }
 }
 
 function applyPropBinding(
@@ -502,7 +588,18 @@ function applyPropBinding(
   binding: PropBinding,
   tag: TagValue | undefined,
 ): void {
-  if (!tag || tag.quality === 'Bad' || tag.quality === 'Offline') return
+  if (!tag) return
+  const qualityBad = tag.quality === 'Bad' || tag.quality === 'Offline'
+  const visualKey = visualCacheKey(widget.id, 'bind', binding.prop, tag.tagId)
+  // 品质坏时仍套用最后一值/文本；其它外观绑定回放上次有效外观。
+  // 冷启动无缓存时用服务端最后一值按绑定算出外观。
+  if (qualityBad && binding.prop !== 'text' && binding.prop !== 'value') {
+    if (lastGoodVisual.has(visualKey)) {
+      restoreLastGoodVisual(widget, visualKey)
+      return
+    }
+  }
+  const before = captureVisual(widget)
   const v = tag.value
   switch (binding.prop) {
     case 'text':
@@ -510,7 +607,7 @@ function applyPropBinding(
       break
     case 'value':
       if (trendCurvesTakeOver(widget)) break
-      if (applyTrendLiveSample(widget, tag)) break
+      if (!qualityBad && applyTrendLiveSample(widget, tag)) break
       applyValueToWidget(widget, v, binding.format, boolLabels(tag.tagId), tag.tagId)
       break
     case 'fill':
@@ -540,6 +637,10 @@ function applyPropBinding(
       break
     }
   }
+  if (before && binding.prop !== 'text' && binding.prop !== 'value') {
+    rememberVisualDiff(widget, before, visualKey)
+    if (qualityBad && !lastGoodVisual.has(visualKey)) lastGoodVisual.set(visualKey, {})
+  }
 }
 
 function matchStateRange(
@@ -562,6 +663,14 @@ function applyStateAnimation(
   flags: { blink: boolean },
 ): void {
   if (!tag) return
+  const visualKey = visualCacheKey(widget.id, 'state', rule.target, tag.tagId)
+  if (tag.quality === 'Bad' || tag.quality === 'Offline') {
+    if (lastGoodVisual.has(visualKey)) {
+      restoreLastGoodVisual(widget, visualKey)
+      return
+    }
+  }
+  const before = captureVisual(widget)
   for (const range of rule.ranges) {
     if (!matchStateRange(tag.value, range)) continue
     const apply = range.apply
@@ -586,6 +695,10 @@ function applyStateAnimation(
     if (apply.text !== undefined) widget.props = { ...widget.props, text: apply.text }
     break
   }
+  rememberVisualDiff(widget, before, visualKey)
+  if ((tag.quality === 'Bad' || tag.quality === 'Offline') && !lastGoodVisual.has(visualKey)) {
+    lastGoodVisual.set(visualKey, {})
+  }
 }
 
 function applyNumericAnimation(
@@ -595,22 +708,38 @@ function applyNumericAnimation(
   tag: TagValue | undefined,
 ): void {
   if (!tag) return
+  const visualKey = visualCacheKey(widget.id, 'numeric', rule.target, tag.tagId)
+  if (tag.quality === 'Bad' || tag.quality === 'Offline') {
+    if (lastGoodVisual.has(visualKey)) {
+      restoreLastGoodVisual(widget, visualKey)
+      return
+    }
+  }
   const n = asNumber(tag.value)
   if (n === null) return
+  const before = captureVisual(widget)
   const out = mapRange(n, rule.inMin, rule.inMax, rule.outMin, rule.outMax)
   if (rule.target === 'fillRatio') {
     applyFillPercent(widget, out, 'v', 'start')
+    rememberVisualDiff(widget, before, visualKey)
+    if ((tag.quality === 'Bad' || tag.quality === 'Offline') && !lastGoodVisual.has(visualKey)) lastGoodVisual.set(visualKey, {})
     return
   }
   if (rule.target === 'x') {
     widget.transform = { ...widget.transform, x: source.transform.x + out }
+    rememberVisualDiff(widget, before, visualKey)
+    if ((tag.quality === 'Bad' || tag.quality === 'Offline') && !lastGoodVisual.has(visualKey)) lastGoodVisual.set(visualKey, {})
     return
   }
   if (rule.target === 'y') {
     widget.transform = { ...widget.transform, y: source.transform.y + out }
+    rememberVisualDiff(widget, before, visualKey)
+    if ((tag.quality === 'Bad' || tag.quality === 'Offline') && !lastGoodVisual.has(visualKey)) lastGoodVisual.set(visualKey, {})
     return
   }
   widget.transform = { ...widget.transform, [rule.target]: out }
+  rememberVisualDiff(widget, before, visualKey)
+  if ((tag.quality === 'Bad' || tag.quality === 'Offline') && !lastGoodVisual.has(visualKey)) lastGoodVisual.set(visualKey, {})
 }
 
 /** 根据当前 Tag 值解析图元运行态外观 */
@@ -739,7 +868,7 @@ export function resolveWidgetVisual(
     const slices = chartSlices(widget.props).map((slice) => {
       if (!slice.tagId) return slice
       const tag = getTag(slice.tagId)
-      if (!tag || tag.quality === 'Bad' || tag.quality === 'Offline') return slice
+      if (!tag) return slice
       const n = asNumber(tag.value)
       if (n === null) return slice
       return { ...slice, value: n }
@@ -756,14 +885,14 @@ export function resolveWidgetVisual(
         let x = item.x
         if (item.tagId) {
           const tag = getTag(item.tagId)
-          if (tag && tag.quality !== 'Bad' && tag.quality !== 'Offline') {
+          if (tag) {
             const n = asNumber(tag.value)
             if (n !== null) value = n
           }
         }
         if (item.xTagId) {
           const tag = getTag(item.xTagId)
-          if (tag && tag.quality !== 'Bad' && tag.quality !== 'Offline') {
+          if (tag) {
             const n = asNumber(tag.value)
             if (n !== null) x = n
           }

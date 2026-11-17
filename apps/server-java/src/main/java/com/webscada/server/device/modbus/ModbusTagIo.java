@@ -6,6 +6,7 @@ import com.webscada.server.model.TagMeta;
 import com.webscada.server.service.DeviceStatusService;
 import com.webscada.server.store.DeviceFileStore;
 import java.io.IOException;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -15,7 +16,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
-/** Modbus TCP 变量读写（按 Tag.address 解析），对齐 Flight 类型/长度/字序。 */
+/** Modbus TCP/UDP 变量读写（按 Tag.address 解析），对齐 Flight 类型/长度/字序。 */
 @Service
 public class ModbusTagIo {
   private static final Logger log = LoggerFactory.getLogger(ModbusTagIo.class);
@@ -23,10 +24,12 @@ public class ModbusTagIo {
   private final DeviceFileStore devices;
   private final DeviceStatusService status;
   private final ScadaProperties props;
-  private final ConcurrentHashMap<String, ModbusTcpClient> clients = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, ModbusClient> clients = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, ModbusChannel> channels = new ConcurrentHashMap<>();
-  /** 当前停在备用地址。备还通着不切回主；备断了才回到主。 */
+  /** 当前停在备用地址。只有另一侧本次读写成功才记下；备通着不主动切回主。 */
   private final ConcurrentHashMap<String, Boolean> preferBackup = new ConcurrentHashMap<>();
+  /** 连续整批没有好点的次数。TCP 和 UDP 共用。有好点或设备已应答就清零。满 3 次当场换口。 */
+  private final ConcurrentHashMap<String, Integer> badRounds = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, Object> gates = new ConcurrentHashMap<>();
   private final ModbusAcqLog acqLog = new ModbusAcqLog();
 
@@ -53,7 +56,16 @@ public class ModbusTagIo {
   public static boolean isModbusProtocol(String protocol) {
     if (protocol == null) return false;
     String p = protocol.trim().toLowerCase(Locale.ROOT);
-    return "modbus_tcp".equals(p) || "modbus-tcp".equals(p);
+    return "modbus_tcp".equals(p)
+        || "modbus-tcp".equals(p)
+        || "modbus_udp".equals(p)
+        || "modbus-udp".equals(p);
+  }
+
+  public static boolean isUdpProtocol(String protocol) {
+    if (protocol == null) return false;
+    String p = protocol.trim().toLowerCase(Locale.ROOT);
+    return "modbus_udp".equals(p) || "modbus-udp".equals(p);
   }
 
   public record ReadOk(Object value, String quality) {}
@@ -78,6 +90,7 @@ public class ModbusTagIo {
   public void write(TagMeta meta, Object value) throws Exception {
     DeviceMeta dev = devices.get(meta.deviceId());
     if (dev == null) throw new IllegalStateException("device not found");
+    if (!dev.enabled()) throw new IllegalStateException("设备已停用");
     ModbusAddress addr = ModbusAddress.parse(meta.address());
     if (addr == null) throw new IllegalArgumentException("bad address: " + meta.address());
     if (!addr.writableArea()) {
@@ -101,6 +114,15 @@ public class ModbusTagIo {
           meta.address(),
           value);
     } catch (Exception e) {
+      if (classify(e) == FailKind.TIMEOUT && confirmWrite(dev, meta, addr, value)) {
+        log.info(
+            "modbus write ok after timeout (read-back confirmed) device={} tag={} addr={} value={}",
+            meta.deviceId(),
+            meta.tagId(),
+            meta.address(),
+            value);
+        return;
+      }
       String err = e.getMessage() == null ? e.toString() : e.getMessage();
       log.warn(
           "modbus write fail device={} tag={} addr={} value={} err={}",
@@ -111,6 +133,62 @@ public class ModbusTagIo {
           err);
       throw e;
     }
+  }
+
+  /** 写请求超时后回读一次：若目标值已在设备上，按成功返回，避免提示失败却实际已写入。 */
+  private boolean confirmWrite(DeviceMeta dev, TagMeta meta, ModbusAddress addr, Object value) {
+    try {
+      ModbusChannel ch = channelFor(dev);
+      Object got;
+      synchronized (gate(dev.deviceId())) {
+        got =
+            withLink(
+                dev,
+                ch,
+                client -> readValue(client, ch, meta, addr));
+      }
+      if (valuesMatch(got, value, meta)) return true;
+      log.info(
+          "modbus write timeout read-back mismatch device={} tag={} written={} read={}",
+          meta.deviceId(),
+          meta.tagId(),
+          value,
+          got);
+      return false;
+    } catch (Exception ex) {
+      log.info(
+          "modbus write timeout read-back failed device={} tag={} err={}",
+          meta.deviceId(),
+          meta.tagId(),
+          ex.toString());
+      return false;
+    }
+  }
+
+  static boolean valuesMatch(Object read, Object written, TagMeta meta) {
+    if (read == null || written == null) return false;
+    String dt = normalizeType(meta.dataType());
+    if ("bool".equals(dt) || read instanceof Boolean || written instanceof Boolean) {
+      return toBool(read) == toBool(written);
+    }
+    if (read instanceof Number rn && written instanceof Number wn) {
+      if (isIntegerDataType(dt)) {
+        return rn.longValue() == Math.round(wn.doubleValue());
+      }
+      return Math.abs(rn.doubleValue() - wn.doubleValue()) < 1e-4;
+    }
+    return String.valueOf(read).equals(String.valueOf(written));
+  }
+
+  private static boolean isIntegerDataType(String dt) {
+    return "byte".equals(dt)
+        || "short".equals(dt)
+        || "word".equals(dt)
+        || "int".equals(dt)
+        || "long".equals(dt)
+        || "dword".equals(dt)
+        || "llong".equals(dt)
+        || "qword".equals(dt);
   }
 
   public void reportOnline(String deviceId, boolean online, String message) {
@@ -124,7 +202,7 @@ public class ModbusTagIo {
   }
 
   private void dropSocket(String deviceId) {
-    ModbusTcpClient c = clients.remove(deviceId);
+    ModbusClient c = clients.remove(deviceId);
     channels.remove(deviceId);
     if (c != null) {
       c.close();
@@ -155,42 +233,56 @@ public class ModbusTagIo {
 
   @FunctionalInterface
   private interface IoCall<T> {
-    T run(ModbusTcpClient client) throws Exception;
+    T run(ModbusClient client) throws Exception;
   }
 
   /**
-   * 先走当前地址。链路断开（连不上、超时、连接被重置）且配了备用时，切到另一边再试一次。
-   * 设备已应答的 Modbus 异常码不切换。
+   * 写值和单点读走当前口。这里不计轮次，也不切备用。
+   * 对端断开或连不上时丢掉套接字；读超时留着。
    */
   private <T> T withLink(DeviceMeta dev, ModbusChannel ch, IoCall<T> call) throws Exception {
+    String id = dev.deviceId();
     try {
       return call.run(clientFor(dev, ch));
-    } catch (IOException first) {
-      if (!isLinkFailure(first) || !ch.hasBackup()) throw first;
-      String id = dev.deviceId();
-      boolean wasBackup = Boolean.TRUE.equals(preferBackup.get(id));
-      dropSocket(id);
-      preferBackup.put(id, !wasBackup);
-      String next =
-          ch.activeHost(!wasBackup) + ":" + ch.activePort(!wasBackup);
-      acqLog.warn(
-          log,
-          "failover:" + id,
-          "modbus failover device={} {} -> {}",
-          id,
-          wasBackup ? "backup" : "primary",
-          next);
-      return call.run(clientFor(dev, ch));
+    } catch (IOException ex) {
+      FailKind kind = classify(ex);
+      if (kind == FailKind.CONNECT || kind == FailKind.BROKEN) dropSocket(id);
+      throw ex;
     }
   }
 
-  /** 协议应答（异常码、长度不对）说明 CPU 还在，不切冗余。 */
-  static boolean isLinkFailure(IOException e) {
+  private enum FailKind {
+    TIMEOUT,
+    CONNECT,
+    BROKEN,
+    ANSWER
+  }
+
+  /** 超时留着连接。连不上、对端断开才算断。异常码说明设备还在应答。 */
+  private static FailKind classify(Exception e) {
+    if (e instanceof SocketTimeoutException) {
+      String m = e.getMessage() == null ? "" : e.getMessage().toLowerCase(Locale.ROOT);
+      return m.contains("connect") ? FailKind.CONNECT : FailKind.TIMEOUT;
+    }
+    if (!(e instanceof IOException)) return FailKind.ANSWER;
     String m = e.getMessage() == null ? "" : e.getMessage();
-    return !m.startsWith("modbus exception")
-        && !m.startsWith("fc mismatch")
-        && !m.startsWith("length mismatch")
-        && !m.startsWith("short pdu");
+    if (m.startsWith("modbus exception")
+        || m.startsWith("fc mismatch")
+        || m.startsWith("length mismatch")
+        || m.startsWith("short pdu")) {
+      return FailKind.ANSWER;
+    }
+    String low = m.toLowerCase(Locale.ROOT);
+    if ("udp timeout".equals(m) || low.contains("read timed out")) return FailKind.TIMEOUT;
+    if (low.contains("connection refused")
+        || low.contains("connect timed out")
+        || low.contains("connect failed")
+        || low.contains("no route")
+        || low.contains("unreachable")
+        || low.contains("udp send failed")) {
+      return FailKind.CONNECT;
+    }
+    return FailKind.BROKEN;
   }
 
   /** 状态栏用。没配备用时返回空串。 */
@@ -207,10 +299,12 @@ public class ModbusTagIo {
     return side + " " + ch.activeHost(backup) + ":" + ch.activePort(backup);
   }
 
-  private ModbusTcpClient clientFor(DeviceMeta dev, ModbusChannel ch) throws Exception {
+  private ModbusClient clientFor(DeviceMeta dev, ModbusChannel ch) throws Exception {
     ScadaProperties.Modbus cfg = props.getModbus();
     String key = dev.deviceId();
-    if (!ch.hasBackup()) preferBackup.remove(key);
+    if (!ch.hasBackup()) {
+      preferBackup.remove(key);
+    }
     boolean backup = Boolean.TRUE.equals(preferBackup.get(key)) && ch.hasBackup();
     String host = ch.activeHost(backup);
     int port = ch.activePort(backup);
@@ -222,20 +316,27 @@ public class ModbusTagIo {
             || prevCh.dwordSwap() != ch.dwordSwap()
             || !sameBackup(prevCh, ch))) {
       dropSocket(key);
+      badRounds.remove(key);
     }
-    ModbusTcpClient existing = clients.get(key);
-    if (existing != null && existing.host().equals(host) && existing.port() == port) {
+    boolean udp = isUdpProtocol(dev.protocol());
+    ModbusClient existing = clients.get(key);
+    if (existing != null
+        && existing.host().equals(host)
+        && existing.port() == port
+        && udp == (existing instanceof ModbusUdpClient)) {
       return existing;
     }
     if (existing != null) dropSocket(key);
-    ModbusTcpClient created =
-        new ModbusTcpClient(
-            host,
-            port,
-            cfg.getUnitId(),
-            cfg.getConnectTimeoutMs(),
-            cfg.getResponseTimeoutMs());
-    ModbusTcpClient prev = clients.putIfAbsent(key, created);
+    ModbusClient created =
+        udp
+            ? new ModbusUdpClient(host, port, cfg.getUnitId(), cfg.getResponseTimeoutMs())
+            : new ModbusTcpClient(
+                host,
+                port,
+                cfg.getUnitId(),
+                cfg.getConnectTimeoutMs(),
+                cfg.getResponseTimeoutMs());
+    ModbusClient prev = clients.putIfAbsent(key, created);
     if (prev != null) {
       created.close();
       return prev;
@@ -279,7 +380,7 @@ public class ModbusTagIo {
   }
 
   private Object readValue(
-      ModbusTcpClient client, ModbusChannel ch, TagMeta meta, ModbusAddress addr) throws Exception {
+      ModbusClient client, ModbusChannel ch, TagMeta meta, ModbusAddress addr) throws Exception {
     String dt = normalizeType(meta.dataType());
     if (addr.isCoilSpace()) {
       boolean[] bits = client.readBits(addr.readFc(), addr.offset(), 1);
@@ -295,59 +396,220 @@ public class ModbusTagIo {
     return decodeRegisters(ch, dt, len, regs);
   }
 
+  /** 一次轮询的结果。connect 只描述套接字能不能连上，读超时不算。 */
+  public record BatchRead(List<ReadOk> values, ConnectSignal connect) {}
+
+  public enum ConnectSignal {
+    /** 这次连上了，或只是没回包。清掉连不上的累计。 */
+    CLEAR,
+    /** 当前口又连不上一次。 */
+    FAIL,
+    /** 刚换到另一侧，另一侧这一下没连上。旧的累计清掉，从 1 再计。 */
+    RESTART
+  }
+
   /**
-   * 同设备一批到期点：按地址合并读，再拆开解码。单点失败不影响已解码点（整组 IO 失败则整组抛错）。
+   * 同一次轮询里到期的点合成一批，只计 1 轮。一组没回包就读下一组，已经读到的好点留下。
+   * 对端断开或连不上时，剩下的组不再等。
    */
-  public List<ReadOk> readBatch(DeviceMeta dev, List<TagMeta> due) throws Exception {
-    if (due == null || due.isEmpty()) return List.of();
+  public BatchRead readBatch(DeviceMeta dev, List<TagMeta> due) throws Exception {
+    if (due == null || due.isEmpty()) return new BatchRead(List.of(), ConnectSignal.CLEAR);
     ModbusChannel ch = channelFor(dev);
     List<ModbusReadPlan.Group> groups = ModbusReadPlan.plan(due);
     List<ReadOk> out = new ArrayList<>(due.size());
-    // tagId → index in out; we fill in slot order matching due iteration via map
     java.util.LinkedHashMap<String, ReadOk> byId = new java.util.LinkedHashMap<>();
+    boolean sawGood = false;
+    boolean sawLinkFail = false;
+    boolean sawAnswer = false;
+    boolean sawConnect = false;
+    boolean skipRest = false;
+    ConnectSignal connect;
+    java.util.ArrayList<ModbusReadPlan.Group> timeoutGroups = new java.util.ArrayList<>();
     synchronized (gate(dev.deviceId())) {
       for (ModbusReadPlan.Group g : groups) {
-        withLink(
-            dev,
-            ch,
-            client -> {
-              if (g.bitSpace()) {
-                boolean[] bits = client.readBits(g.fc(), g.start(), g.quantity());
-                for (ModbusReadPlan.Slot slot : g.slots()) {
-                  int idx = slot.offset() - g.start();
-                  boolean on = idx >= 0 && idx < bits.length && bits[idx];
-                  String dt = normalizeType(slot.meta().dataType());
-                  byId.put(slot.meta().tagId(), new ReadOk(decodeCoilBit(dt, on), "Good"));
+        if (skipRest) {
+          markGroupBad(g, byId);
+          continue;
+        }
+        try {
+          readGroup(clientFor(dev, ch), ch, g, byId);
+          sawGood = true;
+        } catch (Exception ex) {
+          switch (classify(ex)) {
+            case ANSWER -> {
+              markGroupBad(g, byId);
+              if (groupHasGood(g, byId)) sawGood = true;
+              sawAnswer = true;
+            }
+            case TIMEOUT -> {
+              sawLinkFail = true;
+              timeoutGroups.add(g);
+            }
+            case CONNECT -> {
+              markGroupBad(g, byId);
+              sawLinkFail = true;
+              sawConnect = true;
+              skipRest = true;
+              dropSocket(dev.deviceId());
+            }
+            case BROKEN -> {
+              markGroupBad(g, byId);
+              sawLinkFail = true;
+              skipRest = true;
+              dropSocket(dev.deviceId());
+            }
+          }
+        }
+      }
+      // 同轮已有成功组时，对超时组再读一次，缩小丢包造成的线圈/寄存器品质窗口。
+      // 整台设备都没读到则不再重试，以免把掉线检测拖成两次超时。
+      if (!timeoutGroups.isEmpty()) {
+        if (sawGood && !skipRest) {
+          for (ModbusReadPlan.Group g : timeoutGroups) {
+            try {
+              readGroup(clientFor(dev, ch), ch, g, byId);
+              sawGood = true;
+            } catch (Exception ex) {
+              markGroupBad(g, byId);
+              if (groupHasGood(g, byId)) sawGood = true;
+              switch (classify(ex)) {
+                case ANSWER -> sawAnswer = true;
+                case TIMEOUT -> sawLinkFail = true;
+                case CONNECT -> {
+                  sawLinkFail = true;
+                  sawConnect = true;
+                  dropSocket(dev.deviceId());
                 }
-              } else {
-                int[] regs = client.readRegisters(g.fc(), g.start(), g.quantity());
-                for (ModbusReadPlan.Slot slot : g.slots()) {
-                  String dt = normalizeType(slot.meta().dataType());
-                  int rel = slot.offset() - g.start();
-                  if ("bool".equals(dt) || slot.addr().bit() != null) {
-                    int[] one = sliceRegs(regs, rel, 1);
-                    byId.put(
-                        slot.meta().tagId(),
-                        new ReadOk(decodeRegisterBit(ch, dt, slot.addr(), one), "Good"));
-                  } else {
-                    int len = slot.length();
-                    int[] slice = sliceRegs(regs, rel, len);
-                    byId.put(
-                        slot.meta().tagId(),
-                        new ReadOk(decodeRegisters(ch, dt, len, slice), "Good"));
-                  }
+                case BROKEN -> {
+                  sawLinkFail = true;
+                  dropSocket(dev.deviceId());
                 }
               }
-              return null;
-            });
+            }
+          }
+        } else {
+          for (ModbusReadPlan.Group g : timeoutGroups) markGroupBad(g, byId);
+        }
       }
+      connect = noteRound(dev, ch, sawGood, sawLinkFail, sawAnswer, sawConnect);
     }
     for (TagMeta meta : due) {
       ReadOk r = byId.get(meta.tagId());
       if (r != null) out.add(r);
       else throw new IllegalStateException("batch miss tag=" + meta.tagId());
     }
-    return out;
+    return new BatchRead(out, connect);
+  }
+
+  private void readGroup(
+      ModbusClient client,
+      ModbusChannel ch,
+      ModbusReadPlan.Group g,
+      java.util.Map<String, ReadOk> byId)
+      throws Exception {
+    if (g.bitSpace()) {
+      boolean[] bits = client.readBits(g.fc(), g.start(), g.quantity());
+      for (ModbusReadPlan.Slot slot : g.slots()) {
+        int idx = slot.offset() - g.start();
+        boolean on = idx >= 0 && idx < bits.length && bits[idx];
+        String dt = normalizeType(slot.meta().dataType());
+        byId.put(slot.meta().tagId(), new ReadOk(decodeCoilBit(dt, on), "Good"));
+      }
+      return;
+    }
+    int[] regs = client.readRegisters(g.fc(), g.start(), g.quantity());
+    for (ModbusReadPlan.Slot slot : g.slots()) {
+      String dt = normalizeType(slot.meta().dataType());
+      int rel = slot.offset() - g.start();
+      if ("bool".equals(dt) || slot.addr().bit() != null) {
+        int[] one = sliceRegs(regs, rel, 1);
+        byId.put(
+            slot.meta().tagId(), new ReadOk(decodeRegisterBit(ch, dt, slot.addr(), one), "Good"));
+      } else {
+        int len = slot.length();
+        int[] slice = sliceRegs(regs, rel, len);
+        byId.put(slot.meta().tagId(), new ReadOk(decodeRegisters(ch, dt, len, slice), "Good"));
+      }
+    }
+  }
+
+  private static void markGroupBad(ModbusReadPlan.Group g, java.util.Map<String, ReadOk> byId) {
+    for (ModbusReadPlan.Slot slot : g.slots()) {
+      byId.putIfAbsent(slot.meta().tagId(), new ReadOk(null, "Bad"));
+    }
+  }
+
+  private static boolean groupHasGood(ModbusReadPlan.Group g, java.util.Map<String, ReadOk> byId) {
+    for (ModbusReadPlan.Slot slot : g.slots()) {
+      ReadOk got = byId.get(slot.meta().tagId());
+      if (got != null && "Good".equals(got.quality())) return true;
+    }
+    return false;
+  }
+
+  /**
+   * 整批没有好点才加 1。满 3 次就换到另一侧，并马上连接。有好点或设备已应答则清零。
+   * 备用通着不切回主。
+   */
+  private ConnectSignal noteRound(
+      DeviceMeta dev,
+      ModbusChannel ch,
+      boolean sawGood,
+      boolean sawLinkFail,
+      boolean sawAnswer,
+      boolean sawConnect) {
+    String id = dev.deviceId();
+    if (sawGood || sawAnswer || !sawLinkFail) {
+      badRounds.remove(id);
+      return ConnectSignal.CLEAR;
+    }
+    int rounds = badRounds.merge(id, 1, Integer::sum);
+    boolean backup = Boolean.TRUE.equals(preferBackup.get(id));
+    if (rounds < 3) {
+      acqLog.warn(
+          log,
+          "round:" + id,
+          "modbus device={} side={} badRounds={}",
+          id,
+          backup ? "backup" : "primary",
+          rounds);
+      return sawConnect ? ConnectSignal.FAIL : ConnectSignal.CLEAR;
+    }
+    badRounds.remove(id);
+    if (!ch.hasBackup()) {
+      acqLog.warn(
+          log,
+          "round:" + id,
+          "modbus device={} {} bad rounds, no backup",
+          id,
+          rounds);
+      return sawConnect ? ConnectSignal.FAIL : ConnectSignal.CLEAR;
+    }
+    preferBackup.put(id, !backup);
+    dropSocket(id);
+    String next = ch.activeHost(!backup) + ":" + ch.activePort(!backup);
+    try {
+      clientFor(dev, ch).ensureConnected();
+      acqLog.warn(
+          log,
+          "failover:" + id,
+          "modbus failover device={} {} -> {} after {} bad rounds",
+          id,
+          backup ? "backup" : "primary",
+          next,
+          rounds);
+      return ConnectSignal.CLEAR;
+    } catch (Exception ex) {
+      dropSocket(id);
+      acqLog.warn(
+          log,
+          "failover:" + id,
+          "modbus failover device={} {} -> {} connect failed",
+          id,
+          backup ? "backup" : "primary",
+          next);
+      return classify(ex) == FailKind.CONNECT ? ConnectSignal.RESTART : ConnectSignal.CLEAR;
+    }
   }
 
   private static int[] sliceRegs(int[] regs, int rel, int len) {
@@ -398,7 +660,7 @@ public class ModbusTagIo {
   }
 
   private void writeValue(
-      ModbusTcpClient client, ModbusChannel ch, TagMeta meta, ModbusAddress addr, Object value)
+      ModbusClient client, ModbusChannel ch, TagMeta meta, ModbusAddress addr, Object value)
       throws Exception {
     String dt = normalizeType(meta.dataType());
     if ("coil".equals(addr.area())) {
@@ -553,6 +815,13 @@ public class ModbusTagIo {
   }
 
   public void invalidateOnError(String deviceId, Exception e) {
+    synchronized (gate(deviceId)) {
+      ModbusClient c = clients.get(deviceId);
+      if (c instanceof ModbusUdpClient) {
+        log.debug("modbus udp keep session {}: {}", deviceId, e.toString());
+        return;
+      }
+    }
     dropClient(deviceId);
     log.debug("modbus client reset {}: {}", deviceId, e.toString());
   }

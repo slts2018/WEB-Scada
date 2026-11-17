@@ -187,6 +187,58 @@ function setAxis(transform: Transform3D, axis: 'position' | 'rotation' | 'scale'
   transform[axis] = next
 }
 
+
+type CachedObject3DVisual = {
+  visible?: boolean
+  position?: [number, number, number]
+  rotation?: [number, number, number]
+  scale?: [number, number, number]
+  color?: string
+  emissive?: string
+  opacity?: number
+  colorTinted?: boolean
+  interactive?: boolean
+}
+
+const lastGoodObjectVisual = new Map<string, CachedObject3DVisual>()
+
+function objectVisualKey(objectId: string, kind: string, type: string, tagId: string): string {
+  return `${objectId}|${kind}|${type}|${tagId}`
+}
+
+function rememberObjectVisual(object: Object3DNode, key: string, patch: CachedObject3DVisual, flags?: { colorTinted?: boolean; interactive?: boolean }) {
+  lastGoodObjectVisual.set(key, {
+    ...patch,
+    colorTinted: flags?.colorTinted,
+    interactive: flags?.interactive,
+  })
+}
+
+function restoreObjectVisual(
+  object: Object3DNode,
+  key: string,
+  flags?: { colorTinted: boolean; interactive: boolean },
+) {
+  const snap = lastGoodObjectVisual.get(key)
+  if (!snap) return
+  if (snap.visible !== undefined) object.visible = snap.visible
+  if (snap.position) object.transform = { ...object.transform, position: [...snap.position] as [number, number, number] }
+  if (snap.rotation) object.transform = { ...object.transform, rotation: [...snap.rotation] as [number, number, number] }
+  if (snap.scale) object.transform = { ...object.transform, scale: [...snap.scale] as [number, number, number] }
+  if (snap.color !== undefined || snap.emissive !== undefined || snap.opacity !== undefined) {
+    object.style = {
+      ...object.style,
+      ...(snap.color !== undefined ? { color: snap.color } : {}),
+      ...(snap.emissive !== undefined ? { emissive: snap.emissive } : {}),
+      ...(snap.opacity !== undefined ? { opacity: snap.opacity } : {}),
+    }
+  }
+  if (flags) {
+    if (snap.colorTinted) flags.colorTinted = true
+    if (snap.interactive !== undefined) flags.interactive = snap.interactive
+  }
+}
+
 function applyObject3DLink(
   object: Object3DNode,
   link: AnimationLink,
@@ -194,11 +246,20 @@ function applyObject3DLink(
   flags: { blink: boolean; interactive: boolean; colorTinted: boolean },
 ) {
   if (!link.enabled || !tag) return
-  if (link.type !== 'enable' && (tag.quality === 'Bad' || tag.quality === 'Offline')) return
+  const visualKey = objectVisualKey(object.id, 'link', link.type, tag.tagId)
+  const qualityBad = tag.quality === 'Bad' || tag.quality === 'Offline'
+  if (qualityBad) {
+    if (lastGoodObjectVisual.has(visualKey)) {
+      restoreObjectVisual(object, visualKey, flags)
+      return
+    }
+  }
 
   if (link.type === 'hide') {
     const show = link.trueShow ? Boolean(tag.value) : !Boolean(tag.value)
     object.visible = show
+    rememberObjectVisual(object, visualKey, { visible: show })
+    if (qualityBad && !lastGoodObjectVisual.has(visualKey)) lastGoodObjectVisual.set(visualKey, {})
     return
   }
 
@@ -208,8 +269,10 @@ function applyObject3DLink(
       object.style = { ...object.style, color: range.color }
       flags.colorTinted = true
       if (range.blink) flags.blink = true
+      rememberObjectVisual(object, visualKey, { color: range.color }, flags)
       break
     }
+    if (qualityBad && !lastGoodObjectVisual.has(visualKey)) lastGoodObjectVisual.set(visualKey, {})
     return
   }
 
@@ -219,8 +282,10 @@ function applyObject3DLink(
       object.style = { ...object.style, emissive: range.color }
       flags.colorTinted = true
       if (range.blink) flags.blink = true
+      rememberObjectVisual(object, visualKey, { emissive: range.color }, flags)
       break
     }
+    if (qualityBad && !lastGoodObjectVisual.has(visualKey)) lastGoodObjectVisual.set(visualKey, {})
     return
   }
 
@@ -230,6 +295,8 @@ function applyObject3DLink(
     const mapped = mapRange(n, link.inMin, link.inMax, link.outMin, link.outMax)
     const axisIndex = link.type === 'moveH' ? 0 : link.type === 'moveV' ? 1 : 2
     setAxis(object.transform, 'position', axisIndex, mapped)
+    rememberObjectVisual(object, visualKey, { position: [...object.transform.position] as [number, number, number] })
+    if (qualityBad && !lastGoodObjectVisual.has(visualKey)) lastGoodObjectVisual.set(visualKey, {})
     return
   }
 
@@ -239,6 +306,8 @@ function applyObject3DLink(
     const mapped = mapRange(n, link.inMin, link.inMax, link.outMin, link.outMax)
     const axisIndex = link.type === 'rotX' ? 0 : link.type === 'rotY' ? 1 : 2
     setAxis(object.transform, 'rotation', axisIndex, mapped)
+    rememberObjectVisual(object, visualKey, { rotation: [...object.transform.rotation] as [number, number, number] })
+    if (qualityBad && !lastGoodObjectVisual.has(visualKey)) lastGoodObjectVisual.set(visualKey, {})
     return
   }
 
@@ -249,11 +318,20 @@ function applyObject3DLink(
     const mapped = mapRange(n, link.inMin, link.inMax, link.outMin, link.outMax)
     const axisIndex = link.type === 'width' ? 0 : link.type === 'height' ? 1 : 2
     setAxis(object.transform, 'scale', axisIndex, Math.max(1e-4, mapped))
+    rememberObjectVisual(object, visualKey, { scale: [...object.transform.scale] as [number, number, number] })
+    if (qualityBad && !lastGoodObjectVisual.has(visualKey)) lastGoodObjectVisual.set(visualKey, {})
     return
   }
 
   if (link.type === 'dragH' || link.type === 'dragV' || link.type === 'dragZ') {
-    // 运行端拖拽写值；解析阶段不改姿态（避免与拖拽冲突）
+    // 与位移连接一样按变量更新姿态；正在拖拽的对象由场景跳过 applyVisual，避免互相覆盖
+    const n = asNumber(tag.value)
+    if (n === null) return
+    const mapped = mapRange(n, link.inMin, link.inMax, link.outMin, link.outMax)
+    const axisIndex = link.type === 'dragH' ? 0 : link.type === 'dragV' ? 1 : 2
+    setAxis(object.transform, 'position', axisIndex, mapped)
+    rememberObjectVisual(object, visualKey, { position: [...object.transform.position] as [number, number, number] })
+    if (qualityBad && !lastGoodObjectVisual.has(visualKey)) lastGoodObjectVisual.set(visualKey, {})
     return
   }
 
@@ -267,7 +345,9 @@ function applyObject3DLink(
   if (link.type === 'enable') {
     const truthy = Boolean(tag.value)
     flags.interactive = link.trueEnable ? truthy : !truthy
+    rememberObjectVisual(object, visualKey, {}, flags)
   }
+  if (qualityBad && !lastGoodObjectVisual.has(visualKey)) lastGoodObjectVisual.set(visualKey, {})
 }
 
 /** 解析 3D 对象运行态外观（动画连接子集 + 属性绑定 + 旧动画） */
@@ -296,75 +376,118 @@ export function resolveObject3DVisual(
     if (tag.quality === 'Bad' || tag.quality === 'Offline' || tag.quality === 'Uncertain') {
       quality = tag.quality
     }
-    if (tag.quality === 'Bad' || tag.quality === 'Offline') continue
+    const bindKey = objectVisualKey(object.id, 'bind', binding.prop, tag.tagId)
+    if (tag.quality === 'Bad' || tag.quality === 'Offline') {
+      if (lastGoodObjectVisual.has(bindKey)) {
+        restoreObjectVisual(object, bindKey, flags)
+        continue
+      }
+    }
 
     switch (binding.prop) {
       case 'visible':
         object.visible = Boolean(tag.value)
+        rememberObjectVisual(object, bindKey, { visible: object.visible })
         break
       case 'color':
       case 'fill':
         if (typeof tag.value === 'string') {
           object.style = { ...object.style, color: tag.value }
           flags.colorTinted = true
+          rememberObjectVisual(object, bindKey, { color: tag.value }, flags)
         } else if (typeof tag.value === 'boolean') {
-          object.style = { ...object.style, color: tag.value ? '#22c55e' : '#334155' }
+          const color = tag.value ? '#22c55e' : '#334155'
+          object.style = { ...object.style, color }
           flags.colorTinted = true
+          rememberObjectVisual(object, bindKey, { color }, flags)
         }
         break
       case 'opacity': {
         const n = asNumber(tag.value)
-        if (n !== null) object.style = { ...object.style, opacity: Math.min(1, Math.max(0, n)) }
+        if (n !== null) {
+          object.style = { ...object.style, opacity: Math.min(1, Math.max(0, n)) }
+          rememberObjectVisual(object, bindKey, { opacity: object.style?.opacity })
+        }
         break
       }
       case 'x': {
         const n = asNumber(tag.value)
-        if (n !== null) setAxis(object.transform, 'position', 0, n)
+        if (n !== null) {
+          setAxis(object.transform, 'position', 0, n)
+          rememberObjectVisual(object, bindKey, { position: [...object.transform.position] as [number, number, number] })
+        }
         break
       }
       case 'y': {
         const n = asNumber(tag.value)
-        if (n !== null) setAxis(object.transform, 'position', 1, n)
+        if (n !== null) {
+          setAxis(object.transform, 'position', 1, n)
+          rememberObjectVisual(object, bindKey, { position: [...object.transform.position] as [number, number, number] })
+        }
         break
       }
       case 'z': {
         const n = asNumber(tag.value)
-        if (n !== null) setAxis(object.transform, 'position', 2, n)
+        if (n !== null) {
+          setAxis(object.transform, 'position', 2, n)
+          rememberObjectVisual(object, bindKey, { position: [...object.transform.position] as [number, number, number] })
+        }
         break
       }
       case 'rotX': {
         const n = asNumber(tag.value)
-        if (n !== null) setAxis(object.transform, 'rotation', 0, n)
+        if (n !== null) {
+          setAxis(object.transform, 'rotation', 0, n)
+          rememberObjectVisual(object, bindKey, { rotation: [...object.transform.rotation] as [number, number, number] })
+        }
         break
       }
       case 'rotation':
       case 'rotY': {
         const n = asNumber(tag.value)
-        if (n !== null) setAxis(object.transform, 'rotation', 1, n)
+        if (n !== null) {
+          setAxis(object.transform, 'rotation', 1, n)
+          rememberObjectVisual(object, bindKey, { rotation: [...object.transform.rotation] as [number, number, number] })
+        }
         break
       }
       case 'rotZ': {
         const n = asNumber(tag.value)
-        if (n !== null) setAxis(object.transform, 'rotation', 2, n)
+        if (n !== null) {
+          setAxis(object.transform, 'rotation', 2, n)
+          rememberObjectVisual(object, bindKey, { rotation: [...object.transform.rotation] as [number, number, number] })
+        }
         break
       }
       case 'scaleX': {
         const n = asNumber(tag.value)
-        if (n !== null) setAxis(object.transform, 'scale', 0, n)
+        if (n !== null) {
+          setAxis(object.transform, 'scale', 0, n)
+          rememberObjectVisual(object, bindKey, { scale: [...object.transform.scale] as [number, number, number] })
+        }
         break
       }
       case 'scaleY': {
         const n = asNumber(tag.value)
-        if (n !== null) setAxis(object.transform, 'scale', 1, n)
+        if (n !== null) {
+          setAxis(object.transform, 'scale', 1, n)
+          rememberObjectVisual(object, bindKey, { scale: [...object.transform.scale] as [number, number, number] })
+        }
         break
       }
       case 'scaleZ': {
         const n = asNumber(tag.value)
-        if (n !== null) setAxis(object.transform, 'scale', 2, n)
+        if (n !== null) {
+          setAxis(object.transform, 'scale', 2, n)
+          rememberObjectVisual(object, bindKey, { scale: [...object.transform.scale] as [number, number, number] })
+        }
         break
       }
       default:
         break
+    }
+    if ((tag.quality === 'Bad' || tag.quality === 'Offline') && !lastGoodObjectVisual.has(bindKey)) {
+      lastGoodObjectVisual.set(bindKey, {})
     }
   }
 

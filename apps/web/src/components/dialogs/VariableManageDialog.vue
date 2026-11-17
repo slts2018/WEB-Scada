@@ -110,6 +110,7 @@ const deviceConn = reactive<DeviceConnFields>(emptyConnFields())
 const protocolOptions: Array<{ value: DeviceProtocol; label: string }> = [
   { value: 'mock', label: 'Mock（模拟设备）' },
   { value: 'modbus_tcp', label: 'Modbus TCP' },
+  { value: 'modbus_udp', label: 'Modbus UDP' },
   { value: 'opcua', label: 'OPC UA' },
   { value: 'mqtt', label: 'MQTT' },
   { value: 'http', label: 'HTTP' },
@@ -129,6 +130,10 @@ function onProtocolChange(v: DeviceProtocol) {
 
 function protocolLabel(protocol: string) {
   return protocolOptions.find((p) => p.value === protocol)?.label ?? protocol
+}
+
+function isModbusProtocol(protocol: string) {
+  return protocol === 'modbus_tcp' || protocol === 'modbus_udp'
 }
 
 const groupOptions = computed(() => {
@@ -404,7 +409,7 @@ async function saveEditor() {
     ElMessage.warning('必须绑定设备')
     return
   }
-  if (formDeviceProtocol.value === 'modbus_tcp') {
+  if (isModbusProtocol(formDeviceProtocol.value)) {
     const off = tagAddr.mbOffset.trim()
     if (off && !/^\d+$/.test(off)) {
       ElMessage.warning('字地址须为 0～65535 的整数')
@@ -1215,7 +1220,7 @@ async function removeAlarm(alarmId: string) {
       </label>
 
       <!-- Mock：地址和采样都在「模拟」页 -->
-      <div v-if="formDeviceProtocol === 'modbus_tcp'" class="wide mb-addr-row">
+      <div v-if="isModbusProtocol(formDeviceProtocol)" class="wide mb-addr-row">
         <label>
           <span class="cfg-label">
             类型(区)
@@ -1644,7 +1649,7 @@ async function removeAlarm(alarmId: string) {
       />
 
       <!-- Modbus TCP -->
-      <template v-else-if="deviceForm.protocol === 'modbus_tcp'">
+      <template v-else-if="isModbusProtocol(deviceForm.protocol)">
         <label>
           <span class="cfg-label">
             主机
@@ -1655,14 +1660,14 @@ async function removeAlarm(alarmId: string) {
         <label>
           <span class="cfg-label">
             端口
-            <HelpTip content="Modbus TCP 默认 502。" />
+            <HelpTip content="Modbus TCP / UDP 默认 502。" />
           </span>
           <el-input v-model="deviceConn.port" placeholder="502" />
         </label>
         <label>
           <span class="cfg-label">
             备用主机
-            <HelpTip content="冗余 PLC 的另一台地址。主连不上就改连备用，备用断了再试主。备用还通着时不切回主。留空则只用上面的主机。" />
+            <HelpTip content="冗余地址。一组没回包就读下一组。连续 3 次轮询都整批没好点，当时就换到备用并连接。备用通着不切回主。留空则只用上面的主机。" />
           </span>
           <el-input v-model="deviceConn.backupHost" placeholder="可不填" />
         </label>

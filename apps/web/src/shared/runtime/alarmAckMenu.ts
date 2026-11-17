@@ -1,7 +1,7 @@
 /**
  * 运行端实时报警：右键菜单「确认」，再弹一次确认框后才提交。
  */
-import { ElMessage } from 'element-plus'
+import { useOutputLogStore } from '@/stores/outputLog'
 import { scadaConfirm } from '@/shared/ui/scadaMessageBox'
 import { useTagStore } from '@/stores/tag'
 
@@ -75,5 +75,5 @@ async function confirmAndAck(alarmId: string, label: string) {
     return
   }
   const res = await useTagStore().ackAlarm(alarmId)
-  if (!res.ok) ElMessage.error(res.message)
+  if (!res.ok) useOutputLogStore().error(res.message, '运行端')
 }

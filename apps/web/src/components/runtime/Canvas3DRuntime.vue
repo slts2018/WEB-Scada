@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
 import { scadaConfirm } from '@/shared/ui/scadaMessageBox'
 import type {
   AnimationLinkInput,
@@ -122,9 +121,12 @@ function askWrite(
 }
 
 async function doWrite(tagId: string, value: string | number | boolean) {
+  if (!tagId?.trim()) {
+    log.warn('请先绑定要写入的变量', '运行端')
+    return
+  }
   const res = await tags.writeValue(tagId, value)
   const msg = res.message || (res.ok ? '写值成功' : '写值失败')
-  ElMessage[res.ok ? 'success' : 'error'](msg)
   if (res.ok) log.success(`写值 ${tagId} = ${String(value)}`, '运行端')
   else log.error(msg, '运行端')
   pushDiag(`写值 ${tagId} = ${String(value)} → ${res.ok ? '成功' : msg}`)
@@ -227,7 +229,7 @@ async function handleAnimationInput(objectId: string) {
   const obj = findObject3dDeep(livePageObjects(), objectId)
   if (!obj) return
   if (interactiveMap.get(objectId) === false) {
-    ElMessage.warning('对象当前禁止操作')
+    log.warn('对象当前禁止操作', '运行端')
     return
   }
   const links = (obj.animationLinks ?? []).filter(
@@ -289,16 +291,19 @@ async function runPanelWidgetEventActions(
   if (!widget) return
   const resolved = resolveWidgetVisual(widget, (id) => tags.getValue(id))
   if (!isWidgetRuntimeEnabled(resolved.widget)) {
-    ElMessage.warning('图元当前禁止操作')
+    log.warn('图元当前禁止操作', '运行端')
     return
   }
   for (const evt of events) {
     for (const action of evt.actions) {
       if (action.type === 'navigate') {
         project.setActivePage(action.pageId)
-        ElMessage.success('已切换页面')
         log.info(`跳转页面：${action.pageId}`, '运行端')
       } else if (action.type === 'writeTag') {
+        if (!action.tagId?.trim()) {
+          log.warn('请先绑定要写入的变量', '运行端')
+          continue
+        }
         if (action.confirm) {
           const ok = await confirmWrite(action.tagId, action.value)
           if (!ok) continue
@@ -307,7 +312,7 @@ async function runPanelWidgetEventActions(
       } else if (action.type === 'openDialog') {
         const page = project.document.pages.find((p) => p.id === action.dialogId && p.type === '2d')
         if (!page) {
-          ElMessage.warning(`对话框页面不存在：${action.dialogId}`)
+          log.warn(`对话框页面不存在：${action.dialogId}`, '运行端')
           continue
         }
         emit('openDialog', action.dialogId)
@@ -315,7 +320,7 @@ async function runPanelWidgetEventActions(
       } else if (action.type === 'runScript') {
         const script = project.document.scripts.find((s) => s.id === action.scriptId)
         if (!script) {
-          ElMessage.warning('脚本不存在')
+          log.warn('脚本不存在', '运行端')
           continue
         }
         runScriptSource(
@@ -340,7 +345,7 @@ async function handlePanelWidgetEvent(
   events: EventBinding[],
 ) {
   if (interactiveMap.get(objectId) === false) {
-    ElMessage.warning('对象当前禁止操作')
+    log.warn('对象当前禁止操作', '运行端')
     return
   }
   const matched = events.filter((e) => e.trigger === trigger)
@@ -357,14 +362,14 @@ async function handlePanelWidgetEvent(
 
 async function handlePanelWidgetAnimationInput(objectId: string, widgetId: string) {
   if (interactiveMap.get(objectId) === false) {
-    ElMessage.warning('对象当前禁止操作')
+    log.warn('对象当前禁止操作', '运行端')
     return
   }
   const widget = findPanelWidget(objectId, widgetId)
   if (!widget) return
   const resolved = resolveWidgetVisual(widget, (id) => tags.getValue(id))
   if (!isWidgetRuntimeEnabled(resolved.widget)) {
-    ElMessage.warning('图元当前禁止操作')
+    log.warn('图元当前禁止操作', '运行端')
     return
   }
   const links = (widget.animationLinks ?? []).filter(
@@ -401,7 +406,7 @@ async function handlePanelWidgetAnimationInput(objectId: string, widgetId: strin
 
 async function handlePanelButtonLegacy(objectId: string, widget: Widget2D) {
   if (interactiveMap.get(objectId) === false) {
-    ElMessage.warning('对象当前禁止操作')
+    log.warn('对象当前禁止操作', '运行端')
     return
   }
   if (widget.type === 'switch') {
@@ -409,7 +414,7 @@ async function handlePanelButtonLegacy(objectId: string, widget: Widget2D) {
       panelWidgetWriteAction(widget)?.tagId ||
       widget.bindings?.find((b) => b.prop === 'value' || b.prop === 'text')?.tagId
     if (!tagId) {
-      ElMessage.warning('开关未绑定 Tag')
+      log.warn('开关未绑定 Tag', '运行端')
       return
     }
     const cur = tags.getValue(tagId)?.value
@@ -506,11 +511,11 @@ async function confirmWrite(tagId: string, value: string | number | boolean): Pr
 async function handleObjectTrigger(objectId: string, trigger: 'click' | 'dblclick') {
   const obj = resolveEventTarget(objectId)
   if (!obj) {
-    ElMessage.warning('未命中可操作对象')
+    log.warn('未命中可操作对象', '运行端')
     return
   }
   if (interactiveMap.get(objectId) === false || interactiveMap.get(obj.id) === false) {
-    ElMessage.warning('对象当前禁止操作')
+    log.warn('对象当前禁止操作', '运行端')
     return
   }
   const matched = (obj.events ?? []).filter((e) => e.trigger === trigger)
@@ -524,7 +529,7 @@ async function handleObjectTrigger(objectId: string, trigger: 'click' | 'dblclic
     if (trigger === 'dblclick') return
     pushDiag(`业务：${obj.name || obj.id} 没有单击事件（发布包可能陈旧，请重新「进入运行」）`)
     if (objectHasDragLink(obj)) return
-    ElMessage.info(`已点中「${obj.name || obj.id}」，但没有单击事件（请重新「进入运行」）`)
+    log.info(`已点中「${obj.name || obj.id}」，但没有单击事件（请重新「进入运行」）`, '运行端')
     return
   }
   if (hasAnimInput) await handleAnimationInput(obj.id)
@@ -563,7 +568,7 @@ async function runEvents(events: EventBinding[], trigger: 'click' | 'dblclick') 
     for (const action of evt.actions) {
       if (action.type === 'writeTag') {
         if (!action.tagId?.trim()) {
-          ElMessage.warning('写值事件未选择变量')
+          log.warn('请先绑定要写入的变量', '运行端')
           continue
         }
         if (action.confirm) {
@@ -577,7 +582,7 @@ async function runEvents(events: EventBinding[], trigger: 'click' | 'dblclick') 
       } else if (action.type === 'openDialog') {
         const page = project.document.pages.find((p) => p.id === action.dialogId && p.type === '2d')
         if (!page) {
-          ElMessage.warning(`对话框页面不存在：${action.dialogId}`)
+          log.warn(`对话框页面不存在：${action.dialogId}`, '运行端')
           continue
         }
         emit('openDialog', action.dialogId)
@@ -585,7 +590,7 @@ async function runEvents(events: EventBinding[], trigger: 'click' | 'dblclick') 
       } else if (action.type === 'runScript') {
         const script = project.document.scripts.find((s) => s.id === action.scriptId)
         if (!script) {
-          ElMessage.warning('脚本不存在')
+          log.warn('脚本不存在', '运行端')
           continue
         }
         runScriptSource(

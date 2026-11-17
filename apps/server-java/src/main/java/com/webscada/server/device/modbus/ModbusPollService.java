@@ -88,11 +88,16 @@ public class ModbusPollService {
   private void dispatchAll(boolean legacyInline) throws Exception {
     List<DeviceMeta> all = devices.list();
     Map<String, DeviceMeta> modbusDevs = new HashMap<>();
+    Set<String> disabledModbus = new HashSet<>();
     for (DeviceMeta d : all) {
-      if (d.enabled() && ModbusTagIo.isModbusProtocol(d.protocol())) {
+      if (!ModbusTagIo.isModbusProtocol(d.protocol()) || d.deviceId() == null) continue;
+      if (d.enabled()) {
         modbusDevs.put(d.deviceId(), d);
+      } else {
+        disabledModbus.add(d.deviceId());
       }
     }
+    applyDisabledDevices(disabledModbus);
     if (modbusDevs.isEmpty()) {
       pruneWorkers(Set.of());
       return;
@@ -118,6 +123,22 @@ public class ModbusPollService {
         List<TagMeta> snapshot = List.copyOf(tags);
         worker.tryRun(() -> pollOneDevice(dev, snapshot));
       }
+    }
+  }
+
+  /** 设备停用后立刻丢掉连接，并把点标为 Bad（保持最后一值）。 */
+  private void applyDisabledDevices(Set<String> disabledIds) {
+    if (disabledIds == null || disabledIds.isEmpty()) return;
+    for (String id : disabledIds) {
+      io.dropClient(id);
+      health.clear(id);
+      lastOnline.remove(id);
+    }
+    for (TagMeta meta : runtime.getMetas()) {
+      if (meta.deviceId() == null || !disabledIds.contains(meta.deviceId())) continue;
+      TagValue cur = runtime.getTagValue(meta.tagId());
+      if (cur != null && ("Bad".equals(cur.quality()) || "Offline".equals(cur.quality()))) continue;
+      markBad(meta);
     }
   }
 
@@ -183,12 +204,28 @@ public class ModbusPollService {
     int fail = 0;
     String lastErr = null;
     boolean needReset = false;
+    ModbusTagIo.BatchRead batch = null;
     try {
-      List<ModbusTagIo.ReadOk> results = io.readBatch(dev, due);
+      batch = io.readBatch(dev, due);
+      List<ModbusTagIo.ReadOk> results = batch.values();
       for (int i = 0; i < due.size(); i++) {
         TagMeta meta = due.get(i);
         try {
           ModbusTagIo.ReadOk r = results.get(i);
+          if ("Bad".equals(r.quality())) {
+            fail++;
+            lastErr = "no reply";
+            markBad(meta);
+            acqLog.warn(
+                log,
+                "read:" + meta.tagId(),
+                "modbus read fail device={} tag={} addr={} err={}",
+                deviceId,
+                meta.tagId(),
+                meta.address(),
+                lastErr);
+            continue;
+          }
           Object v = coerce(meta.dataType(), r.value());
           runtime.setTagValue(meta.tagId(), v, r.quality());
           ok++;
@@ -267,9 +304,22 @@ public class ModbusPollService {
           lastErr,
           cost);
     } else {
-      health.onFailure(deviceId, System.currentTimeMillis(), cooldownMs, maxFail);
       noteOnline(deviceId, false, lastErr != null ? lastErr : "all points failed");
       io.reportOnline(deviceId, false, lastErr != null ? lastErr : "采集失败");
+    }
+    if (batch != null) noteConnect(deviceId, batch.connect(), cooldownMs, maxFail);
+  }
+
+  /** 读超时不加冷却。只有套接字连不上，连续达到次数才冷却。 */
+  private void noteConnect(
+      String deviceId, ModbusTagIo.ConnectSignal signal, long cooldownMs, int maxFail) {
+    switch (signal) {
+      case FAIL -> health.onFailure(deviceId, System.currentTimeMillis(), cooldownMs, maxFail);
+      case RESTART -> {
+        health.clear(deviceId);
+        health.onFailure(deviceId, System.currentTimeMillis(), cooldownMs, maxFail);
+      }
+      case CLEAR -> health.clear(deviceId);
     }
   }
 

@@ -4,7 +4,8 @@ package com.webscada.server.device.modbus;
  * Modbus 设备 channel：{@code host:port}、{@code host:port|字排序|双字排序}，
  * 或再加备用 {@code host:port|字排序|双字排序|备用host:port}。
  * 默认字排序 SwapNone、双字排序 SwapWords（兼容原 low-word-first）。
- * 备用留空时只连主地址。主断切备，备断切回主，备通着不主动切回主。
+ * 备用留空时只连主地址。TCP 和 UDP 都是连续 3 次轮询整批没有好点，当时就换到另一侧并连接。
+ * 备通着不主动切回主。
  */
 public record ModbusChannel(
     String host,

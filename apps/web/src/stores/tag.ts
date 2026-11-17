@@ -43,6 +43,17 @@ export const useTagStore = defineStore('tag', () => {
   /** 工程里所有实时趋势的变量。切页后仍要收到值，才能在后台继续记点。 */
   const backgroundTagIds = new Set<string>()
   const connected = ref(false)
+  /** 已经连上过后，后端或 WebSocket 断开：保持最后一值，品质标为 Offline */
+  const realtimeOffline = ref(false)
+  /** channel=仅实时通道断开，后端仍在采集；backend=后端也不可达 */
+  const realtimeOfflineReason = ref<'channel' | 'backend' | null>(null)
+  const realtimeOfflineMessage = computed(() => {
+    if (!realtimeOffline.value) return ''
+    if (realtimeOfflineReason.value === 'backend') {
+      return '后端已断开，正在显示最后一值'
+    }
+    return '实时通道已断开，正在尝试重连（后端采集仍在运行）'
+  })
   const mode = ref<'live' | 'mock'>('mock')
   const activeAlarms = ref<ActiveAlarm[]>([])
   const listeners = new Set<TagListener>()
@@ -54,6 +65,8 @@ export const useTagStore = defineStore('tag', () => {
   let historyTimer: ReturnType<typeof setInterval> | null = null
   let historySoon: ReturnType<typeof setTimeout> | null = null
   let wantLive = false
+  let hadLiveSession = false
+  let offlineTimer: ReturnType<typeof setTimeout> | null = null
   const simSlots = new Map<string, number>()
   const scanSlots = new Map<string, number>()
 
@@ -279,9 +292,87 @@ export const useTagStore = defineStore('tag', () => {
     }
   }
 
+  function clearOfflineTimer() {
+    if (offlineTimer) {
+      clearTimeout(offlineTimer)
+      offlineTimer = null
+    }
+  }
+
+  function scheduleReconnect() {
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null
+      if (wantLive) connectRealtime()
+    }, 2000)
+  }
+
+  function markLiveTagsOffline() {
+    const changed: string[] = []
+    const next = { ...values.value }
+    for (const id of Object.keys(next)) {
+      const cur = next[id]
+      if (!cur || cur.quality === 'Offline') continue
+      next[id] = { ...cur, quality: 'Offline' }
+      changed.push(id)
+    }
+    if (!changed.length) return
+    values.value = next
+    notify(changed)
+  }
+
+  function enterRealtimeOffline(reason: 'channel' | 'backend') {
+    if (!wantLive) return
+    realtimeOffline.value = true
+    if (reason === 'backend') {
+      realtimeOfflineReason.value = 'backend'
+      // 后端不可达时，客户端把品质标为 Offline，与「正在显示最后一值」一致。
+      markLiveTagsOffline()
+      return
+    }
+    // 仅实时通道断开：后端仍在轮询，REST 品质可能仍是 Good。
+    // 不要改成 Offline，以免把设备故障和通道中断混在一起。
+    if (realtimeOfflineReason.value !== 'backend') {
+      realtimeOfflineReason.value = 'channel'
+    }
+  }
+
+  function scheduleRealtimeOffline(
+    delayMs = 3000,
+    reason: 'channel' | 'backend' = 'channel',
+  ) {
+    if (!wantLive) return
+    if (realtimeOffline.value) {
+      if (reason === 'backend') enterRealtimeOffline('backend')
+      return
+    }
+    if (offlineTimer) {
+      if (reason !== 'backend') return
+      clearTimeout(offlineTimer)
+      offlineTimer = null
+    }
+    if (delayMs <= 0) {
+      enterRealtimeOffline(reason)
+      return
+    }
+    offlineTimer = setTimeout(() => {
+      offlineTimer = null
+      if (!wantLive || connected.value) return
+      enterRealtimeOffline(reason)
+    }, delayMs)
+  }
+
+  function clearRealtimeOffline() {
+    clearOfflineTimer()
+    realtimeOffline.value = false
+    realtimeOfflineReason.value = null
+  }
+
   function disconnectWs() {
     wantLive = false
+    hadLiveSession = false
     stopHistoryPoll()
+    clearRealtimeOffline()
     if (reconnectTimer) {
       clearTimeout(reconnectTimer)
       reconnectTimer = null
@@ -306,8 +397,18 @@ export const useTagStore = defineStore('tag', () => {
       if (!wantLive) return
       if (!ok) {
         stopHistoryPoll()
+        // 曾经在线时不要回退 Mock，否则画面会像一切正常；保持最后一值并提示通讯中断。
+        if (hadLiveSession || mode.value === 'live') {
+          scheduleRealtimeOffline(0, 'backend')
+          scheduleReconnect()
+          return
+        }
         startMockStream()
         return
+      }
+      // REST 已通但 WS 可能仍未连上：横幅改为「仅通道断开」，品质以服务端为准（刚 hydrate）。
+      if (realtimeOffline.value) {
+        realtimeOfflineReason.value = 'channel'
       }
       // 并发 hydrate 时可能已有连接，避免再建一条并在错误 socket 上 send
       if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
@@ -328,6 +429,8 @@ export const useTagStore = defineStore('tag', () => {
         if (ws !== socket || socket.readyState !== WebSocket.OPEN) return
         connected.value = true
         mode.value = 'live'
+        hadLiveSession = true
+        clearRealtimeOffline()
         if (subscribed.value.size) {
           socket.send(JSON.stringify({ type: 'subscribe', tagIds: [...subscribed.value] }))
         }
@@ -378,9 +481,8 @@ export const useTagStore = defineStore('tag', () => {
           ws = null
         }
         if (!wantLive) return
-        reconnectTimer = setTimeout(() => {
-          if (wantLive) connectRealtime()
-        }, 2000)
+        scheduleRealtimeOffline(3000, 'channel')
+        scheduleReconnect()
       }
 
       socket.onerror = () => {
@@ -422,6 +524,9 @@ export const useTagStore = defineStore('tag', () => {
     activeAlarms,
     subscribed,
     connected,
+    realtimeOffline,
+    realtimeOfflineReason,
+    realtimeOfflineMessage,
     mode,
     getValue,
     setValue,

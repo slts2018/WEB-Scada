@@ -47,7 +47,7 @@ public class DeviceConnectivityMonitor {
   public static boolean isProbeable(String protocol) {
     if (protocol == null) return false;
     return switch (protocol.trim().toLowerCase(Locale.ROOT)) {
-      case "modbus_tcp", "modbus-tcp", "opcua", "mqtt", "http" -> true;
+      case "modbus_tcp", "modbus-tcp", "modbus_udp", "modbus-udp", "opcua", "mqtt", "http" -> true;
       default -> false;
     };
   }

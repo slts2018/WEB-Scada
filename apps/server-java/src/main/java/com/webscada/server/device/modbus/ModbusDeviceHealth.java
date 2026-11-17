@@ -2,7 +2,7 @@ package com.webscada.server.device.modbus;
 
 import java.util.concurrent.ConcurrentHashMap;
 
-/** 设备级在线/冷却状态：坏设备冷却期内不再发起 TCP。 */
+/** 套接字连续连不上才冷却。读超时不进这里。 */
 final class ModbusDeviceHealth {
   private final ConcurrentHashMap<String, State> states = new ConcurrentHashMap<>();
 

@@ -20,6 +20,12 @@ const router = createRouter({
       meta: { title: '运行端' },
     },
     {
+      path: '/logs',
+      name: 'logs',
+      component: () => import('@/views/logs/LogManageView.vue'),
+      meta: { title: '日志管理' },
+    },
+    {
       path: '/:pathMatch(.*)*',
       name: 'not-found',
       component: () => import('@/views/NotFoundView.vue'),

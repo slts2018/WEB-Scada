@@ -155,6 +155,7 @@ const previewHint = computed(() =>
 )
 
 const gizmoModeLabel = computed(() => {
+  if (project.handMode3d) return '手掌：手柄已隐藏'
   if (panelOnlySelection.value) return '手柄：平移（面板）'
   if (gizmoMode.value === 'translate') return '手柄：平移'
   if (gizmoMode.value === 'rotate') return '手柄：旋转'
@@ -162,6 +163,7 @@ const gizmoModeLabel = computed(() => {
 })
 
 watch(panelOnlySelection, (v) => {
+  if (project.handMode3d) return
   if (v && (gizmoMode.value === 'rotate' || gizmoMode.value === 'scale')) {
     setMode('translate', { quiet: true })
   }
@@ -171,6 +173,10 @@ const gizmoStatusText = ref('手柄: -')
 
 function refreshGizmoStatus() {
   const s = bundle?.getGizmoStatus()
+  if (project.handMode3d) {
+    gizmoStatusText.value = '手掌：手柄已隐藏'
+    return
+  }
   if (!s) {
     gizmoStatusText.value = '手柄: 未初始化'
     return
@@ -581,6 +587,7 @@ function setMode(mode: TransformGizmoMode, opts?: { quiet?: boolean }) {
     return
   }
   project.setGizmoMode3d(mode)
+  bundle?.setHandMode(false)
   bundle?.setGizmoMode(mode)
   if (!project.selectedObject3dId) {
     if (!opts?.quiet) {
@@ -590,6 +597,13 @@ function setMode(mode: TransformGizmoMode, opts?: { quiet?: boolean }) {
   }
   // 切换模式后立即重新挂上手柄，避免不可见
   syncSelectionGizmo()
+}
+
+function toggleHand() {
+  const next = !project.handMode3d
+  project.setHandMode3d(next)
+  bundle?.setHandMode(next)
+  refreshGizmoStatus()
 }
 
 function cycleGizmoMode() {
@@ -982,6 +996,7 @@ onMounted(async () => {
       { enableGizmo: true, enableLabels: false },
     )
     await reload()
+    if (project.handMode3d) bundle.setHandMode(true)
     labelsOn.value = bundle.getLabelsVisible()
     installPointerModifierTracker()
     if (project.previewLive) startPreview()
@@ -1105,6 +1120,14 @@ watch(
 )
 
 watch(
+  () => project.handMode3d,
+  (on) => {
+    bundle?.setHandMode(on)
+    refreshGizmoStatus()
+  },
+)
+
+watch(
   () => project.gizmoMode3d,
   (mode) => {
     bundle?.setGizmoMode(mode)
@@ -1190,7 +1213,15 @@ defineExpose({
     <div v-if="interactive !== false" class="tools">
       <button
         type="button"
-        :class="{ active: gizmoMode === 'translate' }"
+        :class="{ active: project.handMode3d }"
+        title="手掌：隐藏平移、旋转、缩放手柄"
+        @click="toggleHand"
+      >
+        手掌
+      </button>
+      <button
+        type="button"
+        :class="{ active: !project.handMode3d && gizmoMode === 'translate' }"
         title="平移手柄 (W)"
         @click="setMode('translate')"
       >
@@ -1198,7 +1229,7 @@ defineExpose({
       </button>
       <button
         type="button"
-        :class="{ active: gizmoMode === 'rotate' }"
+        :class="{ active: !project.handMode3d && gizmoMode === 'rotate' }"
         :disabled="panelOnlySelection"
         title="旋转手柄 (E)"
         @click="setMode('rotate')"
@@ -1207,7 +1238,7 @@ defineExpose({
       </button>
       <button
         type="button"
-        :class="{ active: gizmoMode === 'scale' }"
+        :class="{ active: !project.handMode3d && gizmoMode === 'scale' }"
         :disabled="panelOnlySelection"
         title="缩放手柄 (R)"
         @click="setMode('scale')"

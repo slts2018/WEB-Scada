@@ -56,6 +56,10 @@ function align(mode: AlignMode) {
   project.alignSelectedObject3ds(mode)
 }
 
+function toggleHand() {
+  project.setHandMode3d(!project.handMode3d)
+}
+
 function setGizmo(mode: 'translate' | 'rotate' | 'scale') {
   if (panelOnlySelection.value && (mode === 'rotate' || mode === 'scale')) {
     ElMessage.info('面板对象只能平移，请在面板编辑器中调整大小')
@@ -112,9 +116,18 @@ const canUngroup = () => project.selectedObjects3d.some((o) => Boolean(o.childre
     <el-button-group>
       <el-button
         size="small"
+        title="手掌：隐藏平移、旋转、缩放手柄"
+        type="primary"
+        :plain="!project.handMode3d"
+        @click="toggleHand"
+      >
+        手掌
+      </el-button>
+      <el-button
+        size="small"
         title="平移手柄 (W)"
         type="primary"
-        :plain="project.gizmoMode3d !== 'translate'"
+        :plain="project.handMode3d || project.gizmoMode3d !== 'translate'"
         :icon="Rank"
         @click="setGizmo('translate')"
       />
@@ -122,7 +135,7 @@ const canUngroup = () => project.selectedObjects3d.some((o) => Boolean(o.childre
         size="small"
         title="旋转手柄 (E)"
         type="primary"
-        :plain="project.gizmoMode3d !== 'rotate'"
+        :plain="project.handMode3d || project.gizmoMode3d !== 'rotate'"
         :icon="RefreshRight"
         :disabled="panelOnlySelection"
         @click="setGizmo('rotate')"
@@ -131,7 +144,7 @@ const canUngroup = () => project.selectedObjects3d.some((o) => Boolean(o.childre
         size="small"
         title="缩放手柄 (R)"
         type="primary"
-        :plain="project.gizmoMode3d !== 'scale'"
+        :plain="project.handMode3d || project.gizmoMode3d !== 'scale'"
         :icon="ZoomIn"
         :disabled="panelOnlySelection"
         @click="setGizmo('scale')"

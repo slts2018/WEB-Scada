@@ -64,13 +64,14 @@ export function parseDeviceChannel(
   const f = emptyConnFields()
   const s = (channel ?? '').trim()
   if (!s) {
-    if (protocol === 'modbus_tcp') f.port = '502'
+    if (protocol === 'modbus_tcp' || protocol === 'modbus_udp') f.port = '502'
     if (protocol === 'mqtt') f.port = '1883'
     return f
   }
 
   switch (protocol) {
-    case 'modbus_tcp': {
+    case 'modbus_tcp':
+    case 'modbus_udp': {
       // host:port | optional Swap* | optional Swap*
       const parts = s.split('|').map((p) => p.trim())
       const hp = parts[0] ?? ''
@@ -153,7 +154,8 @@ export function formatDeviceChannel(
   switch (protocol) {
     case 'mock':
       return undefined
-    case 'modbus_tcp': {
+    case 'modbus_tcp':
+    case 'modbus_udp': {
       const host = fields.host.trim()
       if (!host) return undefined
       const port = fields.port.trim() || '502'

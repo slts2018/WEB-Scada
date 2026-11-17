@@ -59,6 +59,7 @@ import {
 } from '@/shared/api/client'
 import { computeAlignPatches, type AlignMode } from '@/shared/designer/geometry'
 import { computeAlignPatches3d } from '@/shared/designer/geometry3d'
+import { eulerDegreesFromQuaternion } from '@/shared/three/eulerDegrees'
 import { objectIdsAfterHistory, widgetIdsAfterHistory } from '@/shared/designer/historySelection'
 import { clearResourceRefs, countRefsByResource, replaceResourceRefs } from '@/shared/project/resourceRefs'
 import {
@@ -122,6 +123,8 @@ export const useProjectStore = defineStore('project', () => {
   const previewLive = ref(false)
   /** 3D 变换手柄模式：平移 / 旋转 / 缩放 */
   const gizmoMode3d = ref<'translate' | 'rotate' | 'scale'>('translate')
+  /** 手掌：隐藏平移/旋转/缩放手柄，方便点选被手柄挡住的物体 */
+  const handMode3d = ref(false)
   /** 请求相机聚焦到当前 3D 选中（对象浏览器点选等同物体时也能再触发） */
   const focus3dNonce = ref(0)
   /** 对象浏览器等：强制相机看向指定 3D 对象（带时间戳，同对象连点也会触发） */
@@ -523,6 +526,11 @@ export const useProjectStore = defineStore('project', () => {
 
   function setGizmoMode3d(mode: 'translate' | 'rotate' | 'scale') {
     gizmoMode3d.value = mode
+    handMode3d.value = false
+  }
+
+  function setHandMode3d(on: boolean) {
+    handMode3d.value = on
   }
 
   function addWidget(
@@ -1402,6 +1410,9 @@ export const useProjectStore = defineStore('project', () => {
     if (document.value.homePageId === pageId) {
       document.value.homePageId = listNavigationPages(document.value)[0]?.id
     }
+    if (document.value.runtimePageId === pageId) {
+      document.value.runtimePageId = undefined
+    }
     if (activePageId.value === pageId) {
       const nav = listNavigationPages(document.value)
       activePageId.value = nav[Math.min(idx, Math.max(0, nav.length - 1))]?.id ?? nav[0]?.id
@@ -1469,6 +1480,15 @@ export const useProjectStore = defineStore('project', () => {
   function setHomePage(pageId: string) {
     if (!document.value.pages.some((p) => p.id === pageId)) return
     document.value.homePageId = pageId
+    touch()
+  }
+
+  function setRuntimePageId(pageId: string | undefined) {
+    const next = pageId?.trim() || undefined
+    if (next && !document.value.pages.some((p) => p.id === next)) return
+    if (document.value.runtimePageId === next) return
+    if (next) document.value.runtimePageId = next
+    else delete document.value.runtimePageId
     touch()
   }
 
@@ -2242,10 +2262,9 @@ function bakeChildUnderGroup(group: Transform3D, child: Transform3D): Transform3
   const quat = new Quaternion()
   const scale = new Vector3()
   parentMat.decompose(pos, quat, scale)
-  const euler = new Euler().setFromQuaternion(quat, 'XYZ')
   return {
     position: [pos.x, pos.y, pos.z],
-    rotation: [MathUtils.radToDeg(euler.x), MathUtils.radToDeg(euler.y), MathUtils.radToDeg(euler.z)],
+    rotation: eulerDegreesFromQuaternion(quat, child.rotation),
     scale: [scale.x, scale.y, scale.z],
   }
 }
@@ -2850,6 +2869,7 @@ log('script ready · ' + (context.trigger || 'try'))
     drawTool,
     previewLive,
     gizmoMode3d,
+    handMode3d,
     focus3dNonce,
     cameraFocus3dCmd,
     frameAfter3dTreeReload,
@@ -2875,6 +2895,7 @@ log('script ready · ' + (context.trigger || 'try'))
     cancelDrawTool,
     setPreviewLive,
     setGizmoMode3d,
+    setHandMode3d,
     requestFocusSelected3d,
     focusCameraOnObject3d,
     updateWidget,
@@ -2931,6 +2952,7 @@ log('script ready · ' + (context.trigger || 'try'))
     createPageFromTemplate,
     removePageTemplate,
     setHomePage,
+    setRuntimePageId,
     saveAs,
     addImageResource,
     addImageWidgetFromFile,

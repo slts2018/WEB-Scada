@@ -101,12 +101,14 @@ export interface TagValue {
 /**
  * 设备协议。
  * - mock：内存模拟
+ * - modbus_tcp / modbus_udp：按变量地址轮询。UDP 事务号固定为 0，首字节不能自增。
  * - mcd4000：数据中台 Query* 轮询读（写值不下发现场）
  * - 其余：目前仅元数据，真 IO 未接
  */
 export type DeviceProtocol =
   | 'mock'
   | 'modbus_tcp'
+  | 'modbus_udp'
   | 'opcua'
   | 'mqtt'
   | 'http'

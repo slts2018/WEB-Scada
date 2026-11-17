@@ -371,12 +371,6 @@ export function createDefaultPanelWidgets(title = '操作面板'): Widget2D[] {
     },
     props: { text: '写值' },
   })
-  btn.events = [
-    {
-      id: newEventId(),
-      trigger: 'click',
-      actions: [{ type: 'writeTag', tagId: '', value: 1, confirm: true }],
-    },
-  ]
+  // 不预置空 tagId 的写值事件，避免未绑变量就进入运行时点击行为不明确
   return [text, btn]
 }

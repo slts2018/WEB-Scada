@@ -14,8 +14,8 @@ function formatTime(ts: number) {
     <div class="ops">
       <el-button size="small" text @click="log.clear()">清空</el-button>
     </div>
-    <ul v-if="log.list.length" class="lines">
-      <li v-for="item in log.list" :key="item.id" :class="item.level">
+    <ul v-if="log.paneList.length" class="lines">
+      <li v-for="item in log.paneList" :key="item.id" :class="item.level">
         <span class="t">{{ formatTime(item.time) }}</span>
         <span class="s">[{{ item.source }}]</span>
         <span class="m">{{ item.message }}</span>

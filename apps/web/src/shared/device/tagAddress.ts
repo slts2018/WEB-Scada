@@ -64,7 +64,8 @@ export function parseTagAddress(
   if (!s) return f
 
   switch (protocol) {
-    case 'modbus_tcp': {
+    case 'modbus_tcp':
+    case 'modbus_udp': {
       const m = s.match(/^(coil|discrete|input|holding)\s*:\s*(.+)$/i)
       if (m) {
         f.mbArea = m[1].toLowerCase() as ModbusArea
@@ -128,7 +129,8 @@ export function formatTagAddress(
       const v = fields.raw.trim()
       return v || undefined
     }
-    case 'modbus_tcp': {
+    case 'modbus_tcp':
+    case 'modbus_udp': {
       const off = fields.mbOffset.trim()
       if (!off) return undefined
       if (!/^\d+$/.test(off)) return undefined
