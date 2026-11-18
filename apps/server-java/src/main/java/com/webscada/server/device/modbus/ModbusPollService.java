@@ -4,6 +4,7 @@ import com.webscada.server.config.ScadaProperties;
 import com.webscada.server.model.DeviceMeta;
 import com.webscada.server.model.TagMeta;
 import com.webscada.server.model.TagValue;
+import com.webscada.server.service.CommsEventLogService;
 import com.webscada.server.service.TagRuntimeService;
 import com.webscada.server.store.DeviceFileStore;
 import jakarta.annotation.PreDestroy;
@@ -46,13 +47,21 @@ public class ModbusPollService {
   /** tagId 或探测键 → 上次发起读取的时间 */
   private final ConcurrentHashMap<String, Long> lastScanAt = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<String, DeviceWorker> workers = new ConcurrentHashMap<>();
+  /** deviceId → 上一轮是否启用，用于启停采集事件（停用检查每轮都会跑，必须边沿触发）。 */
+  private final ConcurrentHashMap<String, Boolean> lastEnabled = new ConcurrentHashMap<>();
+  private final CommsEventLogService commsLog;
 
   public ModbusPollService(
-      DeviceFileStore devices, TagRuntimeService runtime, ModbusTagIo io, ScadaProperties props) {
+      DeviceFileStore devices,
+      TagRuntimeService runtime,
+      ModbusTagIo io,
+      ScadaProperties props,
+      CommsEventLogService commsLog) {
     this.devices = devices;
     this.runtime = runtime;
     this.io = io;
     this.props = props;
+    this.commsLog = commsLog;
   }
 
   @Scheduled(fixedDelay = 50, initialDelay = 2500)
@@ -93,6 +102,12 @@ public class ModbusPollService {
       if (!ModbusTagIo.isModbusProtocol(d.protocol()) || d.deviceId() == null) continue;
       if (d.enabled()) {
         modbusDevs.put(d.deviceId(), d);
+        Boolean prevEn = lastEnabled.put(d.deviceId(), Boolean.TRUE);
+        if (prevEn == null) {
+          commsLog.deviceEnabledChanged(d, true);
+        } else if (!prevEn) {
+          commsLog.deviceEnabledChanged(d, true);
+        }
       } else {
         disabledModbus.add(d.deviceId());
       }
@@ -130,6 +145,16 @@ public class ModbusPollService {
   private void applyDisabledDevices(Set<String> disabledIds) {
     if (disabledIds == null || disabledIds.isEmpty()) return;
     for (String id : disabledIds) {
+      Boolean prevEn = lastEnabled.put(id, Boolean.FALSE);
+      if (prevEn == null || prevEn) {
+        try {
+          DeviceMeta dev = devices.get(id);
+          commsLog.deviceEnabledChanged(dev != null ? dev : new DeviceMeta(id, id, "", "", false, null), false);
+        } catch (Exception e) {
+          commsLog.deviceEnabledChanged(new DeviceMeta(id, id, "", "", false, null), false);
+        }
+      }
+      commsLog.rememberReason(id, "设备已停用");
       io.dropClient(id);
       health.clear(id);
       lastOnline.remove(id);
@@ -170,6 +195,7 @@ public class ModbusPollService {
           markBad(meta);
         }
         if (!due.isEmpty()) {
+          commsLog.rememberReason(deviceId, "设备冷却中");
           noteOnline(deviceId, false, "cooldown " + health.cooldownRemainingMs(deviceId, now) + "ms");
           io.reportOnline(
               deviceId,
@@ -274,6 +300,9 @@ public class ModbusPollService {
     }
 
     long cost = System.currentTimeMillis() - t0;
+    if (batch != null) {
+      noteConnect(deviceId, batch.connect(), cooldownMs, maxFail);
+    }
     if (ok > 0 && fail == 0) {
       health.onSuccess(deviceId);
       noteOnline(deviceId, true, "poll ok " + ok + " pts " + cost + "ms");
@@ -307,20 +336,22 @@ public class ModbusPollService {
       noteOnline(deviceId, false, lastErr != null ? lastErr : "all points failed");
       io.reportOnline(deviceId, false, lastErr != null ? lastErr : "采集失败");
     }
-    if (batch != null) noteConnect(deviceId, batch.connect(), cooldownMs, maxFail);
   }
 
   /** 读超时不加冷却。只有套接字连不上，连续达到次数才冷却。 */
-  private void noteConnect(
+  private boolean noteConnect(
       String deviceId, ModbusTagIo.ConnectSignal signal, long cooldownMs, int maxFail) {
+    boolean cooled = false;
     switch (signal) {
-      case FAIL -> health.onFailure(deviceId, System.currentTimeMillis(), cooldownMs, maxFail);
+      case FAIL ->
+          cooled = health.onFailure(deviceId, System.currentTimeMillis(), cooldownMs, maxFail);
       case RESTART -> {
         health.clear(deviceId);
-        health.onFailure(deviceId, System.currentTimeMillis(), cooldownMs, maxFail);
+        cooled = health.onFailure(deviceId, System.currentTimeMillis(), cooldownMs, maxFail);
       }
       case CLEAR -> health.clear(deviceId);
     }
+    return cooled;
   }
 
   private List<TagMeta> collectDue(List<TagMeta> tags, long now) {
@@ -358,6 +389,9 @@ public class ModbusPollService {
     } else {
       log.warn("modbus device offline device={} detail={}", deviceId, detail);
     }
+    int fails = health.failCount(deviceId);
+    boolean cooled = health.consumeEnteredCooldown(deviceId);
+    commsLog.deviceOnlineChanged(deviceId, online, detail, fails, cooled);
   }
 
   private static String shortMsg(Exception e) {

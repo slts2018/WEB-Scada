@@ -15,13 +15,29 @@ export interface OutputEntry {
 const MAX = 1000
 const sessionStart = Date.now()
 
+/** 设计端底部「输出」栏只展示这些来源。通讯 / 运行端等仍写入管理页与 web-scada.log。 */
+export const DESIGNER_OUTPUT_SOURCES: ReadonlySet<string> = new Set([
+  '设计端',
+  '三维',
+  '脚本试跑',
+  '系统',
+])
+
+export function isDesignerOutputSource(source: string | undefined) {
+  return !!source && DESIGNER_OUTPUT_SOURCES.has(source)
+}
+
 export const useOutputLogStore = defineStore('outputLog', () => {
   const entries = ref<OutputEntry[]>([])
   /** 输出栏只展示本会话（及清空之后）的记录；管理页走服务端完整历史。 */
   const paneClearedAt = ref(sessionStart)
 
   const list = computed(() => entries.value)
-  const paneList = computed(() => entries.value.filter((e) => e.time >= paneClearedAt.value))
+  const paneList = computed(() =>
+    entries.value.filter(
+      (e) => e.time >= paneClearedAt.value && isDesignerOutputSource(e.source),
+    ),
+  )
 
   function merge(items: OutputEntry[]) {
     if (!items.length) return

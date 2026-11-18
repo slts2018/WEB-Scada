@@ -2,6 +2,7 @@ package com.webscada.server.web;
 
 import com.webscada.server.model.ApiError;
 import com.webscada.server.model.DeviceMeta;
+import com.webscada.server.service.CommsEventLogService;
 import com.webscada.server.service.DeviceConnectionProbeService;
 import com.webscada.server.service.DeviceConnectivityMonitor;
 import com.webscada.server.service.DeviceStatusService;
@@ -23,16 +24,19 @@ public class DeviceController {
   private final DeviceStatusService linkStatus;
   private final DeviceConnectionProbeService probe;
   private final DeviceConnectivityMonitor monitor;
+  private final CommsEventLogService commsLog;
 
   public DeviceController(
       DeviceFileStore devices,
       DeviceStatusService linkStatus,
       DeviceConnectionProbeService probe,
-      DeviceConnectivityMonitor monitor) {
+      DeviceConnectivityMonitor monitor,
+      CommsEventLogService commsLog) {
     this.devices = devices;
     this.linkStatus = linkStatus;
     this.probe = probe;
     this.monitor = monitor;
+    this.commsLog = commsLog;
   }
 
   @GetMapping("/api/devices")
@@ -118,7 +122,11 @@ public class DeviceController {
             body != null ? body.enabled() : existing.enabled(),
             body != null && body.description() != null ? body.description() : existing.description());
     try {
-      return ResponseEntity.ok(devices.upsert(next));
+      DeviceMeta saved = devices.upsert(next);
+      if (existing.enabled() != saved.enabled()) {
+        commsLog.deviceEnabledChanged(saved, saved.enabled());
+      }
+      return ResponseEntity.ok(saved);
     } catch (IllegalStateException e) {
       return ResponseEntity.status(503)
           .body(ApiError.of("mysql_unavailable", e.getMessage()));

@@ -275,6 +275,8 @@ export const useProjectStore = defineStore('project', () => {
       page.objects = parsed.data as Object3DNode[]
       selectedObject3dIds.value = objectIdsAfterHistory(from, page.objects)
       touch()
+      // 姿态不在树签名里：不 bump 的话画布只会把主选对象 applyVisual 回去
+      bumpScene3d()
     }
   }
 
@@ -307,6 +309,7 @@ export const useProjectStore = defineStore('project', () => {
       page.objects = parsed.data as Object3DNode[]
       selectedObject3dIds.value = objectIdsAfterHistory(from, page.objects)
       touch()
+      bumpScene3d()
     }
   }
 

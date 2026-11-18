@@ -81,6 +81,9 @@ public class TagRuntimeService {
 
   private final ObjectProvider<ModbusTagIo> modbusIoProvider;
 
+  @Autowired(required = false)
+  private ObjectProvider<CommsEventLogService> commsEventLog;
+
   /** 单测直接塞入的通信入口。生产路径走 commProvider，开关关闭时为空。 */
   private final CommFacade commOverride;
 
@@ -390,6 +393,7 @@ public class TagRuntimeService {
     TagValue prev = values.get(tagId);
     TagValue next = new TagValue(tagId, value, quality, timestamp);
     values.put(tagId, next);
+    notifyCommsQuality(tagId, prev, next);
     if (alarms == null && sessions == null && influx == null) return next;
     TagMeta meta = metaOf(tagId);
     noteAlarm(meta, next);
@@ -462,6 +466,13 @@ public class TagRuntimeService {
 
     return WriteResult.ok(next);
 
+  }
+
+  private void notifyCommsQuality(String tagId, TagValue prev, TagValue next) {
+    if (commsEventLog == null) return;
+    CommsEventLogService ev = commsEventLog.getIfAvailable();
+    if (ev == null) return;
+    ev.onTagQualityChange(metaOf(tagId), prev, next);
   }
 
   private boolean isModbusDriven(TagMeta meta) {
@@ -587,7 +598,19 @@ public class TagRuntimeService {
       if (prevSlot != null && prevSlot == slot) continue;
       simSlots.put(meta.tagId(), slot);
       Object next = stepSimulation(meta, sim, cur.value(), rnd, nowMs);
-      if (next == null || Objects.equals(next, cur.value())) continue;
+      if (next == null || Objects.equals(next, cur.value())) {
+        // 停用后品质为 Bad：值未变时也要回到 Good，以便通讯日志记到恢复
+        if (cur.quality() != null && !"Good".equals(cur.quality())) {
+          setTagValue(meta.tagId(), cur.value(), "Good");
+        }
+        continue;
+      }
+      if (cur.quality() != null && !"Good".equals(cur.quality())) {
+        setTagValue(meta.tagId(), next, "Good");
+        TagValue v = values.get(meta.tagId());
+        if (v != null) changed.add(v);
+        continue;
+      }
       TagValue v = now(meta.tagId(), next, "Good");
       values.put(meta.tagId(), v);
       noteAlarm(meta, v);

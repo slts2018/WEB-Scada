@@ -5,6 +5,7 @@ import com.webscada.server.config.ScadaProperties;
 import com.webscada.server.model.DeviceMeta;
 import com.webscada.server.model.TagMeta;
 import com.webscada.server.model.TagValue;
+import com.webscada.server.service.CommsEventLogService;
 import com.webscada.server.service.DeviceStatusService;
 import com.webscada.server.service.TagRuntimeService;
 import com.webscada.server.store.DeviceFileStore;
@@ -27,6 +28,9 @@ public class Mcd4000PollService {
   private final DeviceFileStore devices;
   private final TagRuntimeService runtime;
   private final DeviceStatusService linkStatus;
+  private final CommsEventLogService commsLog;
+  private final ConcurrentHashMap<String, Boolean> lastOnline = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<String, String> lastOnlineDetail = new ConcurrentHashMap<>();
   private final ScadaProperties props;
   private final ObjectMapper mapper;
   private final AtomicBoolean busy = new AtomicBoolean(false);
@@ -40,11 +44,13 @@ public class Mcd4000PollService {
       DeviceFileStore devices,
       TagRuntimeService runtime,
       DeviceStatusService linkStatus,
+      CommsEventLogService commsLog,
       ScadaProperties props,
       ObjectMapper mapper) {
     this.devices = devices;
     this.runtime = runtime;
     this.linkStatus = linkStatus;
+    this.commsLog = commsLog;
     this.props = props;
     this.mapper = mapper;
   }
@@ -87,7 +93,17 @@ public class Mcd4000PollService {
         mcdById.put(d.deviceId(), d);
       }
     }
-    if (mcdById.isEmpty()) return;
+    if (mcdById.isEmpty()) {
+      lastOnline.clear();
+      lastOnlineDetail.clear();
+      return;
+    }
+    for (String id : new java.util.ArrayList<>(lastOnline.keySet())) {
+      if (!mcdById.containsKey(id)) {
+        lastOnline.remove(id);
+        lastOnlineDetail.remove(id);
+      }
+    }
 
     // deviceId → tags with address
     Map<String, List<BoundTag>> byDevice = new HashMap<>();
@@ -108,6 +124,8 @@ public class Mcd4000PollService {
       if (ch == null) {
         if (!scanDue("badch:" + dev.deviceId(), pingEvery, now)) continue;
         lastScanAt.put("badch:" + dev.deviceId(), now);
+        commsLog.rememberReason(dev.deviceId(), "通道无效");
+        noteOnline(dev, false, "通道无效");
         linkStatus.report(dev.deviceId(), false, "offline", "通道无效");
         markBad(tags);
         continue;
@@ -127,6 +145,7 @@ public class Mcd4000PollService {
           if (due.isEmpty()) continue;
           List<Mcd4000Channel.TagAddr> addrs = due.stream().map(BoundTag::addr).toList();
           Map<String, Mcd4000Client.Point> latest = cli.queryLatest(ch, addrs);
+          commsLog.rememberReason(dev.deviceId(), "采集正常");
           for (BoundTag bt : due) {
             Mcd4000Client.Point point =
                 latest.get(Mcd4000Client.key(bt.addr.sensor(), bt.addr.field()));
@@ -142,9 +161,12 @@ public class Mcd4000PollService {
             }
           }
         }
+        noteOnline(dev, true, "采集正常");
         linkStatus.report(dev.deviceId(), true, "online", null);
       } catch (Exception ex) {
         warn("device " + dev.deviceId() + " query failed", ex);
+        commsLog.rememberReason(dev.deviceId(), "连接失败");
+        noteOnline(dev, false, "连接失败");
         linkStatus.report(dev.deviceId(), false, "offline", "连接失败");
         markBad(due);
       }
@@ -159,6 +181,20 @@ public class Mcd4000PollService {
   private boolean scanDue(String key, long periodMs, long now) {
     long last = lastScanAt.getOrDefault(key, 0L);
     return last == 0L || now - last >= periodMs;
+  }
+
+
+  private void noteOnline(DeviceMeta dev, boolean online, String detail) {
+    if (dev == null || dev.deviceId() == null) return;
+    String id = dev.deviceId();
+    String det = detail == null ? "" : detail;
+    Boolean prev = lastOnline.put(id, online);
+    String prevDet = lastOnlineDetail.put(id, det);
+    if (prev != null && prev == online) {
+      if (online) return;
+      if (det.equals(prevDet == null ? "" : prevDet)) return;
+    }
+    commsLog.deviceOnlineChanged(id, online, detail, 0, false);
   }
 
   private void markBad(List<BoundTag> tags) {

@@ -185,6 +185,11 @@ export interface Scene3DOptions {
    * 与按需共用同一 tick，只把续帧条件视为恒 true，不另开循环。
    */
   continuousRender?: boolean
+  /**
+   * 是否播放管道流动。默认：运行端开、设计端关。
+   * 设计端仅在「实时预览」时打开，避免空闲 60fps。
+   */
+  enableFlow?: boolean
 }
 
 export interface Scene3DBundle {
@@ -246,6 +251,12 @@ export interface Scene3DBundle {
   ) => void
   /** 用 Tag 刷新面板 Konva 绑定视觉 */
   refreshPanel: (objectId: string, getTag: (id: string) => TagValue | undefined) => void
+  /** 设计端实时预览 / 运行端：播放管道流动；关闭后停止持续 RAF */
+  setFlowPlayback: (on: boolean) => void
+  getFlowPlayback: () => boolean
+  getFlowObjectCount: () => number
+  /** 面板 CSS zoom / Konva setWorldScale 写入统计（确认量化后跳过冗余布局） */
+  getPanelScaleStats: () => { writes: number; skips: number }
   /**
    * 请求下一帧绘制。绕过工厂改 scene 时必须手动调。
    * 多次调用合并到下一帧（最终一致，非每变必渲）。
@@ -758,6 +769,8 @@ export function createScene3D(
   const continuousRender = options.continuousRender === true
   const selectionHighlight = options.selectionHighlight ?? enableGizmo
   let labelsVisible = Boolean(options.enableLabels) && enableGizmo
+  // 运行端默认播放；设计端默认关闭，由 Canvas3DBoard 在实时预览时打开
+  let flowPlayback = options.enableFlow ?? !enableGizmo
 
   const scene = new Scene()
   scene.background = new Color(0x12151c)
@@ -801,6 +814,10 @@ export function createScene3D(
   container.appendChild(labelEl)
   const labelMap = new Map<string, CSS2DObject>()
   const panelMap = new Map<string, CSS2DObject>()
+  /** 已应用到面板的量化 zoom；未变化则跳过 style.zoom / setWorldScale */
+  const lastPanelZoom = new Map<string, number>()
+  let panelScaleWrites = 0
+  let panelScaleSkips = 0
   /** setPage / mountObject 写入，供面板图片解析 */
   let resolveResourceUrlFn: ((resourceId: string) => string | undefined) | undefined
   /** 材质贴图异步加载取消 */
@@ -1295,6 +1312,7 @@ const syncSelectionHelpers = (ids: string[]) => {
       pan.element.remove()
     }
     panelMap.clear()
+    lastPanelZoom.clear()
   }
 
   const removePanel = (objectId: string) => {
@@ -1306,6 +1324,7 @@ const syncSelectionHelpers = (ids: string[]) => {
     pan.parent?.remove(pan)
     pan.element.remove()
     panelMap.delete(objectId)
+    lastPanelZoom.delete(objectId)
   }
 
   const panelDomHandlers = (): Object3dPanelDomHandlers => ({
@@ -1403,7 +1422,14 @@ const syncSelectionHelpers = (ids: string[]) => {
   /**
    * CSS2D 按距离缩放，近大远小（参考视距时为设计稿像素大小）。
    * 必须用 zoom，不能用 transform:scale：后者先按设计稿栅格化再拉伸，近处字体会糊。
+   * 量化后再写 style.zoom / Konva setWorldScale，避免 Orbit 每一帧都触发布局。
    */
+  const PANEL_ZOOM_STEP = 0.005
+  const quantizePanelZoom = (s: number) => {
+    if (!Number.isFinite(s) || s <= 0) return 1
+    if (Math.abs(s - 1) < 0.001) return 1
+    return Math.round(s / PANEL_ZOOM_STEP) * PANEL_ZOOM_STEP
+  }
   let panelScaleLayoutRetries = 0
   const updatePanelWorldScales = () => {
     if (panelMap.size === 0) return
@@ -1422,16 +1448,23 @@ const syncSelectionHelpers = (ids: string[]) => {
       if (!layout) needRelayout = true
       let s = PANEL_WORLD_REF_DIST / dist
       if (layout) s = clampPanelZoom(s, layout)
-      if (Math.abs(s - 1) < 0.001) {
+      const q = quantizePanelZoom(s)
+      if (lastPanelZoom.get(objectId) === q) {
+        panelScaleSkips += 1
+        continue
+      }
+      lastPanelZoom.set(objectId, q)
+      panelScaleWrites += 1
+      if (q === 1) {
         wrap.style.zoom = ''
         wrap.style.transform = ''
       } else {
         // zoom 会按新尺寸重排/重绘文字，底边中心仍由 CSS2D center(0.5,1) 对齐锚点
-        wrap.style.zoom = String(s)
+        wrap.style.zoom = String(q)
         wrap.style.transform = ''
       }
       // Konva 画布不会随 zoom 重绘；提高 pixelRatio 抵消放大糊边
-      getPanelKonvaRuntime(pan.element as HTMLElement)?.setWorldScale(s)
+      getPanelKonvaRuntime(pan.element as HTMLElement)?.setWorldScale(q)
     }
     if (needRelayout) {
       if (panelScaleLayoutRetries < 4) {
@@ -2166,7 +2199,7 @@ const syncSelectionHelpers = (ids: string[]) => {
    * - 速度 = 基准速度 × 变量映射出的系数；系数 0 → 停流并隐藏条纹
    */
   const applyFlowVisual = (obj: Object3D, visual: Object3DNode) => {
-    const flow = flowFromRawNode(visual)
+    const flow = flowPlayback ? flowFromRawNode(visual) : null
     if (!flow) {
       const stale = flowObjects.get(visual.id)
       if (stale) {
@@ -2367,6 +2400,26 @@ const syncSelectionHelpers = (ids: string[]) => {
     }
     // 管道流动（加性效果，放在通用材质逻辑之后）
     applyFlowVisual(obj, visual)
+    invalidate()
+  }
+
+  const setFlowPlayback = (on: boolean) => {
+    if (flowPlayback === on) return
+    flowPlayback = on
+    if (!on) {
+      for (const [id, handle] of flowObjects) {
+        handle.uniforms.uFlowEnabled.value = 0
+        const obj = objectMap.get(id)
+        if (obj) hideFlowRibbon(obj)
+      }
+      flowObjects.clear()
+      invalidate()
+      return
+    }
+    for (const [id, obj] of objectMap) {
+      const node = nodeMap.get(id)
+      if (node) applyFlowVisual(obj, node)
+    }
     invalidate()
   }
 
@@ -3284,6 +3337,10 @@ const syncSelectionHelpers = (ids: string[]) => {
     syncPanel,
     setPanelValues,
     refreshPanel,
+    setFlowPlayback,
+    getFlowPlayback: () => flowPlayback,
+    getFlowObjectCount: () => flowObjects.size,
+    getPanelScaleStats: () => ({ writes: panelScaleWrites, skips: panelScaleSkips }),
     invalidate,
     getGizmoStatus: () => ({
       enabled: enableGizmo,

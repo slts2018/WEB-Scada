@@ -88,8 +88,8 @@ function onSceneObjectLoad(event: SceneObjectLoadEvent) {
     : ''
   const extra = file ? `${event.kind} · ${file}` : event.kind
   const line = `${index}/${total} ${event.name}（${extra}）`
-  if (event.ok) log.success(`已加载 ${line}`, '三维')
-  else log.error(`加载失败 ${line}`, '三维')
+  // 成功加载不再逐条写输出栏，避免切页刷屏；失败仍记录
+  if (!event.ok) log.error(`加载失败 ${line}`, '三维')
 }
 
 function beginSceneLoad(total: number, title?: string, usesEventIndex = true) {
@@ -100,7 +100,8 @@ function beginSceneLoad(total: number, title?: string, usesEventIndex = true) {
   sceneLoadName.value = ''
   sceneLoadKind.value = ''
   sceneLoading.value = total > 0
-  if (title) log.info(title, '三维')
+  // 进度蒙层已提示加载过程，不再向输出栏写「开始加载」以免切页刷屏
+  void title
 }
 
 function endSceneLoad(total: number, title?: string) {
@@ -109,7 +110,8 @@ function endSceneLoad(total: number, title?: string) {
     if (total > 0) sceneLoadIndex.value = total
     sceneLoading.value = false
   }
-  if (title) log.success(title, '三维')
+  // 常规加载完成不写输出栏；失败已在 onSceneObjectLoad 记录
+  void title
 }
 const host = ref<HTMLDivElement | null>(null)
 const boardEl = ref<HTMLDivElement | null>(null)
@@ -684,6 +686,7 @@ function applyPreview() {
 }
 
 function startPreview() {
+  bundle?.setFlowPlayback(true)
   tags.setPageSubscription(collectPage3DTagIds(props.page))
   tags.connectRealtime()
   removeTagListener?.()
@@ -695,6 +698,7 @@ function stopPreview() {
   removeTagListener?.()
   removeTagListener = null
   clearPreviewBlink()
+  bundle?.setFlowPlayback(false)
   void reload()
 }
 
