@@ -562,7 +562,7 @@ function resolveDragLinks(objectId: string) {
   }
 }
 
-async function runEvents(events: EventBinding[], trigger: 'click' | 'dblclick') {
+async function runEvents(events: EventBinding[], trigger: 'click' | 'dblclick' | 'load' | 'unload', objectId?: string) {
   for (const evt of events) {
     if (evt.trigger !== trigger) continue
     for (const action of evt.actions) {
@@ -596,6 +596,7 @@ async function runEvents(events: EventBinding[], trigger: 'click' | 'dblclick') 
         runScriptSource(
           script.source,
           makeScriptApi({
+            widgetId: objectId,
             trigger: evt.trigger,
             scriptId: script.id,
             scriptName: script.name,
@@ -605,6 +606,19 @@ async function runEvents(events: EventBinding[], trigger: 'click' | 'dblclick') 
       }
     }
   }
+}
+
+function firePageTrigger(trigger: 'load' | 'unload') {
+  walkObject3dTree(livePageObjects(), (obj) => {
+    const events = (obj.events ?? []).filter((e) => e.trigger === trigger)
+    if (!events.length) return
+    const interactive = resolveObject3DVisual(obj, (id) => tags.getValue(id)).interactive
+    if (interactive === false) {
+      log.warn('对象当前禁止操作', '运行端')
+      return
+    }
+    void runEvents(events, trigger, obj.id)
+  })
 }
 
 async function reload() {
@@ -676,6 +690,7 @@ onMounted(async () => {
     { showGrid: props.showGrid === true },
   )
   await reload()
+  firePageTrigger('load')
   if (!props.embedded) tags.connectRealtime()
   removeListener = tags.addListener(() => refreshVisuals())
 })
@@ -683,7 +698,9 @@ onMounted(async () => {
 watch(
   () => props.page.id,
   async () => {
+    firePageTrigger('unload')
     await reload()
+    firePageTrigger('load')
   },
 )
 
@@ -706,6 +723,7 @@ watch(
 )
 
 onUnmounted(() => {
+  firePageTrigger('unload')
   writeResolver?.(null)
   writeResolver = null
   clickDblGate.dispose()

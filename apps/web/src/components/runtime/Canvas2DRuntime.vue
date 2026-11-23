@@ -735,6 +735,7 @@ onMounted(() => {
     bundle?.syncOverlays()
   })
   setupSubscription(props.page)
+  firePageTrigger('load')
   offFullscreen = onWidgetFullscreenChange(syncFullscreen)
   // 点表开关变化时立刻算一次位置（正常也会被 after() 的刷新带上，这里兜个底）
   offTrendTable = onTrendHistoryTableChange(() => {
@@ -760,6 +761,7 @@ watch(
     stopSchedules = null
     bundle.setPage(props.page)
     setupSubscription(props.page)
+    firePageTrigger('load')
   },
 )
 
