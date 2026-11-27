@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.webscada.server.model.ApiError;
 import com.webscada.server.service.PackageException;
 import com.webscada.server.service.ProjectPackageService;
+import com.webscada.server.service.ProjectResourceAdoptionService;
 import com.webscada.server.service.SitePackageService;
 import com.webscada.server.store.ProjectFileStore;
 import java.util.LinkedHashMap;
@@ -26,12 +27,17 @@ public class ProjectController {
   private final ProjectFileStore store;
   private final ProjectPackageService packages;
   private final SitePackageService sitePackages;
+  private final ProjectResourceAdoptionService resources;
 
   public ProjectController(
-      ProjectFileStore store, ProjectPackageService packages, SitePackageService sitePackages) {
+      ProjectFileStore store,
+      ProjectPackageService packages,
+      SitePackageService sitePackages,
+      ProjectResourceAdoptionService resources) {
     this.store = store;
     this.packages = packages;
     this.sitePackages = sitePackages;
+    this.resources = resources;
   }
 
   @GetMapping("/api/projects")
@@ -121,6 +127,31 @@ public class ProjectController {
       };
     } catch (Exception e) {
       return ResponseEntity.status(500).body(ApiError.of("site_export_failed", e.getMessage()));
+    }
+  }
+
+  /**
+   * 把文档里引用的 /api/files/{其它工程}/… 拷到本工程目录并改写路径。不负责入库；前端另存为后会再 PUT。
+   * 若未传 body，则按已保存的工程文档收编。
+   */
+  @PostMapping("/api/projects/{id}/adopt-resources")
+  public ResponseEntity<?> adoptResources(
+      @PathVariable String id, @RequestBody(required = false) JsonNode body) {
+    try {
+      JsonNode source = body;
+      if (source == null || source.isNull() || source.isMissingNode()) {
+        source = store.getProject(id);
+        if (source == null) {
+          return ResponseEntity.status(404).body(ApiError.of("project_not_found"));
+        }
+      } else if (!source.has("meta") || !id.equals(source.get("meta").path("id").asText())) {
+        return ResponseEntity.badRequest().body(ApiError.of("invalid_project_body"));
+      }
+      return ResponseEntity.ok(resources.adopt(source, id));
+    } catch (IllegalArgumentException e) {
+      return ResponseEntity.badRequest().body(ApiError.of("invalid_project_body"));
+    } catch (Exception e) {
+      return ResponseEntity.status(500).body(ApiError.of("adopt_resources_failed", e.getMessage()));
     }
   }
 

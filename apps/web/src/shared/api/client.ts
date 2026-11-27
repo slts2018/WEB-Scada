@@ -90,6 +90,14 @@ export async function apiDeleteProject(id: string): Promise<void> {
   await request(`/projects/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
+/** 把文档引用的资源拷到本工程目录并改写 /api/files 路径。不入库，调用方再 save。 */
+export async function apiAdoptProjectResources(doc: ProjectDocument): Promise<ProjectDocument> {
+  return request(`/projects/${encodeURIComponent(doc.meta.id)}/adopt-resources`, {
+    method: 'POST',
+    body: JSON.stringify(doc),
+  })
+}
+
 /** 下载完整工程包（JSON + 资源 zip）。响应头到达后按字节回报下载进度。 */
 export async function apiExportProject(
   id: string,

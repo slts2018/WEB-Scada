@@ -15,6 +15,7 @@ import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Comparator;
+import java.util.Map;
 import java.util.stream.Stream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -60,8 +61,12 @@ public class SitePackageService {
     Path dest = tmpRoot.resolve(folderName);
     Path zipPath = tmpRoot.resolve(folderName + ".zip");
     try {
+      var prepared =
+          ProjectResourceSupport.prepare(doc, projectId, paths.getResourcesRoot());
+      JsonNode packedDoc = prepared.document;
+      JsonNode packedPkg = remapPublishDocument(pkg, packedDoc);
       copyTemplate(template, dest);
-      injectProjectData(dest, projectId, doc, pkg);
+      injectProjectData(dest, projectId, packedDoc, packedPkg, prepared);
       zipDirectoryWindows(dest, zipPath);
       byte[] zip = Files.readAllBytes(zipPath);
       String name = doc.path("meta").path("name").asText("site");
@@ -171,7 +176,33 @@ public class SitePackageService {
         });
   }
 
-  private void injectProjectData(Path dest, String projectId, JsonNode doc, JsonNode pkg)
+  private static JsonNode remapPublishDocument(JsonNode pkg, JsonNode packedDoc) {
+    if (pkg != null && pkg.isObject()) {
+      ObjectNode copy = ((ObjectNode) pkg).deepCopy();
+      copy.set("document", packedDoc);
+      if (copy.path("manifest").isObject()) {
+        com.fasterxml.jackson.databind.node.ArrayNode idx =
+            ((ObjectNode) copy.get("manifest")).putArray("resourceIndex");
+        if (packedDoc.has("resources") && packedDoc.get("resources").isArray()) {
+          for (JsonNode r : packedDoc.get("resources")) {
+            ObjectNode item = idx.addObject();
+            item.put("id", r.path("id").asText());
+            item.put("path", r.path("path").asText());
+            item.put("kind", r.path("kind").asText());
+          }
+        }
+      }
+      return copy;
+    }
+    return pkg;
+  }
+
+  private void injectProjectData(
+      Path dest,
+      String projectId,
+      JsonNode doc,
+      JsonNode pkg,
+      ProjectResourceSupport.PreparedResources prepared)
       throws IOException {
     Path dataDir = dest.resolve("data");
     Files.createDirectories(dataDir.resolve("projects"));
@@ -183,10 +214,15 @@ public class SitePackageService {
     JsonFiles.write(
         dataDir.resolve("meta.json"), java.util.Map.of("lastProjectId", projectId));
 
-    Path resSrc = paths.getResourcesRoot().resolve(projectId);
     Path resDst = dataDir.resolve("resources").resolve(projectId);
-    if (Files.isDirectory(resSrc)) {
-      copyTree(resSrc, resDst);
+    Files.createDirectories(resDst);
+    Path destRoot = resDst.toAbsolutePath().normalize();
+    for (Map.Entry<String, Path> e : prepared.files.entrySet()) {
+      Path src = e.getValue();
+      if (!Files.isRegularFile(src)) continue;
+      Path destFile = resDst.resolve(e.getKey()).toAbsolutePath().normalize();
+      if (!destFile.startsWith(destRoot)) continue;
+      Files.copy(src, destFile, StandardCopyOption.REPLACE_EXISTING);
     }
 
     for (String name : new String[] {"tags.json", "devices.json"}) {

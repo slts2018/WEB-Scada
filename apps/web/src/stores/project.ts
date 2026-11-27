@@ -53,6 +53,7 @@ import {
   type ProjectIndexItem,
 } from '@/shared/storage/repository'
 import {
+  apiAdoptProjectResources,
   apiExportProject,
   apiExportSite,
   apiImportProject,
@@ -1533,8 +1534,14 @@ export const useProjectStore = defineStore('project', () => {
       updatedAt: now,
       version: '0.1.0',
     }
-    document.value = normalizeProjectDocument(cloned)
-    activePageId.value = cloned.homePageId ?? cloned.pages[0]?.id
+    let next = normalizeProjectDocument(cloned)
+    try {
+      next = normalizeProjectDocument(await apiAdoptProjectResources(cloned))
+    } catch (err) {
+      console.warn('adopt project resources failed, saving copy without rewriting paths', err)
+    }
+    document.value = next
+    activePageId.value = next.homePageId ?? next.pages[0]?.id
     syncActiveLayerForPage(activePageId.value!)
     selectedWidgetIds.value = []
     published.value = null

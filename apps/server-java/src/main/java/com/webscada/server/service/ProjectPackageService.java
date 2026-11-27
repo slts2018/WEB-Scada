@@ -16,7 +16,6 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -80,6 +79,14 @@ public class ProjectPackageService {
     List<TagMeta> tagList = tags.list();
     List<TagAlarmConfig> alarmList = alarms.list();
 
+    var prepared =
+        ProjectResourceSupport.prepare(doc, projectId, paths.getResourcesRoot());
+    JsonNode packedDoc = prepared.document;
+    if (prepared.missing > 0) {
+      log.warn(
+          "export project {} missing {} referenced resource(s)", projectId, prepared.missing);
+    }
+
     ByteArrayOutputStream bos = new ByteArrayOutputStream();
     try (ZipOutputStream zos = new ZipOutputStream(bos)) {
       zos.setLevel(6);
@@ -87,13 +94,13 @@ public class ProjectPackageService {
       manifest.put("format", PACKAGE_FORMAT);
       manifest.put("version", PACKAGE_VERSION);
       manifest.put("exportedAt", System.currentTimeMillis());
-      manifest.put("sourceProjectId", doc.path("meta").path("id").asText());
-      manifest.put("sourceProjectName", doc.path("meta").path("name").asText(""));
+      manifest.put("sourceProjectId", packedDoc.path("meta").path("id").asText());
+      manifest.put("sourceProjectName", packedDoc.path("meta").path("name").asText(""));
       manifest.put("deviceCount", deviceList.size());
       manifest.put("tagCount", tagList.size());
       manifest.put("alarmCount", alarmList.size());
       putEntry(zos, "manifest.json", mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(manifest));
-      putEntry(zos, "project.json", mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(doc));
+      putEntry(zos, "project.json", mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(packedDoc));
       putEntry(
           zos,
           "devices.json",
@@ -105,18 +112,14 @@ public class ProjectPackageService {
           "alarms.json",
           mapper.writerWithDefaultPrettyPrinter().writeValueAsBytes(alarmList));
 
-      Path dir = paths.getResourcesRoot().resolve(projectId);
-      if (Files.isDirectory(dir)) {
-        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir)) {
-          for (Path p : stream) {
-            if (!Files.isRegularFile(p)) continue;
-            putEntry(zos, "resources/" + p.getFileName().toString(), Files.readAllBytes(p));
-          }
-        }
+      for (Map.Entry<String, Path> e : prepared.files.entrySet()) {
+        Path file = e.getValue();
+        if (!Files.isRegularFile(file)) continue;
+        putEntry(zos, "resources/" + e.getKey(), Files.readAllBytes(file));
       }
     }
 
-    String name = doc.path("meta").path("name").asText("project");
+    String name = packedDoc.path("meta").path("name").asText("project");
     String safe = safeName(name, 80);
     return new ExportResult(
         bos.toByteArray(), (safe.isEmpty() ? "project" : safe) + ".webscada.zip", name);
