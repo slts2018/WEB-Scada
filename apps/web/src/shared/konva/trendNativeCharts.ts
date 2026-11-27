@@ -11,7 +11,7 @@ import {
   chartFontSize,
   setTrendChartRendered,
 } from '@/shared/konva/widgetNodes'
-import { TREND_TOOLBAR_H, TREND_TOOLBAR_ROW, trendToolbarMeasuredHeight } from '@/shared/runtime/trendHistoryQuery'
+import { TREND_TOOLBAR_ROW, trendToolbarMeasuredHeight } from '@/shared/runtime/trendHistoryQuery'
 import {
   setTrendHistoryTableHeight,
   trendHistoryTableVisibleOf,
@@ -20,7 +20,7 @@ import {
 
 /** 旋转或自带点击事件的图元仍走位图：叠层会挡拖拽 / 业务点击。 */
 export function widgetUsesNativeTrend(widget: Widget2D): boolean {
-  if (widget.type !== 'trend' && widget.type !== 'trendHistory') return false
+  if (widget.type !== 'trendHistory') return false
   if (widget.visible === false) return false
   if (Math.abs(Number(widget.transform.rotation) || 0) > 0.01) return false
   if ((widget.events?.length ?? 0) > 0) return false
@@ -39,7 +39,7 @@ export function syncNativeTrendCharts(opts: {
   const scale = Math.abs(opts.stage.scaleX()) || 1
   const slots: TrendLiveSlot[] = []
   for (const widget of opts.widgets) {
-    if (widget.type !== 'trend' && widget.type !== 'trendHistory') continue
+    if (widget.type !== 'trendHistory') continue
     const node = opts.widgetLayer.findOne('#' + widget.id) as Konva.Group | null
     const live = widgetUsesNativeTrend(widget) && Boolean(node?.visible())
     if (node) setTrendChartRendered(node, !live)
@@ -63,7 +63,8 @@ export function syncNativeTrendCharts(opts: {
       width: rect.width,
       height: rect.height,
       fontSize: Math.max(10, pageFont * scale),
-      chromeTop: showToolbar ? Math.round(TREND_TOOLBAR_H * scale) : 0,
+      // 叠层矩形已按工具条高度下移，不必再在 option 里留 chromeTop，否则标题仍贴顶却多出一块空带。
+      chromeTop: 0,
       chromeBottom: 0,
     })
     // 点表：先按"没有表"排一次版，看看绘图区能有多大；让出最小绘图高度后剩下的才给表。

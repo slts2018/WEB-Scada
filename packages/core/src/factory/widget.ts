@@ -46,6 +46,13 @@ export interface WidgetPaletteItem {
   group: 'basic' | 'data' | 'industrial' | 'media'
 }
 
+/** 已从产品图元库下架，不能再添加。类型仍保留以便打开旧工程；运行端只画占位说明。 */
+export const RETIRED_BUILTIN_WIDGET_TYPES = ['trend', 'pie', 'bar'] as const
+export type RetiredBuiltinWidgetType = (typeof RETIRED_BUILTIN_WIDGET_TYPES)[number]
+export function isRetiredBuiltinWidgetType(type: string): type is RetiredBuiltinWidgetType {
+  return type === 'trend' || type === 'pie' || type === 'bar'
+}
+
 export const BUILTIN_WIDGETS: WidgetPaletteItem[] = [
   { type: 'rect', label: '矩形', description: '基础矩形', group: 'basic' },
   { type: 'roundRect', label: '圆角矩形', description: '圆角矩形（对齐 Flight）', group: 'basic' },
@@ -56,11 +63,8 @@ export const BUILTIN_WIDGETS: WidgetPaletteItem[] = [
   { type: 'text', label: '文本', description: '静态文本', group: 'basic' },
   { type: 'button', label: '按钮', description: '可点击按钮外观', group: 'basic' },
   { type: 'trendHistory', label: '历史趋势', description: '按时间范围读取历史曲线', group: 'data' },
-  { type: 'trend', label: '实时趋势', description: '跟随当前值滚动的趋势曲线', group: 'data' },
   { type: 'alarmHistory', label: '历史报警', description: '已发生的报警事件', group: 'data' },
   { type: 'alarm', label: '实时报警', description: '实时报警列表', group: 'data' },
-  { type: 'pie', label: '饼图', description: '按当前值显示占比', group: 'data' },
-  { type: 'bar', label: '柱状图', description: '按当前值比较各项', group: 'data' },
   { type: 'value', label: '数值', description: '过程值显示', group: 'data' },
   { type: 'switch', label: '开关', description: '开关/切换', group: 'data' },
   { type: 'gauge', label: '仪表', description: '半圆/圆形仪表盘', group: 'data' },
@@ -424,6 +428,9 @@ export function createWidget2D(
   type: BuiltinWidgetType,
   overrides?: Partial<Pick<Widget2D, 'name' | 'transform' | 'style' | 'props'>>,
 ): Widget2D {
+  if (isRetiredBuiltinWidgetType(type)) {
+    throw new Error(`图元类型「${type}」已从产品中移除，请改用 ECharts 图表`)
+  }
   const base = DEFAULTS[type]
   const id = `w_${type}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`
   return {

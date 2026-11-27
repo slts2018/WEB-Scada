@@ -4,6 +4,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.webscada.server.config.ScadaProperties;
 import com.webscada.server.device.mcd4000.Mcd4000Channel;
 import com.webscada.server.device.mcd4000.Mcd4000Client;
+import com.webscada.server.device.mcd4000mqtt.Mcd4000MqttChannel;
+import com.webscada.server.device.mcd4000mqtt.Mcd4000MqttService;
+import org.eclipse.paho.client.mqttv3.MqttClient;
+import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
+import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.DatagramPacket;
@@ -55,6 +60,7 @@ public class DeviceConnectionProbeService {
       case "mqtt" -> mqtt(ch);
       case "http" -> httpGet(ch, "HTTP");
       case "mcd4000" -> mcd4000(ch);
+      case "mcd4000_mqtt" -> mcd4000Mqtt(ch);
       case "other", "" -> fail("该协议不支持测试连接");
       default -> fail("不支持的协议: " + protocol);
     };
@@ -201,6 +207,38 @@ public class DeviceConnectionProbeService {
       return ok("数据中台可达 " + parsed.baseUrl());
     } catch (Exception e) {
       return fail(shortMsg(e));
+    }
+  }
+
+
+  private Map<String, Object> mcd4000Mqtt(String channel) {
+    Mcd4000MqttChannel parsed = Mcd4000MqttChannel.parse(channel);
+    if (parsed == null) {
+      return fail("请填写 Broker 主机、端口和网关序列号");
+    }
+    String clientId = Mcd4000MqttChannel.probeClientId();
+    MqttClient client = null;
+    try {
+      client = new MqttClient(parsed.brokerUri(), clientId, new MemoryPersistence());
+      MqttConnectOptions opts = Mcd4000MqttService.connectOptions(parsed);
+      opts.setAutomaticReconnect(false);
+      client.connect(opts);
+      if (!client.isConnected()) return fail("未能连上 Broker " + parsed.brokerUri());
+      client.disconnect();
+      return ok("已连接 Broker " + parsed.brokerUri() + "（Client ID " + clientId + "）");
+    } catch (Exception e) {
+      return fail(shortMsg(e));
+    } finally {
+      if (client != null) {
+        try {
+          if (client.isConnected()) client.disconnect();
+        } catch (Exception ignored) {
+        }
+        try {
+          client.close();
+        } catch (Exception ignored) {
+        }
+      }
     }
   }
 

@@ -19,7 +19,7 @@ function localLinkStatus(device: DeviceMeta): DeviceLinkStatus {
   if (device.protocol === 'mock') {
     return { deviceId: device.deviceId, online: true, state: 'online', message: '模拟设备' }
   }
-  if (device.protocol === 'mcd4000') {
+  if (device.protocol === 'mcd4000' || device.protocol === 'mcd4000_mqtt') {
     return { deviceId: device.deviceId, online: false, state: 'unknown', message: '尚未检测' }
   }
   if (PROBEABLE.has(device.protocol)) {

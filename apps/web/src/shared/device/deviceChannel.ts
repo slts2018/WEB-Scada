@@ -21,6 +21,12 @@ export type DeviceConnFields = {
   unitId: string
   /** MCD4000：Query 接口族 */
   mcdSource: Mcd4000Source
+  /** MCD4000（MQTT）：网关/设备序列号 $gatewaySn */
+  gatewaySn: string
+  /** MCD4000（MQTT）：Broker 用户名，可选 */
+  username: string
+  /** MCD4000（MQTT）：Broker 密码，可选 */
+  password: string
   /** Modbus：字排序（单寄存器字节序） */
   wordSwap: ModbusSwapMode
   /** Modbus：双字排序（32/64 位） */
@@ -42,6 +48,9 @@ export function emptyConnFields(): DeviceConnFields {
     mcdDeviceId: '',
     unitId: '',
     mcdSource: 'vib',
+    gatewaySn: '',
+    username: '',
+    password: '',
     wordSwap: 'SwapNone',
     dwordSwap: 'SwapWords',
     backupHost: '',
@@ -65,7 +74,7 @@ export function parseDeviceChannel(
   const s = (channel ?? '').trim()
   if (!s) {
     if (protocol === 'modbus_tcp' || protocol === 'modbus_udp') f.port = '502'
-    if (protocol === 'mqtt') f.port = '1883'
+    if (protocol === 'mqtt' || protocol === 'mcd4000_mqtt') f.port = '1883'
     return f
   }
 
@@ -137,6 +146,22 @@ export function parseDeviceChannel(
       f.mcdSource = normalizeMcdSource(parts[3])
       break
     }
+    case 'mcd4000_mqtt': {
+      const parts = s.split('|')
+      const broker = (parts[0] ?? '').trim()
+      const m = broker.match(/^([^:]+):(\d+)$/)
+      if (m) {
+        f.host = m[1]
+        f.port = m[2]
+      } else {
+        f.host = broker
+        f.port = '1883'
+      }
+      f.gatewaySn = (parts[1] ?? '').trim()
+      f.username = (parts[2] ?? '').trim()
+      f.password = parts.length > 3 ? parts.slice(3).join('|') : ''
+      break
+    }
     case 'mock':
     case 'other':
     default:
@@ -195,6 +220,18 @@ export function formatDeviceChannel(
       const src = normalizeMcdSource(fields.mcdSource)
       if (!base && !did && !uid) return undefined
       return `${base}|${did}|${uid}|${src}`
+    }
+    case 'mcd4000_mqtt': {
+      const host = fields.host.trim()
+      const gatewaySn = fields.gatewaySn.trim()
+      if (!host && !gatewaySn) return undefined
+      if (!host || !gatewaySn) return undefined
+      const port = fields.port.trim() || '1883'
+      const broker = `${host}:${port}`
+      const user = fields.username.trim()
+      const pass = fields.password
+      if (!user && !(pass ?? '').length) return broker + '|' + gatewaySn
+      return `${broker}|${gatewaySn}|${user}|${pass ?? ''}`
     }
     case 'other':
     default: {

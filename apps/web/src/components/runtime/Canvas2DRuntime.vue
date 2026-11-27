@@ -15,6 +15,7 @@ import {
   collectPageTagIds,
   isWidgetRuntimeEnabled,
   resolveWidgetVisual,
+  widgetNeedsTickResolve,
 } from '@/shared/runtime/bindingEngine'
 import { collectPage3DTagIds } from '@/shared/runtime/bindingEngine3d'
 import { runPageScripts, runScriptSource, startPageScriptSchedules } from '@/shared/runtime/scriptEngine'
@@ -471,6 +472,12 @@ function refreshAllVisuals() {
   let uncertain = 0
   let offline = 0
   for (const widget of allWidgets(props.page)) {
+    // 没有实时输入的图元（翻页按钮等）不必每 tick clone/resolve；applyVisual 内部也会按外观指纹跳过重画
+    if (!widgetNeedsTickResolve(widget)) {
+      good += 1
+      bundle.applyVisual(widget.id, widget)
+      continue
+    }
     const resolved = resolveWidgetVisual(widget, (id) => tags.getValue(id))
     if (resolved.quality === 'Bad') bad += 1
     else if (resolved.quality === 'Uncertain') uncertain += 1
@@ -765,14 +772,39 @@ watch(
   },
 )
 
+/** 忽略 hiddenCurves：运行端图例点选若写回工程，deep watch 会 setPage 整页重建，图例像没点。 */
+function pageRemountSig(page: Page2D): string {
+  return JSON.stringify(
+    page.layers.map((layer) => ({
+      id: layer.id,
+      visible: layer.visible,
+      widgets: layer.widgets.map((widget) => {
+        const props = { ...(widget.props ?? {}) } as Record<string, unknown>
+        delete props.hiddenCurves
+        return {
+          id: widget.id,
+          type: widget.type,
+          visible: widget.visible,
+          name: widget.name,
+          transform: widget.transform,
+          events: widget.events,
+          bindings: widget.bindings,
+          animationLinks: widget.animationLinks,
+          animations: widget.animations,
+          props,
+        }
+      }),
+    })),
+  )
+}
+
 watch(
-  () => props.page.layers,
+  () => pageRemountSig(props.page),
   () => {
     if (!bundle) return
     bundle.setPage(props.page)
     setupSubscription(props.page)
   },
-  { deep: true },
 )
 
 onUnmounted(() => {
@@ -914,6 +946,13 @@ onUnmounted(() => {
 .history-search {
   position: absolute;
   z-index: 10001;
+  /* 盒子可能比可见按钮高/宽或向下溢出：不拦截图例点击。按钮本身仍是 pointer-events:auto。 */
+  pointer-events: none;
+  overflow: visible;
+}
+.history-search :deep(.trend-toolbar),
+.history-search :deep(.trend-bar) {
+  pointer-events: auto;
 }
 
 /* 点表：贴在图元底部（图表让出的那一条），盖在画布之上 */

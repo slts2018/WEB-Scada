@@ -20,7 +20,8 @@ import {
   TooltipComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
-import { trendHistoryViewEpoch } from '@/shared/runtime/trendHistoryQuery'
+import { setTrendZoom } from '@/shared/konva/trendChart'
+import { trendHistoryQueryingOf, trendHistoryViewEpoch } from '@/shared/runtime/trendHistoryQuery'
 
 use([
   LineChart,
@@ -69,26 +70,167 @@ export function createTrendLiveOverlay(opts: {
   if (getComputedStyle(opts.host).position === 'static') opts.host.style.position = 'relative'
   opts.host.appendChild(host)
 
-  const live = new Map<string, { el: HTMLDivElement; chart: ECharts }>()
+  type LiveItem = {
+    el: HTMLDivElement
+    mask: HTMLDivElement
+    chart: ECharts
+    /** 尚未写入的整图 option；多次重画只保留最后一次 */
+    pendingOption: Record<string, unknown> | null
+    pendingSetOpts: Record<string, unknown> | null
+    pendingShowFull: boolean
+    pendingPan: boolean | undefined
+    flushTimer: ReturnType<typeof setTimeout> | null
+    flushing: boolean
+  }
+
+  const hiddenNamesOf = (item: LiveItem): string[] =>
+    (item.el.dataset.legendHidden ?? "").split("|").filter(Boolean)
+
+  /** 把已点掉的图例写进即将 flush 的 option，避免排队的 setOption 把刚隐藏的曲线灌回来。 */
+  const withPersistedLegend = (
+    option: Record<string, unknown>,
+    hidden: string[],
+  ): Record<string, unknown> => {
+    if (!hidden.length) return option
+    const legend = option.legend
+    if (!legend || typeof legend !== "object" || Array.isArray(legend)) return option
+    const current = (legend as { selected?: Record<string, boolean> }).selected ?? {}
+    const selected = { ...current }
+    for (const name of hidden) selected[name] = false
+    return { ...option, legend: { ...(legend as Record<string, unknown>), selected } }
+  }
+
+  const placeMask = (item: LiveItem, slot: { rect: { x: number; y: number; width: number; height: number } }) => {
+    const w = Math.max(20, Math.round(slot.rect.width))
+    const h = Math.max(20, Math.round(slot.rect.height))
+    item.mask.style.left = `${Math.round(slot.rect.x)}px`
+    item.mask.style.top = `${Math.round(slot.rect.y)}px`
+    item.mask.style.width = `${w}px`
+    item.mask.style.height = `${h}px`
+  }
+
+  const syncQueryingUi = (item: LiveItem, interactive: boolean, widgetId: string) => {
+    const querying = trendHistoryQueryingOf(widgetId)
+    item.mask.style.display = querying ? "flex" : "none"
+    item.mask.style.pointerEvents = querying ? "auto" : "none"
+    item.el.style.pointerEvents = interactive && !querying ? "auto" : "none"
+  }
+  const live = new Map<string, LiveItem>()
+
+  const isDisposed = (chart: ECharts): boolean => {
+    try {
+      return typeof chart.isDisposed === 'function' && chart.isDisposed()
+    } catch {
+      return true
+    }
+  }
+
+  /**
+   * 所有 setOption 都排到当前 ECharts/zrender 主流程之后再写。
+   * 否则会在 mousemove / datazoom / 图例点选 / 上一次 setOption 的回调里再次 setOption：
+   * 控制台报 `setOption` should not be called during main process，
+   * 随后 Unknown dataType / getRawIndex，图停在上一笔原始点，切回「自动」看起来改不回来。
+   * 同一图元多次排队只落最后一次 option。
+   */
+  const enqueueFlush = (item: LiveItem): void => {
+    if (item.flushTimer != null) return
+    item.flushTimer = setTimeout(() => {
+      item.flushTimer = null
+      flushItem(item)
+    }, 0)
+  }
+
+  const flushItem = (item: LiveItem): void => {
+    if (isDisposed(item.chart)) {
+      item.pendingOption = null
+      item.pendingSetOpts = null
+      item.pendingShowFull = false
+      item.pendingPan = undefined
+      return
+    }
+    if (item.flushing) {
+      enqueueFlush(item)
+      return
+    }
+    item.flushing = true
+    try {
+      if (item.pendingOption) {
+        const option = item.pendingOption
+        const setOpts = item.pendingSetOpts ?? { notMerge: false, lazyUpdate: false, replaceMerge: ['series'] }
+        item.pendingOption = null
+        item.pendingSetOpts = null
+        const nextOption = withPersistedLegend(option, hiddenNamesOf(item))
+        try {
+          item.chart.dispatchAction({ type: 'hideTip' })
+        } catch {
+          /* 提示框可能还没建 */
+        }
+        item.chart.setOption(nextOption, setOpts)
+        item.flushing = false
+        if (item.pendingOption || item.pendingShowFull || item.pendingPan !== undefined) enqueueFlush(item)
+        return
+      }
+      if (item.pendingShowFull) {
+        item.pendingShowFull = false
+        item.chart.setOption(
+          { dataZoom: [{ start: 0, end: 100 }, { start: 0, end: 100 }] },
+          { notMerge: false, lazyUpdate: false },
+        )
+        item.flushing = false
+        if (item.pendingOption || item.pendingShowFull || item.pendingPan !== undefined) enqueueFlush(item)
+        return
+      }
+      if (item.pendingPan !== undefined) {
+        const on = item.pendingPan
+        item.pendingPan = undefined
+        item.chart.setOption({ dataZoom: [{ moveOnMouseMove: on }] }, { notMerge: false, lazyUpdate: false })
+      }
+    } catch (err) {
+      enqueueFlush(item)
+    } finally {
+      item.flushing = false
+    }
+  }
+
+  const queueOption = (
+    item: LiveItem,
+    option: Record<string, unknown>,
+    setOpts: Record<string, unknown>,
+    showFull = false,
+  ): void => {
+    item.pendingOption = option
+    item.pendingSetOpts = setOpts
+    if (showFull) item.pendingShowFull = true
+    enqueueFlush(item)
+  }
 
   const drop = (widgetId: string) => {
     const item = live.get(widgetId)
     if (!item) return
+    if (item.flushTimer != null) {
+      clearTimeout(item.flushTimer)
+      item.flushTimer = null
+    }
+    item.pendingOption = null
+    item.pendingShowFull = false
+    item.pendingPan = undefined
     try {
       item.chart.dispose()
     } catch {
       /* 忽略销毁期异常 */
     }
     item.el.remove()
+    item.mask.remove()
     live.delete(widgetId)
   }
 
   /** 把滑块和滚轮拨回整段查询窗口。历史趋势换了开始/结束，或双击还原时用 */
   const showFullRange = (chart: ECharts) => {
-    try {
-      chart.setOption({ dataZoom: [{ start: 0, end: 100 }, { start: 0, end: 100 }] }, { lazyUpdate: false })
-    } catch {
-      /* 图还没建好缩放组件时忽略 */
+    for (const item of live.values()) {
+      if (item.chart !== chart) continue
+      item.pendingShowFull = true
+      enqueueFlush(item)
+      return
     }
   }
 
@@ -125,8 +267,43 @@ export function createTrendLiveOverlay(opts: {
       // 先给尺寸再 init：ECharts 初始化时量不到容器宽高会直接摆烂
       place(el, slot)
       host.appendChild(el)
+      const mask = document.createElement('div')
+      mask.className = 'trend-querying-mask'
+      mask.dataset.trendQuerying = slot.widgetId
+      mask.textContent = '查询中'
+      mask.style.cssText = [
+        'position:absolute',
+        'display:none',
+        'align-items:center',
+        'justify-content:center',
+        'pointer-events:none',
+        'z-index:3',
+        'background:rgba(11,18,32,0.58)',
+        'color:#e8eef7',
+        'font-size:16px',
+        'font-weight:600',
+        'letter-spacing:0.16em',
+        'user-select:none',
+      ].join(';')
+      host.appendChild(mask)
       const chart = init(el, undefined, { renderer: 'canvas' })
-      item = { el, chart }
+      el.dataset.trendLive = slot.widgetId
+      if (typeof window !== 'undefined') {
+        const g = window as unknown as { __scadaTrendChart?: Record<string, unknown> }
+        g.__scadaTrendChart = { ...(g.__scadaTrendChart ?? {}), [slot.widgetId]: chart }
+      }
+      ;(el as HTMLDivElement & { __trendLiveChart?: typeof chart }).__trendLiveChart = chart
+      item = {
+        el,
+        mask,
+        chart,
+        pendingOption: null,
+        pendingSetOpts: null,
+        pendingShowFull: false,
+        pendingPan: undefined,
+        flushTimer: null,
+        flushing: false,
+      }
       live.set(slot.widgetId, item)
       // 双击 = 滑块回到这次查询的整段，不重新查
       chart.getZr().on('dblclick', () => {
@@ -136,6 +313,13 @@ export function createTrendLiveOverlay(opts: {
       // 拖游标：按住时指针离竖线 ±8px 内就算“拖游标”，
       // 拖期间临时关掉 dataZoom 的左键平移（否则窗口会跟着一起跑），松手恢复。
       let cursorDrag = false
+      const inPlot = (x: number, y: number): boolean => {
+        try {
+          return chart.containPixel({ gridIndex: 0 }, [x, y]) === true
+        } catch {
+          return false
+        }
+      }
       const nearCursor = (offsetX: number): boolean => {
         const at = opts.cursorOf?.(slot.widgetId)
         if (at == null) return false
@@ -148,14 +332,11 @@ export function createTrendLiveOverlay(opts: {
         }
       }
       const setPanEnabled = (on: boolean) => {
-        try {
-          chart.setOption({ dataZoom: [{ moveOnMouseMove: on }] })
-        } catch {
-          /* 窗口正在换算时可能报错：忽略 */
-        }
+        item!.pendingPan = on
+        enqueueFlush(item!)
       }
-      chart.getZr().on('mousedown', (e: { offsetX: number }) => {
-        if (!opts.onCursor || !nearCursor(e.offsetX)) return
+      chart.getZr().on('mousedown', (e: { offsetX: number; offsetY: number }) => {
+        if (!opts.onCursor || !inPlot(e.offsetX, e.offsetY) || !nearCursor(e.offsetX)) return
         cursorDrag = true
         setPanEnabled(false)
       })
@@ -174,9 +355,10 @@ export function createTrendLiveOverlay(opts: {
         cursorDrag = false
         setPanEnabled(true)
       })
-      // zrender 只在"没有拖动"时才发 click：拖拽平移不会误落游标
+      // 只在绘图区落游标。图例 / 工具箱 / 底部滑块上的点击若也走这里，
+      // 会 sync 整图 option 并在排队的 setOption 里把刚点掉的图例又灌回去，看起来像点了没反应。
       chart.getZr().on('click', (e: { offsetX: number; offsetY: number }) => {
-        if (!opts.onCursor) return
+        if (!opts.onCursor || !inPlot(e.offsetX, e.offsetY)) return
         try {
           const v = chart.convertFromPixel({ xAxisIndex: 0 }, [e.offsetX, e.offsetY])
           const at = Array.isArray(v) ? Number(v[0]) : Number(v)
@@ -189,6 +371,7 @@ export function createTrendLiveOverlay(opts: {
       chart.on('legendselectchanged', (params: unknown) => {
         const selected = (params as { selected?: Record<string, boolean> }).selected ?? {}
         const hidden = Object.keys(selected).filter((name) => selected[name] === false)
+        item!.el.dataset.legendHidden = hidden.join("|")
         opts.onLegendSelect?.(slot.widgetId, hidden)
       })
       // 滑块 / 滚轮缩放：记下时间窗
@@ -201,6 +384,7 @@ export function createTrendLiveOverlay(opts: {
     const rectKey = `${Math.max(20, Math.round(slot.rect.width))}x${Math.max(20, Math.round(slot.rect.height))}`
     const moved = el.dataset.rect !== rectKey
     place(el, slot)
+    placeMask(item, slot)
     if (moved) {
       chart.resize({
         width: Math.max(20, Math.round(slot.rect.width)),
@@ -210,10 +394,18 @@ export function createTrendLiveOverlay(opts: {
     // 拖拽图元时只改位置，不必每帧 setOption。
     // replaceMerge series：曲线条数变化时清掉旧序列，同时留下 dataZoom。
     if (!layoutOnly || !existed) {
-      chart.setOption(slot.option, { notMerge: false, lazyUpdate: true, replaceMerge: ['series'] })
-      // 查询窗口换了（开始/结束、过去、搜索、翻页）：滑块拨回整段。只拖滑块不会改这个代数
+      // 查询窗口换了：写入 option 后把 dataZoom 拨回 0–100（在下一拍执行，避免套叠 setOption）。
+      // 不能在 zrender 事件里同步 setOption：原始点 5000 点时 mousemove 就可能占几百毫秒，
+      // 此时切回自动灌新数据会被丢掉，图仍停在密原始点。
       const epoch = String(trendHistoryViewEpoch(slot.widgetId))
-      if (el.dataset.winEpoch != null && el.dataset.winEpoch !== epoch) showFullRange(chart)
+      const epochChanged = el.dataset.winEpoch != null && el.dataset.winEpoch !== epoch
+      if (epochChanged) setTrendZoom(slot.widgetId, null)
+      queueOption(
+        item,
+        slot.option,
+        { notMerge: false, lazyUpdate: false, replaceMerge: ['series'] },
+        epochChanged,
+      )
       el.dataset.winEpoch = epoch
     }
   }
@@ -225,7 +417,7 @@ export function createTrendLiveOverlay(opts: {
       for (const slot of slots) {
         ensure(slot, layoutOnly)
         const item = live.get(slot.widgetId)
-        if (item) item.el.style.pointerEvents = interactive ? 'auto' : 'none'
+        if (item) syncQueryingUi(item, interactive, slot.widgetId)
       }
       host.style.display = slots.length ? 'block' : 'none'
     },

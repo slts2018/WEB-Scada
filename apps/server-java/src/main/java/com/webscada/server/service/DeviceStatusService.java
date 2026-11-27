@@ -58,6 +58,13 @@ public class DeviceStatusService {
       }
       return known;
     }
+    if ("mcd4000_mqtt".equals(protocol)) {
+      DeviceLinkStatus known = reported.get(id);
+      if (known == null) {
+        return new DeviceLinkStatus(id, false, "unknown", null, "尚未检测");
+      }
+      return known;
+    }
     if (DeviceConnectivityMonitor.isProbeable(protocol)) {
       String channel = device.channel() == null ? "" : device.channel().trim();
       if (channel.isEmpty()) {

@@ -61,35 +61,135 @@ export function trendToolbarClientRect(
   }
 }
 
-/** 设计端预设区间（props.range） */
+/** 相对区间单位。存储格式为 -15s / -15m / -1h / -7d，与 Influx/Flux 相对时间一致。 */
+export type TrendDurationUnit = 's' | 'm' | 'h' | 'd'
+
+export const TREND_DURATION_UNITS: ReadonlyArray<{ id: TrendDurationUnit; label: string }> = [
+  { id: 's', label: '秒' },
+  { id: 'm', label: '分钟' },
+  { id: 'h', label: '小时' },
+  { id: 'd', label: '天' },
+]
+
+const DURATION_RE = /^-?(\d+)([smhd])$/i
+
+export function parseTrendDuration(id: string): { value: number; unit: TrendDurationUnit } | null {
+  const m = DURATION_RE.exec(String(id || '').trim())
+  if (!m) return null
+  const value = Number(m[1])
+  if (!Number.isFinite(value) || value <= 0) return null
+  return { value, unit: m[2].toLowerCase() as TrendDurationUnit }
+}
+
+export function formatTrendDuration(value: number, unit: TrendDurationUnit): string {
+  const n = Math.max(1, Math.min(9999, Math.floor(Number(value) || 1)))
+  return `-${n}${unit}`
+}
+
+/** 由跨度反推一个相对区间 id（优先整除的较大单位） */
+export function durationIdFromSpanMs(span: number): string {
+  if (!Number.isFinite(span) || span <= 0) return ''
+  const sec = Math.max(1, Math.round(span / 1000))
+  if (sec % 86400 === 0) return formatTrendDuration(sec / 86400, 'd')
+  if (sec % 3600 === 0) return formatTrendDuration(sec / 3600, 'h')
+  if (sec % 60 === 0) return formatTrendDuration(sec / 60, 'm')
+  return formatTrendDuration(sec, 's')
+}
+
+/**
+ * 折线 / 曲线 / 面积进页默认窗口：按最短扫描周期铺约 90 个点。
+ * 50ms → 4.5s，四舍五入为 5 秒（约 100 个点，落在 60～120）；1s → 90 秒。
+ */
+export const ECHART_ENTER_TARGET_POINTS = 90
+
+export function shortestScanPeriodMs(periods: Array<number | null | undefined>): number {
+  let min = Infinity
+  for (const item of periods) {
+    const n = Number(item)
+    if (Number.isFinite(n) && n > 0) min = Math.min(min, n)
+  }
+  return Number.isFinite(min) ? min : 1000
+}
+
+export function echartEnterRangeFromScanMs(scanMs: number): string {
+  const period = Math.max(1, Math.round(Number(scanMs) || 1000))
+  const sec = Math.max(1, Math.round((period * ECHART_ENTER_TARGET_POINTS) / 1000))
+  if (sec % 3600 === 0) return formatTrendDuration(sec / 3600, 'h')
+  if (sec % 60 === 0) return formatTrendDuration(sec / 60, 'm')
+  return formatTrendDuration(sec, 's')
+}
+
+/** 用户在属性里写过的相对区间优先；未写则按扫描周期估算，不再默认 15 分钟。 */
+export function resolveEchartEnterRange(
+  range: unknown,
+  scanPeriods: Array<number | null | undefined>,
+): string {
+  const parsed = parseTrendDuration(String(range ?? '').trim())
+  if (parsed) return formatTrendDuration(parsed.value, parsed.unit)
+  return echartEnterRangeFromScanMs(shortestScanPeriodMs(scanPeriods))
+}
+
+/** 原始点每条曲线最多取这么多点；滑条最长窗口 = 图上最短扫描周期 × 这个数。 */
+export const HISTORY_RAW_MAX_POINTS = 1200
+
+/** 自动 / 固定聚合走自己的点数（默认 240），不要被原始点上限拖着走。 */
+export const HISTORY_AUTO_MAX_POINTS = 240
+
+/** 该扫描周期下，原始点还能看多长（毫秒）。50ms → 1 分钟，1s → 20 分钟。 */
+export function rawHistoryMaxSpanMs(scanPeriodMs: number): number {
+  const period = Math.max(1, Math.round(Number(scanPeriodMs) || 50))
+  return period * HISTORY_RAW_MAX_POINTS
+}
+
+/**
+ * 进页/拉长窗口时的取点上限：用户写过 maxPoints 就用它；
+ * 未写则按窗口和最短扫描周期估点数。原始点夹在 120～1200，避免 50ms 数据被裁成几秒，
+ * 也不再按 5000 估出比滑条更长、实际画不全的窗口。
+ */
+export function resolveEchartEnterMaxPoints(
+  rangeId: string,
+  scanPeriods: Array<number | null | undefined>,
+  userMaxPoints?: unknown,
+): number {
+  const user = Math.trunc(Number(userMaxPoints))
+  if (Number.isFinite(user) && user > 0) return Math.max(5, Math.min(HISTORY_RAW_MAX_POINTS, user))
+  const period = shortestScanPeriodMs(scanPeriods)
+  const need = Math.ceil(trendPresetSpanMs(rangeId) / Math.max(1, period)) + 16
+  return Math.max(120, Math.min(HISTORY_RAW_MAX_POINTS, need))
+}
+
+/** 设计端曾用的预设区间（props.range），标签改为短写，供旧调用兼容 */
 export const TREND_RANGES = [
-  { id: '-15m', label: '最近15分钟' },
-  { id: '-1h', label: '最近1小时' },
-  { id: '-8h', label: '最近8小时' },
-  { id: '-24h', label: '最近24小时' },
-  { id: '-7d', label: '最近7天' },
+  { id: '-15m', label: '15分钟' },
+  { id: '-1h', label: '1小时' },
+  { id: '-8h', label: '8小时' },
+  { id: '-24h', label: '24小时' },
+  { id: '-7d', label: '7天' },
 ] as const
 
-/** 工具栏「过去」下拉：结束时间取现在，往前推这一段 */
-export const TREND_PAST_RANGES = [
-  { id: '-5m', label: '最近5分钟' },
-  { id: '-10m', label: '最近10分钟' },
-  { id: '-15m', label: '最近15分钟' },
-  { id: '-20m', label: '最近20分钟' },
-  { id: '-25m', label: '最近25分钟' },
-  { id: '-30m', label: '最近30分钟' },
-  { id: '-1h', label: '最近1小时' },
-  { id: '-2h', label: '最近2小时' },
-  { id: '-3h', label: '最近3小时' },
-  { id: '-1d', label: '最近1天' },
-  { id: '-3d', label: '最近3天' },
-  { id: '-5d', label: '最近5天' },
-  { id: '-7d', label: '最近7天' },
-  { id: '-15d', label: '最近15天' },
-  { id: '-30d', label: '最近30天' },
+/** 常用快捷项（不必写成「最近 5 分钟」） */
+export const TREND_RANGE_SHORTCUTS = [
+  { id: '-15s', label: '15秒' },
+  { id: '-30s', label: '30秒' },
+  { id: '-1m', label: '1分钟' },
+  { id: '-5m', label: '5分钟' },
+  { id: '-10m', label: '10分钟' },
+  { id: '-15m', label: '15分钟' },
+  { id: '-30m', label: '30分钟' },
+  { id: '-1h', label: '1小时' },
+  { id: '-2h', label: '2小时' },
+  { id: '-8h', label: '8小时' },
+  { id: '-1d', label: '1天' },
+  { id: '-7d', label: '7天' },
 ] as const
+
+/** 兼容旧工具栏「过去」列表：现为快捷项的超集 */
+export const TREND_PAST_RANGES = TREND_RANGE_SHORTCUTS
 
 const PRESET_MS: Record<string, number> = {
+  '-15s': 15 * 1000,
+  '-30s': 30 * 1000,
+  '-1m': 60 * 1000,
   '-5m': 5 * 60 * 1000,
   '-10m': 10 * 60 * 1000,
   '-15m': 15 * 60 * 1000,
@@ -99,22 +199,37 @@ const PRESET_MS: Record<string, number> = {
   '-1h': 60 * 60 * 1000,
   '-2h': 2 * 60 * 60 * 1000,
   '-3h': 3 * 60 * 60 * 1000,
+  '-8h': 8 * 60 * 60 * 1000,
+  '-24h': 24 * 60 * 60 * 1000,
   '-1d': 24 * 60 * 60 * 1000,
   '-3d': 3 * 24 * 60 * 60 * 1000,
   '-5d': 5 * 24 * 60 * 60 * 1000,
-  '-8h': 8 * 60 * 60 * 1000,
-  '-24h': 24 * 60 * 60 * 1000,
   '-7d': 7 * 24 * 60 * 60 * 1000,
   '-15d': 15 * 24 * 60 * 60 * 1000,
   '-30d': 30 * 24 * 60 * 60 * 1000,
 }
 
+const UNIT_MS: Record<TrendDurationUnit, number> = {
+  s: 1000,
+  m: 60 * 1000,
+  h: 60 * 60 * 1000,
+  d: 24 * 60 * 60 * 1000,
+}
+
 export function trendRangeLabel(id: string): string {
-  return TREND_RANGES.find((item) => item.id === id)?.label ?? '最近1小时'
+  const parsed = parseTrendDuration(id)
+  if (parsed) {
+    const unit = TREND_DURATION_UNITS.find((item) => item.id === parsed.unit)?.label ?? parsed.unit
+    return `${parsed.value} ${unit}`
+  }
+  return TREND_RANGES.find((item) => item.id === id)?.label ?? '1 小时'
 }
 
 export function trendPresetSpanMs(id: string): number {
-  return PRESET_MS[id] ?? PRESET_MS['-1h']
+  if (PRESET_MS[id] != null) return PRESET_MS[id]
+  const parsed = parseTrendDuration(id)
+  if (!parsed) return PRESET_MS['-1h']
+  return parsed.value * UNIT_MS[parsed.unit]
 }
 
 /** 采样间隔（运行端/设计端可选）：auto = 按跨度自动聚合；raw = 原始点 */
@@ -188,6 +303,10 @@ interface WidgetHistory {
   loadedKey: string
   dirty: boolean
   customRange: TrendHistoryWindow | null
+  /** 进行中的历史请求，间隔/窗口一变就取消，避免旧的原始点查询把自动聚合堵住直到 25s 超时 */
+  abortCtrl: AbortController | null
+  inFlightKey: string
+  timeoutRetries: number
 }
 
 const widgets = new Map<string, WidgetHistory>()
@@ -247,6 +366,9 @@ function ensureWidget(widgetId: string, preset = '-1h'): WidgetHistory {
       loadedKey: '',
       dirty: false,
       customRange: null,
+      abortCtrl: null,
+      inFlightKey: '',
+      timeoutRetries: 0,
     }
     widgets.set(widgetId, w)
   }
@@ -282,6 +404,24 @@ function queryKey(w: WidgetHistory): string {
   return `${tags}|${rangeKey}|${w.maxPoints}|${agg}|${window ?? ''}`
 }
 
+/**
+ * 原始点：按窗口估点数，上限 HISTORY_RAW_MAX_POINTS（1200）。
+ * 自动 / 固定聚合：只用图元自己的 maxPoints（默认 240），不走 1200 上限，
+ * 这样 5 分钟自动仍是「按 1s 平均」、maxPoints=240。
+ */
+function historyQueryMaxPoints(w: WidgetHistory): number {
+  if (effectiveInterval(w) !== 'raw') {
+    return Math.max(10, Math.min(5000, w.maxPoints || HISTORY_AUTO_MAX_POINTS))
+  }
+  const floor = Math.max(10, Math.min(HISTORY_RAW_MAX_POINTS, w.maxPoints || HISTORY_AUTO_MAX_POINTS))
+  const win = effectiveTrendWindow(w)
+  const span = Math.max(0, win.to - win.from)
+  // 不读 tag store（本文件被 tag.ts 引用，避免循环依赖）。按 50ms 估够点。
+  const period = 50
+  const need = Math.ceil(span / Math.max(1, period)) + 16
+  return Math.max(floor, Math.min(HISTORY_RAW_MAX_POINTS, need))
+}
+
 /** 一次渲染里会对同一图元调用多次 requestTrendHistory：微任务里合并成一次请求 */
 let flushScheduled = false
 function scheduleFlush(): void {
@@ -308,11 +448,19 @@ async function loadWidget(w: WidgetHistory, force: boolean): Promise<void> {
   }
   const key = queryKey(w)
   if (!force && w.loadedKey === key) return
-  if (!force && w.loading) return
+  // 同一条件已在飞就不再发。条件变了（例如原始点刚查完/还在飞时切到自动）必须取消旧请求并立刻按新间隔查，
+  // 否则 loadWidget(..., false) 会因 loading 直接 return，自动聚合迟迟不发，旧请求 25s 后变成「trend history timeout」，图还停在原始点。
+  if (!force && w.loading && w.inFlightKey === key) return
   const win = effectiveTrendWindow(w)
   const { agg, window } = intervalToQuery(effectiveInterval(w))
+  const maxPoints = historyQueryMaxPoints(w)
   const gen = ++w.generation
+  const prev = w.abortCtrl
+  const ctrl = new AbortController()
+  w.abortCtrl = ctrl
+  w.inFlightKey = key
   w.loading = true
+  if (prev) prev.abort()
   w.status = {
     ...w.status,
     state: w.series.size ? w.status.state : 'loading',
@@ -323,7 +471,6 @@ async function loadWidget(w: WidgetHistory, force: boolean): Promise<void> {
     follow: w.follow,
   }
   emitLoaded()
-  const ctrl = new AbortController()
   const timer = setTimeout(() => ctrl.abort(new DOMException('trend history timeout', 'TimeoutError')), 25_000)
   const started = Date.now()
   try {
@@ -331,7 +478,7 @@ async function loadWidget(w: WidgetHistory, force: boolean): Promise<void> {
       tagIds: w.tagIds,
       start: new Date(win.from).toISOString(),
       stop: new Date(win.to).toISOString(),
-      maxPoints: w.maxPoints,
+      maxPoints,
       agg,
       window,
       signal: ctrl.signal,
@@ -375,19 +522,35 @@ async function loadWidget(w: WidgetHistory, force: boolean): Promise<void> {
       updatedAt: Date.now(),
       emptyTags,
     }
+    w.timeoutRetries = 0
   } catch (err) {
     if (w.generation !== gen) return
-    const aborted = err instanceof DOMException && err.name === 'AbortError'
-    if (!aborted) {
-      const message =
-        err && typeof err === 'object' && 'status' in err && 'body' in err
-          ? String((err as { body?: { error?: string } }).body?.error ?? (err as { status?: number }).status)
-          : String((err as Error)?.message ?? err)
+    const aborted =
+      (err instanceof DOMException && (err.name === 'AbortError' || err.name === 'TimeoutError')) ||
+      (err instanceof Error && /trend history timeout|The operation was aborted/i.test(err.message))
+    const message = aborted
+      ? 'trend history timeout'
+      : err && typeof err === 'object' && 'status' in err && 'body' in err
+        ? String((err as { body?: { error?: string } }).body?.error ?? (err as { status?: number }).status)
+        : String((err as Error)?.message ?? err)
+    const canRetry = aborted && effectiveInterval(w) !== 'raw' && w.timeoutRetries < 1
+    if (canRetry) {
+      w.timeoutRetries += 1
+      w.loadedKey = ''
+      w.dirty = true
+      queueMicrotask(() => {
+        if (w.generation === gen && w.dirty) void loadWidget(w, true)
+      })
+    } else {
       w.status = { ...w.status, state: w.series.size ? w.status.state : 'error', error: message, updatedAt: Date.now() }
     }
   } finally {
     clearTimeout(timer)
-    if (w.generation === gen) w.loading = false
+    if (w.abortCtrl === ctrl) w.abortCtrl = null
+    if (w.generation === gen) {
+      w.loading = false
+      w.inFlightKey = ''
+    }
     emitLoaded()
   }
 }
@@ -425,6 +588,10 @@ export function requestTrendHistory(
     changed = true
   }
   if (changed) {
+    w.dirty = true
+    scheduleFlush()
+  } else if (!w.loading && w.loadedKey === '' && w.tagIds.length && !w.dirty) {
+    // 翻页取消在飞请求后，参数可能没变，但历史已被丢掉，必须再查一次。
     w.dirty = true
     scheduleFlush()
   }
@@ -491,6 +658,11 @@ export function trendHistoryStatusOf(widgetId: string): TrendHistoryStatus | nul
   return w ? w.status : null
 }
 
+/** 该图元是否正在请求历史。已有曲线时 status.state 仍可能是 ready，不能只用 state === 'loading'。 */
+export function trendHistoryQueryingOf(widgetId: string): boolean {
+  return widgets.get(widgetId)?.loading === true
+}
+
 export function trendHistoryWindowOf(widgetId: string): TrendHistoryWindow | null {
   const w = widgets.get(widgetId)
   return w ? effectiveTrendWindow(w) : null
@@ -520,13 +692,13 @@ function fmt(ms: number): string {
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
-/** 标题栏上的时间说明：搜过/缩放过显示起止，否则用预设名；聚合时补一句"按 Xs 平均" */
+/** 标题栏上的时间说明：搜过/缩放过显示起止，否则用预设名。
+ * 「按 Xs 平均」只放在工具条右侧 hint，不再写进图内标题，避免与工具条重叠。 */
 export function trendHistoryRangeText(widgetId: string, preset: string): string {
   const w = widgets.get(widgetId)
   const win = effectiveTrendWindow(w ?? ensureWidget(widgetId, preset))
   const base = w?.custom ? `${fmt(win.from)} ~ ${fmt(win.to)}` : trendRangeLabel(preset)
   const status = w?.status
-  if (status?.aggWindow) return `${base} · 按 ${status.aggWindow} 平均`
   if (status?.interval === 'raw') return `${base} · 原始点`
   return base
 }
@@ -667,6 +839,68 @@ export function releaseTrendHistory(widgetId: string, tagId: string): void {
   w.dirty = true
   if (!w.tagIds.length) widgets.delete(widgetId)
   else scheduleFlush()
+}
+
+/** 丢掉整张图的历史缓存，并取消还在飞的请求。翻页时用。 */
+export function releaseTrendHistoryWidget(widgetId: string): void {
+  const w = widgets.get(widgetId)
+  if (!w) return
+  const prev = w.abortCtrl
+  w.abortCtrl = null
+  w.loading = false
+  w.inFlightKey = ''
+  w.dirty = false
+  w.generation += 1
+  if (prev) prev.abort()
+  widgets.delete(widgetId)
+}
+
+/** 只保留仍在当前页的图元，其它历史查询全部取消并释放。 */
+export function releaseTrendHistoryExcept(keepWidgetIds: Iterable<string>): void {
+  const keep = keepWidgetIds instanceof Set ? keepWidgetIds : new Set(keepWidgetIds)
+  let dropped = false
+  for (const id of [...widgets.keys()]) {
+    if (keep.has(id)) continue
+    releaseTrendHistoryWidget(id)
+    dropped = true
+  }
+  if (dropped) emitLoaded()
+}
+
+/**
+ * 刚翻进一页（含返回已访问页）时：解开冻结窗口、丢掉完成标记，让进页历史重新查询。
+ * 已在飞且条件相同的请求不打断，避免同一页被连续调用时把刚发出的查询取消掉。
+ */
+export function invalidateTrendHistoryForEnter(widgetIds: Iterable<string>): void {
+  const ids = widgetIds instanceof Set ? widgetIds : new Set(widgetIds)
+  let any = false
+  for (const id of ids) {
+    const w = widgets.get(id)
+    if (!w) continue
+    if (w.loading && w.inFlightKey) continue
+    w.custom = null
+    w.customRange = null
+    w.autoFrozen = false
+    w.loadedKey = ''
+    w.dirty = true
+    w.timeoutRetries = 0
+    any = true
+  }
+  if (any) scheduleFlush()
+}
+
+export function trendHistoryCacheSize(): number {
+  return widgets.size
+}
+
+export function trendHistoryLoadingCount(): number {
+  let n = 0
+  for (const w of widgets.values()) if (w.loading) n += 1
+  return n
+}
+
+export function trendHistoryCachedWidgetIds(): string[] {
+  return [...widgets.keys()]
 }
 
 /** 轮询刷新：只刷"跟随最新"的控件（冻结的窗口不动，避免读数被打断） */

@@ -100,11 +100,14 @@ export function parseTagAddress(
     case 'http':
       f.path = s
       break
-    case 'mcd4000': {
+    case 'mcd4000':
+    case 'mcd4000_mqtt': {
       const i = s.indexOf('|')
       if (i >= 0) {
         f.sensor = s.slice(0, i).trim()
         f.field = s.slice(i + 1).trim()
+      } else if (protocol === 'mcd4000_mqtt') {
+        f.field = s
       } else {
         f.sensor = s
       }
@@ -166,6 +169,14 @@ export function formatTagAddress(
       const sensor = fields.sensor.trim()
       const field = fields.field.trim()
       if (!sensor && !field) return undefined
+      return `${sensor}|${field}`
+    }
+    case 'mcd4000_mqtt': {
+      const sensor = fields.sensor.trim()
+      const field = fields.field.trim()
+      if (!sensor && !field) return undefined
+      if (!sensor) return field
+      if (!field) return sensor
       return `${sensor}|${field}`
     }
     case 'other':

@@ -9,12 +9,15 @@ import com.webscada.server.service.CommsEventLogService;
 import com.webscada.server.service.DeviceStatusService;
 import com.webscada.server.service.TagRuntimeService;
 import com.webscada.server.store.DeviceFileStore;
+import jakarta.annotation.PreDestroy;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -34,6 +37,13 @@ public class Mcd4000PollService {
   private final ScadaProperties props;
   private final ObjectMapper mapper;
   private final AtomicBoolean busy = new AtomicBoolean(false);
+  private final ExecutorService pollExec =
+      Executors.newSingleThreadExecutor(
+          r -> {
+            Thread t = new Thread(r, "mcd4000-poll");
+            t.setDaemon(true);
+            return t;
+          });
   private volatile long lastWarnAt;
   /** tagId 或探测键 → 上次发起读取的时间 */
   private final ConcurrentHashMap<String, Long> lastScanAt = new ConcurrentHashMap<>();
@@ -74,13 +84,22 @@ public class Mcd4000PollService {
   public void poll() {
     if (!props.getMcd4000().isEnabled()) return;
     if (!busy.compareAndSet(false, true)) return;
-    try {
-      doPoll();
-    } catch (Exception e) {
-      warn("poll failed", e);
-    } finally {
-      busy.set(false);
-    }
+    // HTTP 查询放到工作线程，避免堵住默认调度线程上的 Modbus 采集。
+    pollExec.execute(
+        () -> {
+          try {
+            doPoll();
+          } catch (Exception e) {
+            warn("poll failed", e);
+          } finally {
+            busy.set(false);
+          }
+        });
+  }
+
+  @PreDestroy
+  public void shutdown() {
+    pollExec.shutdownNow();
   }
 
   private void doPoll() throws Exception {
@@ -174,7 +193,7 @@ public class Mcd4000PollService {
   }
 
   private static int scanPeriod(TagMeta meta) {
-    int ms = meta.scanPeriodMs() == null ? 1000 : meta.scanPeriodMs();
+    int ms = meta.scanPeriodMs() == null ? 50 : meta.scanPeriodMs();
     return Math.max(50, ms);
   }
 

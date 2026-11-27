@@ -90,7 +90,7 @@ public class TagController {
                 body.simulation(),
                 body.onText(),
                 body.offText(),
-                body.scanPeriodMs(),
+                body.scanPeriodMs() != null ? body.scanPeriodMs() : 50,
                 body.pushEnabled(),
                 body.pushPeriodMs(),
                 body.history()));

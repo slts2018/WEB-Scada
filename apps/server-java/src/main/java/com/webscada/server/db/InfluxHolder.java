@@ -221,8 +221,9 @@ public class InfluxHolder {
           |> filter(fn: (r) => r._measurement == "%s")
           |> filter(fn: (r) => r.tagId == "%s")
           |> filter(fn: (r) => r._field == "value" or r._field == "value_str")
-          |> sort(columns: ["_time"], desc: false)
+          |> sort(columns: ["_time"], desc: true)
           |> limit(n: %d)
+          |> sort(columns: ["_time"], desc: false)
         """
             .formatted(
                 props.getInflux().getBucket(),
@@ -252,7 +253,8 @@ public class InfluxHolder {
   /**
    * 多变量批量历史查询：一条 Flux 查完所有 tagId，避免 N 次串行请求。
    *
-   * <p>agg 为 none 时返回原始点（每条曲线取最近 maxPoints 个）；否则按
+   * <p>agg 为 none 时返回原始点（每条曲线取最近 maxPoints 个，用 tail 而不是
+   * 先全窗口倒序排序再 limit，避免 5 分钟高频数据把后续自动聚合查询拖到超时）；否则按
    * 跨度自动选聚合窗口（mean/max/min/last/first/sum）。
    *
    * <p>注意两个现实约束：
@@ -300,8 +302,7 @@ public class InfluxHolder {
             |> filter(fn: (r) => r._measurement == "%s")
             |> filter(fn: (r) => %s)
             |> filter(fn: (r) => r._field == "value" or r._field == "value_str")
-            |> sort(columns: ["_time"], desc: true)
-            |> limit(n: %d)
+            |> tail(n: %d)
             |> sort(columns: ["_time"], desc: false)
           """
               .formatted(

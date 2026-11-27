@@ -63,7 +63,8 @@ public class DeviceConnectivityMonitor {
   @Scheduled(fixedDelayString = "${webscada.device-probe-ms:15000}", initialDelay = 4000)
   public void scheduledProbe() {
     try {
-      probeAll();
+      // 周期探测不得在调度线程上 get() 等待，否则会堵住同线程的 Modbus 轮询。
+      startProbeAll();
     } catch (Exception e) {
       log.warn("device probe tick failed: {}", e.toString());
     }
@@ -77,34 +78,62 @@ public class DeviceConnectivityMonitor {
       Thread.sleep(200);
     }
     try {
-      List<DeviceMeta> all = devices.list();
-      java.util.HashSet<String> active = new java.util.HashSet<>();
-      for (DeviceMeta device : all) {
-        if (shouldProbe(device) && isStatusLogProtocol(device.protocol())) {
-          active.add(device.deviceId());
-        }
-      }
-      for (String id : new ArrayList<>(lastOnline.keySet())) {
-        if (!active.contains(id)) {
-          lastOnline.remove(id);
-          lastOnlineDetail.remove(id);
-        }
-      }
-      List<CompletableFuture<Void>> jobs = new ArrayList<>();
-      int planned = 0;
-      for (DeviceMeta device : all) {
-        if (!shouldProbe(device)) continue;
-        planned++;
-        DeviceMeta snap = device;
-        jobs.add(CompletableFuture.runAsync(() -> probeOne(snap), pool));
-      }
-      if (jobs.isEmpty()) return 0;
-      CompletableFuture.allOf(jobs.toArray(CompletableFuture[]::new))
-          .get(20, TimeUnit.SECONDS);
-      return planned;
+      return runProbeAll(true);
     } finally {
       busy.set(false);
     }
+  }
+
+  /** 调度线程只负责发起探测；已有一轮在跑则跳过。 */
+  private void startProbeAll() throws Exception {
+    if (!busy.compareAndSet(false, true)) return;
+    try {
+      int planned = runProbeAll(false);
+      if (planned <= 0) busy.set(false);
+    } catch (Exception e) {
+      busy.set(false);
+      throw e;
+    }
+  }
+
+  /**
+   * @param wait true = 调用方等待全部探测结束（手工“立即探测”）；false = 后台完成并释放 busy
+   */
+  private int runProbeAll(boolean wait) throws Exception {
+    List<DeviceMeta> all = devices.list();
+    java.util.HashSet<String> active = new java.util.HashSet<>();
+    for (DeviceMeta device : all) {
+      if (shouldProbe(device) && isStatusLogProtocol(device.protocol())) {
+        active.add(device.deviceId());
+      }
+    }
+    for (String id : new ArrayList<>(lastOnline.keySet())) {
+      if (!active.contains(id)) {
+        lastOnline.remove(id);
+        lastOnlineDetail.remove(id);
+      }
+    }
+    List<CompletableFuture<Void>> jobs = new ArrayList<>();
+    int planned = 0;
+    for (DeviceMeta device : all) {
+      if (!shouldProbe(device)) continue;
+      planned++;
+      DeviceMeta snap = device;
+      jobs.add(CompletableFuture.runAsync(() -> probeOne(snap), pool));
+    }
+    if (jobs.isEmpty()) return 0;
+    CompletableFuture<Void> done = CompletableFuture.allOf(jobs.toArray(CompletableFuture[]::new));
+    if (wait) {
+      done.get(20, TimeUnit.SECONDS);
+    } else {
+      done.orTimeout(20, TimeUnit.SECONDS)
+          .whenComplete(
+              (v, ex) -> {
+                if (ex != null) log.warn("device probe tick failed: {}", ex.toString());
+                busy.set(false);
+              });
+    }
+    return planned;
   }
 
   public void probeOne(DeviceMeta device) {

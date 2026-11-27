@@ -38,14 +38,10 @@ export const ECHART_FOLDERS = [
 
 export const ECHART_PRESETS: EchartPreset[] = [
   { id: 'line-basic', folder: '折线图', label: '基础折线图', family: 'line' },
-  { id: 'line-multi', folder: '折线图', label: '多折线图', family: 'line' },
-  { id: 'line-trend', folder: '折线图', label: '折线趋势图', family: 'line' },
   { id: 'line-smooth', folder: '折线图', label: '基础曲线图', family: 'line' },
-  { id: 'line-smooth-multi', folder: '折线图', label: '多曲线图', family: 'line' },
-  { id: 'line-smooth-trend', folder: '折线图', label: '曲线趋势图', family: 'line' },
   { id: 'line-gradient', folder: '折线图', label: '渐变单曲线', family: 'line' },
-  { id: 'line-step', folder: '折线图', label: '阶梯折线图', family: 'line' },
   { id: 'line-dual', folder: '折线图', label: '双Y轴折线', family: 'line' },
+  { id: 'line-step', folder: '折线图', label: '阶梯折线图', family: 'line' },
   { id: 'area-basic', folder: '面积图', label: '基础面积图', family: 'area' },
   { id: 'area-stack', folder: '面积图', label: '堆叠面积图', family: 'area' },
   { id: 'bar-basic', folder: '柱状图', label: '基础柱状图', family: 'bar' },
@@ -83,8 +79,23 @@ export const ECHART_PRESETS: EchartPreset[] = [
 
 const byId = new Map(ECHART_PRESETS.map((item) => [item.id, item]))
 
+/** 已从设计端图库下架，但仍要能渲染/显示已有图元名称。不要加入 ECHART_PRESETS。 */
+const ECHART_LEGACY_PRESETS: EchartPreset[] = [
+  { id: 'line-multi', folder: '折线图', label: '多折线图', family: 'line' },
+  { id: 'line-trend', folder: '折线图', label: '折线趋势图', family: 'line' },
+  { id: 'line-smooth-multi', folder: '折线图', label: '多曲线图', family: 'line' },
+  { id: 'line-smooth-trend', folder: '折线图', label: '曲线趋势图', family: 'line' },
+]
+const legacyById = new Map(ECHART_LEGACY_PRESETS.map((item) => [item.id, item]))
+
+/** 图库/搜索/拖入只用这一份：下架的四类不在其中。 */
 export function findEchartPreset(id: string): EchartPreset | undefined {
   return byId.get(id)
+}
+
+/** 属性面板名称：含下架但仍可能已放在画面上的变体。 */
+export function echartPresetLabel(id: string): string | undefined {
+  return byId.get(id)?.label ?? legacyById.get(id)?.label
 }
 
 export function isMapPreset(id: string): boolean {

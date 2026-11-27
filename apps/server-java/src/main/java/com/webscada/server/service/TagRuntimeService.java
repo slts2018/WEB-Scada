@@ -94,7 +94,7 @@ public class TagRuntimeService {
 
   private volatile List<TagMeta> metas = List.of();
 
-  /** 启用中的 mcd4000 设备 ID；其 Tag 由轮询驱动，不走 Mock 抖动 */
+  /** 启用中的 mcd4000 / mcd4000_mqtt 设备 ID；其 Tag 由采集驱动，不走 Mock 抖动 */
 
   private volatile Set<String> mcdDeviceIds = Set.of();
 
@@ -275,6 +275,16 @@ public class TagRuntimeService {
 
   }
 
+  private boolean isMcdMqttDevice(TagMeta meta) {
+    if (meta == null || meta.deviceId() == null || deviceStore == null) return false;
+    try {
+      DeviceMeta dev = deviceStore.get(meta.deviceId());
+      return dev != null && "mcd4000_mqtt".equalsIgnoreCase(dev.protocol());
+    } catch (IOException e) {
+      return false;
+    }
+  }
+
 
 
   /** deviceId 落在某条 comm 链路上。开关关闭或没有链路时为 false。 */
@@ -365,7 +375,8 @@ public class TagRuntimeService {
 
         if (!d.enabled() || d.deviceId() == null) continue;
 
-        if ("mcd4000".equalsIgnoreCase(d.protocol())) ids.add(d.deviceId());
+        if ("mcd4000".equalsIgnoreCase(d.protocol())
+            || "mcd4000_mqtt".equalsIgnoreCase(d.protocol())) ids.add(d.deviceId());
 
         else if ("mock".equalsIgnoreCase(d.protocol())) mocks.add(d.deviceId());
 
@@ -402,6 +413,17 @@ public class TagRuntimeService {
     return next;
   }
 
+  /** 只写入历史库，不改当前值。history 显式关闭时跳过。用于 ARM 批次中间点。 */
+  public void writeHistorySample(String tagId, Object value, String quality, long timestamp) {
+    if (influx == null || tagId == null || tagId.isBlank()) return;
+    TagMeta meta = metaOf(tagId);
+    if (meta != null && meta.history() != null && Boolean.FALSE.equals(meta.history().enabled())) {
+      return;
+    }
+    String name = meta == null ? null : meta.name();
+    influx.writeSampleQuiet(tagId, name, value, quality, timestamp);
+  }
+
 
 
   public WriteResult writeTag(String tagId, Object value) {
@@ -426,6 +448,9 @@ public class TagRuntimeService {
 
     if (isMcdDriven(meta)) {
 
+      if (isMcdMqttDevice(meta)) {
+        return WriteResult.fail("MCD4000（MQTT）无下行写值命令，写值不会下发现场");
+      }
       return WriteResult.fail("MCD4000 数据中台为查询 API，写值不会下发现场");
 
     }
@@ -582,7 +607,7 @@ public class TagRuntimeService {
     ThreadLocalRandom rnd = ThreadLocalRandom.current();
     for (TagMeta meta : metas) {
       if (!isMockDriven(meta)) continue;
-      int scan = meta.scanPeriodMs() == null ? 1000 : Math.max(50, meta.scanPeriodMs());
+      int scan = meta.scanPeriodMs() == null ? 50 : Math.max(50, meta.scanPeriodMs());
       long scanSlot = nowMs / scan;
       Long prevScan = scanSlots.get(meta.tagId());
       if (prevScan != null && prevScan == scanSlot) continue;

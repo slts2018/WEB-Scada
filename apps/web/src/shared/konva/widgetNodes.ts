@@ -6,16 +6,26 @@ import {
   liveTrendTimes,
 } from '@/shared/runtime/trendSeries'
 import { isMapPreset } from '@/shared/echart/catalog'
-import { echartAxisFont, echartBoundOf, echartSignature, type EchartBound } from '@/shared/echart/content'
+import {
+  echartAxisFont,
+  echartBoundOf,
+  echartItems,
+  echartLegendKey,
+  echartLegendToggleable,
+  echartSignature,
+  type EchartBound,
+} from '@/shared/echart/content'
 import { ensureGeo, geoReady } from '@/shared/echart/geo'
 import { renderEchart } from '@/shared/echart/render'
 import { useProjectStore } from '@/stores/project'
 import { useTagStore } from '@/stores/tag'
 import {
+  resolveEchartEnterRange,
   trendHistoryQualities,
   trendHistorySeries,
   trendHistoryTimes,
   trendHistoryTimesForFirstQuery,
+  trendPresetSpanMs,
 } from '@/shared/runtime/trendHistoryQuery'
 import {
   renderTrendChart,
@@ -43,7 +53,8 @@ import {
   type Widget2D,
 } from '@web-scada/core'
 import { HISTORY_FILTER_HEIGHT, HISTORY_PAGER_HEIGHT, alarmHistoryWindow, historyRowCapacity, historySampleMatches } from '@/shared/runtime/alarmHistoryQuery'
-import { trendHistoryRangeText, trendHistoryWindowOf } from '@/shared/runtime/trendHistoryQuery'
+import { trendHistoryWindowOf } from '@/shared/runtime/trendHistoryQuery'
+import { chartWidgetTitle } from '@/shared/runtime/chartWidgetTitle'
 import { trendHistoryTableVisibleOf } from '@/shared/runtime/trendHistoryTable'
 import { trendHistoryCursorOf, trendHistoryCursorReadout } from '@/shared/runtime/trendHistoryCursor'
 import { formatTagNumber, tagDisplayFormat, widgetValueTagId } from '@/shared/runtime/tagDisplay'
@@ -80,7 +91,7 @@ function panelFill(style: Record<string, unknown>, fallback: string): string {
 }
 
 /** 根据 Widget2D 创建对应 Konva 节点（含 Group 包装，统一 transform） */
-export function createWidgetNode(widget: Widget2D): Konva.Group {
+export function createWidgetNode(widget: Widget2D, opts?: { runtime?: boolean }): Konva.Group {
   const group = new Konva.Group({
     id: widget.id,
     name: 'widget',
@@ -89,13 +100,15 @@ export function createWidgetNode(widget: Widget2D): Konva.Group {
     rotation: widget.transform.rotation,
     scaleX: widget.transform.scaleX,
     scaleY: widget.transform.scaleY,
-    draggable: !widget.locked,
+    // 运行端不要按设计端规则把未锁定图元设成可拖；真正的拖拽写值由运行舞台另设
+    draggable: opts?.runtime ? false : !widget.locked,
     visible: widget.visible !== false,
   })
   group.setAttr('widgetId', widget.id)
   group.setAttr('widgetType', widget.type)
 
   const shape = buildShape(widget)
+  shape.setAttr('shapeKey', widgetShapeKey(widget))
   group.add(shape)
   return group
 }
@@ -139,9 +152,11 @@ function toggleCurveHidden(widget: Widget2D, tagId: string, source?: Konva.Node)
   hiddenCurveOverride.set(widget.id, next)
   redrawWidgetShape(widget, source)
   try {
-    useProjectStore().updateWidget(widget.id, {
+    const project = useProjectStore()
+    if (project.published) return
+    project.updateWidget(widget.id, {
       props: { ...widget.props, hiddenCurves: [...next] },
-    })
+    }, { recordHistory: true })
   } catch {
     // 运行端工程只读 / 没有 Pinia：忽略即可，本地覆盖已经生效
   }
@@ -151,9 +166,14 @@ function toggleCurveHidden(widget: Widget2D, tagId: string, source?: Konva.Node)
 export function setHiddenCurves(widget: Widget2D, hidden: string[]): void {
   hiddenCurveOverride.set(widget.id, new Set(hidden))
   try {
-    useProjectStore().updateWidget(widget.id, {
+    const project = useProjectStore()
+    // 运行端 loadPublished 后 document 可写。若把 hiddenCurves 写回工程，
+    // Canvas2DRuntime 对 page.layers 的 deep watch 会 setPage 整页重建，
+    // 刚点掉的图例会被灌回或看起来像没点。运行期只靠本地覆盖即可。
+    if (project.published) return
+    project.updateWidget(widget.id, {
       props: { ...widget.props, hiddenCurves: hidden },
-    })
+    }, { recordHistory: true })
   } catch {
     /* 运行端工程只读：本地覆盖已经生效 */
   }
@@ -176,6 +196,14 @@ function redrawWidgetShape(widget: Widget2D, source?: Konva.Node): void {
     // 先拿到图元所在的 Group（重画会把 source 自己删掉，所以要提前拿）
     const group = source?.findAncestor?.('.widget', true) as Konva.Group | undefined
     if (!group) return
+    if (widget.type === 'echart') {
+      const shape = group.findOne('.shape') as Konva.Group | null
+      if (shape) {
+        shape.setAttr('echartSig', '')
+        paintEchartShape(shape, widget)
+        return
+      }
+    }
     group.findOne('.shape')?.destroy()
     group.add(buildShape(widget))
     group.getLayer()?.batchDraw()
@@ -560,8 +588,8 @@ export function buildTrendLiveSpec(
     hidden: hiddenCurveIds(widget),
     fallbackSeries: livePoints.length ? livePoints : parseSeries(widget.props.series),
     isHistory,
-    title: String(widget.props.title ?? (isHistory ? '历史趋势' : '实时趋势')),
-    rangeText: isHistory ? trendHistoryRangeText(widget.id, String(widget.props.range ?? '-1h')) : '',
+    title: chartWidgetTitle({ name: widget.name, title: widget.props.title, fallback: isHistory ? '历史趋势' : '实时趋势' }),
+    rangeText: '',
     width: opts.width,
     height: opts.height,
     fontSize: opts.fontSize,
@@ -684,8 +712,8 @@ export function buildTrendChartImage(widget: Widget2D): HTMLCanvasElement | null
     hidden: hiddenCurveIds(widget),
     fallbackSeries: liveSeriesOf(widget.id) ?? parseSeries(widget.props.series),
     isHistory,
-    title: String(widget.props.title ?? (isHistory ? '历史趋势' : '实时趋势')),
-    rangeText: isHistory ? trendHistoryRangeText(widget.id, String(widget.props.range ?? '-1h')) : '',
+    title: chartWidgetTitle({ name: widget.name, title: widget.props.title, fallback: isHistory ? '历史趋势' : '实时趋势' }),
+    rangeText: '',
     width,
     height: Math.max(20, height - legendLayout.height),
     fontSize: chartFont,
@@ -759,7 +787,7 @@ export function exportTrendWidgetImage(widget: Widget2D, nodeHint?: Konva.Node):
 }
 
 /** 图元右上角的"导出图片"按钮（Konva 节点：和图例一样能点，设计端/运行端都一样） */
-function trendExportNode(widget: Widget2D, style: Record<string, unknown>): Konva.Group {
+export function trendExportNode(widget: Widget2D, style: Record<string, unknown>): Konva.Group {
   const rect = trendExportRect(widget)
   const textColor = str(style, 'textColor', '#94a3b8')
   const g = new Konva.Group({ name: 'shape-export', x: rect.x, y: rect.y, listening: true })
@@ -910,8 +938,15 @@ function refreshTrendShape(shape: Konva.Group, widget: Widget2D): boolean {
  * 于是图例点不动 —— 运行端必须用它来放行趋势图元的命中测试（设计端/运行端行为保持一致）。
  */
 export function widgetHasCurveLegend(widget: Widget2D): boolean {
-  if (widget.type !== 'trend' && widget.type !== 'trendHistory') return false
-  return trendCurves(widget.props).some((curve) => Boolean(curve.tagId))
+  if (widget.type === 'trendHistory') {
+    return trendCurves(widget.props).some((curve) => Boolean(curve.tagId))
+  }
+  if (widget.type === 'echart') {
+    const variant = String(widget.props.variant || 'line-basic')
+    if (!echartLegendToggleable(variant)) return false
+    return (echartItems(widget.props) ?? []).length >= 1
+  }
+  return false
 }
 
 /**
@@ -938,7 +973,7 @@ function sliceNumberText(slice: ChartSlice): string {
 }
 
 /** 饼图 / 柱状图。绑了变量时，数值已由 resolveWidgetVisual 换成当前值。 */
-function buildCategoryChart(widget: Widget2D, width: number, height: number, opacity: number): Konva.Group {
+export function buildCategoryChart(widget: Widget2D, width: number, height: number, opacity: number): Konva.Group {
   const style = widget.style
   const g = new Konva.Group({ name: 'shape' })
   const slices = chartSlices(widget.props)
@@ -953,7 +988,7 @@ function buildCategoryChart(widget: Widget2D, width: number, height: number, opa
       opacity,
     }),
   )
-  const title = String(widget.props.title ?? '')
+  const title = chartWidgetTitle({ name: widget.name, title: widget.props.title, fallback: '' })
   const font = Math.max(10, num(style, 'fontSize', 12))
   const textColor = str(style, 'textColor', '#e2e8f0')
   if (title) {
@@ -1107,6 +1142,51 @@ function buildCategoryChart(widget: Widget2D, width: number, height: number, opa
   return g
 }
 
+
+/** 已下架的内置图元：在原位置画说明，避免旧工程出现空白或报错。 */
+function buildRetiredBuiltinShape(widget: Widget2D, width: number, height: number, opacity: number): Konva.Group {
+  const style = widget.style
+  const title =
+    widget.type === 'trend' ? '内置实时趋势已移除' : widget.type === 'pie' ? '内置饼图已移除' : '内置柱状图已移除'
+  const g = new Konva.Group({ name: 'shape' })
+  g.add(
+    new Konva.Rect({
+      width,
+      height,
+      fill: str(style, 'fill', '#0f172a'),
+      stroke: str(style, 'stroke', '#334155'),
+      strokeWidth: num(style, 'strokeWidth', 1),
+      cornerRadius: num(style, 'cornerRadius', 8),
+      opacity,
+    }),
+  )
+  g.add(
+    new Konva.Text({
+      x: 12,
+      y: Math.max(8, height / 2 - 22),
+      width: Math.max(20, width - 24),
+      text: title,
+      fontSize: 14,
+      fill: str(style, 'textColor', '#e2e8f0'),
+      align: 'center',
+      listening: false,
+    }),
+  )
+  g.add(
+    new Konva.Text({
+      x: 12,
+      y: Math.max(8, height / 2 + 2),
+      width: Math.max(20, width - 24),
+      text: '请改用图元库中的 ECharts 图表。历史趋势仍可使用。',
+      fontSize: 12,
+      fill: str(style, 'textColor', '#94a3b8'),
+      align: 'center',
+      listening: false,
+    }),
+  )
+  return g
+}
+
 function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
   const { width, height } = widget.transform
   const style = widget.style
@@ -1115,7 +1195,8 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
   switch (widget.type) {
     case 'pie':
     case 'bar':
-      return buildCategoryChart(widget, width, height, opacity)
+    case 'trend':
+      return buildRetiredBuiltinShape(widget, width, height, opacity)
     case 'circle': {
       const radiusX = Math.max(width / 2, 1)
       const radiusY = Math.max(height / 2, 1)
@@ -1716,7 +1797,6 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
       return g
     }
     case 'chart':
-    case 'trend':
     case 'trendHistory': {
       const g = new Konva.Group({ name: 'shape' })
       // 记住结构指纹：下次同步结构没变就只换图像（见 refreshTrendShape）
@@ -1756,15 +1836,14 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
       }
       if (max <= min) max = min + 1
       const isHistory = isHistoryWidget
-      const isTrend = widget.type === 'trend' || isHistory
-      const title = String(widget.props.title ?? (isHistory ? '历史趋势' : isTrend ? '实时趋势' : '趋势'))
-      const rangeText = isHistory ? trendHistoryRangeText(widget.id, String(widget.props.range ?? '-1h')) : ''
+      const title = chartWidgetTitle({ name: widget.name, title: widget.props.title, fallback: isHistory ? '历史趋势' : '趋势' })
+      const rangeText = ''
       g.add(
         new Konva.Rect({
           width,
           height,
-          fill: isTrend ? panelFill(style, '#0b1220') : str(style, 'fill', '#0f172a'),
-          stroke: str(style, 'stroke', isHistory ? '#3f2e12' : isTrend ? '#1e3a5f' : '#334155'),
+          fill: isHistory ? panelFill(style, '#0b1220') : str(style, 'fill', '#0f172a'),
+          stroke: str(style, 'stroke', isHistory ? '#3f2e12' : '#334155'),
           strokeWidth: num(style, 'strokeWidth', 1),
           cornerRadius: num(style, 'cornerRadius', 6),
           opacity,
@@ -1772,7 +1851,7 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
       )
       // 趋势图元优先交给 ECharts（离屏 canvas → 图像：设计端 / Runtime / 3D 面板同一套渲染）；
       // 渲染失败或没有数据时继续往下走内置手绘（旧表现完全保留）。
-      if (isTrend) {
+      if (isHistory) {
         const chartHeight = Math.max(20, height - legendH)
         const canvas = buildTrendChartImage(widget)
         if (canvas) {
@@ -1787,10 +1866,7 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
               listening: false,
             }),
           )
-          // 右上角"导出图片"按钮（Konva 画：离屏位图里的按钮点不到）
-          if (widget.type === 'trend' || widget.type === 'trendHistory') {
-            g.add(trendExportNode(widget, style))
-          }
+          // 导出改走工具条，不再在图内右上角放图标（会与时间文字挤在一起）
           // 图例由 Konva 画：可点击切换显隐（ECharts 自带图例在离屏位图里，点不到）
           if (legendLayout.entries.length || legendLayout.overflow) {
             g.add(
@@ -1843,7 +1919,6 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
             trendLegendNode(widget, legendLayout, height - legendLayout.height, style, legendFont),
           )
         }
-        g.add(trendExportNode(widget, style))
         // 每条曲线独立量程（pad:true 上下留边），x 按各自点数铺满绘图区
         curves.forEach((curve, i) => {
           // 回退路径只画有值的点（实时缓冲里可能有 null 缺口）
@@ -2054,10 +2129,6 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
     case 'echart': {
       const g = new Konva.Group({ name: 'shape' })
       const variant = String(widget.props.variant || 'line-basic')
-      const bound = echartPaintBound(widget)
-      const sig = `${echartSignature(bound)}|ax${echartAxisFont(widget.props)}`
-      g.setAttr('echartSize', `${variant}|${Math.round(width)}|${Math.round(height)}`)
-      g.setAttr('echartSig', sig)
       g.add(
         new Konva.Rect({
           name: 'hit',
@@ -2069,17 +2140,10 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
           cornerRadius: 6,
         }),
       )
-      const paint = () => {
-        const canvas = renderEchart(variant, width, height, false, echartPaintBound(widget), echartAxisFont(widget.props))
-        const prev = g.findOne('.chart') as Konva.Image | null
-        if (!canvas) return
-        if (prev) prev.image(canvas)
-        else g.add(new Konva.Image({ name: 'chart', image: canvas, width, height, listening: false }))
-      }
-      paint()
+      paintEchartShape(g, widget)
       if (isMapPreset(variant) && !geoReady()) {
         void ensureGeo().then(() => {
-          paint()
+          paintEchartShape(g, widget)
           g.getLayer()?.batchDraw()
         })
       }
@@ -2174,13 +2238,315 @@ function buildShape(widget: Widget2D): Konva.Shape | Konva.Group {
   }
 }
 
+
+/** 最大化时舞台会被放大。按屏幕像素重绘，避免把小位图拉伸后字号巨大、轴刻度被裁切。 */
+function echartScreenScale(node?: Konva.Node | null): number {
+  const s = Math.abs(node?.getStage()?.scaleX() ?? 1)
+  return Number.isFinite(s) && s > 1 ? s : 1
+}
+
+function echartLogicalKey(variant: string, width: number, height: number): string {
+  return `${variant}|${Math.round(width)}|${Math.round(height)}`
+}
+
+/** 最大化铺满时图元被临时画成视口大小（存在父节点 focusPaint 上），不要再用原始 transform 尺寸。 */
+function echartPaintBox(shape: Konva.Group, widget: Widget2D): { width: number; height: number; focused: boolean } {
+  const group = (shape.getParent() as Konva.Group | null) ?? shape
+  const focus = group.getAttr('focusPaint') as { width?: number; height?: number } | undefined
+  const fw = Number(focus?.width)
+  const fh = Number(focus?.height)
+  if (Number.isFinite(fw) && Number.isFinite(fh) && fw > 0 && fh > 0) {
+    return { width: fw, height: fh, focused: true }
+  }
+  return { width: widget.transform.width, height: widget.transform.height, focused: false }
+}
+
+
+const ECHART_LEGEND_COLORS = ['#22d3ee', '#f59e0b', '#34d399', '#a78bfa', '#3d8bfd', '#f472b6']
+
+function echartLegendColor(item: { color?: string }, index: number): string {
+  return item.color || ECHART_LEGEND_COLORS[index % ECHART_LEGEND_COLORS.length]
+}
+
+function publishEchartLegendHits(
+  widgetId: string,
+  boxes: Array<{ key: string; label: string; hidden: boolean; x: number; y: number; w: number; h: number }>,
+): void {
+  if (typeof window === 'undefined') return
+  const slot = window as unknown as { __scadaEchartLegendHits?: Record<string, typeof boxes> }
+  slot.__scadaEchartLegendHits = { ...(slot.__scadaEchartLegendHits ?? {}), [widgetId]: boxes }
+}
+
+/**
+ * 在 ECharts 位图上方叠一层可点的图例。
+ * 图是离屏画出来的位图，ECharts 自带图例收不到点击，点了像没反应。
+ */
+
+function measureEchartLegendHits(
+  shape: Konva.Group,
+  items: NonNullable<ReturnType<typeof echartItems>>,
+  hidden: Set<string>,
+  font: number,
+): Array<{ key: string; label: string; hidden: boolean; x: number; y: number; w: number; h: number }> {
+  const group = shape.findOne('.echart-legend') as Konva.Group | null
+  const stage = shape.getStage()
+  const origin = stage?.container()?.getBoundingClientRect()
+  if (!group || !stage || !origin) return []
+  const rowH = font + 8
+  const children = group.getChildren()
+  return items.map((item, index) => {
+    const node = children[index]
+    const label = item.label.trim() || `项${index + 1}`
+    const key = echartLegendKey(item, index)
+    if (!node) {
+      return { key, label, hidden: hidden.has(key), x: 0, y: 0, w: 0, h: 0 }
+    }
+    const abs = node.getAbsoluteTransform().point({ x: 0, y: 0 })
+    const width = Number((node as Konva.Group).getClientRect({ skipTransform: true }).width || 0)
+    return {
+      key,
+      label,
+      hidden: hidden.has(key),
+      x: origin.left + abs.x,
+      y: origin.top + abs.y,
+      w: width * stage.scaleX(),
+      h: rowH * stage.scaleY(),
+    }
+  })
+}
+
+function syncEchartLegend(shape: Konva.Group, widget: Widget2D): void {
+  const variant = String(widget.props.variant || 'line-basic')
+  const items = echartItems(widget.props) ?? []
+  const hidden = hiddenCurveIds(widget)
+  const box = echartPaintBox(shape, widget)
+  const font = Math.max(11, Math.round((echartAxisFont(widget.props) || 12) * 0.95))
+  const legendKey = [
+    variant,
+    box.width,
+    box.height,
+    font,
+    items.map((item, index) => `${echartLegendKey(item, index)}:${item.label}:${item.color ?? ''}`).join('|'),
+    [...hidden].sort().join(','),
+  ].join('/')
+  if (!echartLegendToggleable(variant) || !items.length) {
+    shape.findOne('.echart-legend')?.destroy()
+    shape.setAttr('echartLegendKey', '')
+    publishEchartLegendHits(widget.id, [])
+    return
+  }
+  // 数据刷新不要拆掉图例节点，否则按下/抬起会落在两个对象上，点击又会丢。
+  if (shape.getAttr('echartLegendKey') === legendKey && shape.findOne('.echart-legend')) {
+    publishEchartLegendHits(widget.id, measureEchartLegendHits(shape, items, hidden, font))
+    return
+  }
+  shape.findOne('.echart-legend')?.destroy()
+  shape.setAttr('echartLegendKey', legendKey)
+  const swatch = Math.max(8, Math.round(font * 0.7))
+  const gap = 14
+  const padX = 10
+  const padBottom = 6
+  const rowH = font + 8
+  type Entry = { item: (typeof items)[number]; index: number; key: string; label: string; width: number }
+  const entries: Entry[] = items.map((item, index) => {
+    const label = item.label.trim() || `项${index + 1}`
+    return {
+      item,
+      index,
+      key: echartLegendKey(item, index),
+      label,
+      width: swatch + 6 + measureLegendText(label, font),
+    }
+  })
+  const maxW = Math.max(40, box.width - padX * 2)
+  const rows: Entry[][] = []
+  let current: Entry[] = []
+  let rowWidth = 0
+  for (const entry of entries) {
+    const nextW = current.length ? rowWidth + gap + entry.width : entry.width
+    if (current.length && nextW > maxW) {
+      rows.push(current)
+      current = [entry]
+      rowWidth = entry.width
+    } else {
+      current.push(entry)
+      rowWidth = nextW
+    }
+  }
+  if (current.length) rows.push(current)
+  const legendH = Math.max(rowH, rows.length * rowH)
+  const topY = Math.max(padBottom, box.height - padBottom - legendH)
+  const placed: Array<Entry & { x: number; y: number }> = []
+  rows.forEach((row, r) => {
+    const width = row.reduce((sum, item, i) => sum + item.width + (i ? gap : 0), 0)
+    let x = Math.max(padX, Math.round((box.width - width) / 2))
+    for (const entry of row) {
+      placed.push({ ...entry, x, y: topY + r * rowH })
+      x += entry.width + gap
+    }
+  })
+  const g = new Konva.Group({ name: 'echart-legend' })
+  for (const entry of placed) {
+    const isHidden = hidden.has(entry.key)
+    const item = new Konva.Group({ x: entry.x, y: entry.y, listening: true })
+    item.add(new Konva.Rect({ width: entry.width, height: rowH, fill: 'rgba(0,0,0,0.001)' }))
+    item.add(
+      new Konva.Rect({
+        width: swatch,
+        height: Math.max(3, Math.round(font / 4)),
+        y: Math.round((rowH - Math.max(3, Math.round(font / 4))) / 2),
+        fill: echartLegendColor(entry.item, entry.index),
+        opacity: isHidden ? 0.28 : 1,
+        cornerRadius: 1,
+        listening: false,
+      }),
+    )
+    item.add(
+      new Konva.Text({
+        x: swatch + 6,
+        y: Math.round((rowH - font) / 2) - 1,
+        text: entry.label,
+        fontSize: font,
+        fill: '#94a3b8',
+        opacity: isHidden ? 0.45 : 1,
+        textDecoration: isHidden ? 'line-through' : undefined,
+        listening: false,
+      }),
+    )
+    item.on('mousedown touchstart', (e) => {
+      e.cancelBubble = true
+      pendingLegendTap = {
+        widgetId: widget.id,
+        tagId: entry.key,
+        x: legendEvtPoint(e)?.x ?? 0,
+        y: legendEvtPoint(e)?.y ?? 0,
+      }
+    })
+    item.on('mouseup touchend', (e) => {
+      e.cancelBubble = true
+      const pending = pendingLegendTap
+      pendingLegendTap = null
+      if (!pending || pending.widgetId !== widget.id || pending.tagId !== entry.key) return
+      const point = legendEvtPoint(e)
+      if (point && Math.abs(point.x - pending.x) + Math.abs(point.y - pending.y) > 8) return
+      toggleCurveHidden(widget, entry.key, item)
+    })
+    item.on('mouseenter', () => {
+      const stage = item.getStage()
+      if (stage) stage.container().style.cursor = 'pointer'
+    })
+    item.on('mouseleave', () => {
+      const stage = item.getStage()
+      if (stage) stage.container().style.cursor = ''
+    })
+    g.add(item)
+  }
+  shape.add(g)
+  const stage = shape.getStage()
+  const origin = stage?.container()?.getBoundingClientRect()
+  const boxes = placed.map((entry) => {
+    const abs = shape.getAbsoluteTransform().point({ x: entry.x, y: entry.y })
+    return {
+      key: entry.key,
+      label: entry.label,
+      hidden: hidden.has(entry.key),
+      x: (origin?.left ?? 0) + abs.x,
+      y: (origin?.top ?? 0) + abs.y,
+      w: entry.width * (stage?.scaleX() ?? 1),
+      h: rowH * (stage?.scaleY() ?? 1),
+    }
+  })
+  publishEchartLegendHits(widget.id, boxes)
+}
+
+function bumpEchartPaint(widgetId: string, ok: boolean): void {
+  if (typeof window === "undefined") return
+  const slot = window as unknown as {
+    __scadaEchartPaint?: { ok: number; fail: number; lastId: string; lastAt: number; lastOk: boolean }
+  }
+  const prev = slot.__scadaEchartPaint ?? { ok: 0, fail: 0, lastId: "", lastAt: 0, lastOk: false }
+  if (ok) prev.ok += 1
+  else prev.fail += 1
+  prev.lastId = widgetId
+  prev.lastAt = Date.now()
+  prev.lastOk = ok
+  slot.__scadaEchartPaint = prev
+}
+
+function paintEchartShape(shape: Konva.Group, widget: Widget2D): boolean {
+  const variant = String(widget.props.variant || 'line-basic')
+  const box = echartPaintBox(shape, widget)
+  const width = box.width
+  const height = box.height
+  const scale = box.focused ? 1 : echartScreenScale(shape)
+  const sizeKey = `${echartLogicalKey(variant, width, height)}|s${scale.toFixed(3)}`
+  const bound = echartPaintBound(widget)
+  const font = echartAxisFont(widget.props)
+  const sig = `${echartSignature(bound)}|ax${font}`
+  const hit = shape.findOne('.hit') as Konva.Rect | null
+  if (hit) {
+    hit.width(width)
+    hit.height(height)
+  }
+  if (shape.getAttr('echartSize') === sizeKey && shape.getAttr('echartSig') === sig) {
+    const image = shape.findOne('.chart') as Konva.Image | null
+    if (image) {
+      image.width(width)
+      image.height(height)
+    }
+    syncEchartLegend(shape, widget)
+    return true
+  }
+  const image = shape.findOne('.chart') as Konva.Image | null
+  const prev = image?.image()
+  const recycle = prev instanceof HTMLCanvasElement ? prev : null
+  const canvas = renderEchart(variant, width * scale, height * scale, false, bound, font, recycle)
+  if (!canvas) {
+    bumpEchartPaint(widget.id, false)
+    return false
+  }
+  if (image) {
+    // 回收同一张画布时也要重新挂上，否则 Konva 可能不重绘已缓存的像素
+    if (image.image() === canvas) image.image(undefined as unknown as CanvasImageSource)
+    image.image(canvas)
+    image.width(width)
+    image.height(height)
+  } else {
+    shape.add(new Konva.Image({ name: 'chart', image: canvas, width, height, listening: false }))
+  }
+  shape.setAttr('echartSize', sizeKey)
+  shape.setAttr('echartSig', sig)
+  syncEchartLegend(shape, widget)
+  bumpEchartPaint(widget.id, true)
+  shape.getLayer()?.batchDraw()
+  return true
+}
+
+/** 视口缩放（最大化 / 还原）后按新的屏幕像素重绘 ECharts 位图。 */
+export function refreshEchartNodes(layer: Konva.Layer, widgets: Widget2D[]): void {
+  for (const widget of widgets) {
+    if (widget.type !== 'echart') continue
+    const group = layer.findOne('#' + widget.id) as Konva.Group | null
+    if (!group || !group.visible()) continue
+    const shape = group.findOne('.shape') as Konva.Group | null
+    if (!shape) continue
+    paintEchartShape(shape, widget)
+  }
+}
+
 /** 折线/面积把每个变量的实时采样带上，渲染时一条变量一条曲线。 */
 function echartPaintBound(widget: Widget2D): EchartBound | null {
   const bound = echartBoundOf(widget.props)
   if (!bound) return null
+  const hidden = [...hiddenCurveIds(widget)]
+  const withHidden: EchartBound = hidden.length ? { ...bound, hidden } : bound
   const variant = String(widget.props.variant || '')
-  if (!variant.startsWith('line') && !variant.startsWith('area')) return bound
+  if (!variant.startsWith('line') && !variant.startsWith('area')) return withHidden
   let lineTimes: number[] | undefined
+  const lineTimeSeries: Array<number[] | null> = bound.items.map((item) => {
+    if (!item.tagId) return null
+    return curveTimes(widget.id, item.tagId) ?? null
+  })
   const lines = bound.items.map((item) => {
     if (!item.tagId) return null
     const samples = curveSamples(widget.id, item.tagId) ?? null
@@ -2188,59 +2554,98 @@ function echartPaintBound(widget: Widget2D): EchartBound | null {
     if (times && (!lineTimes || times.length > lineTimes.length)) lineTimes = times
     return samples
   })
-  if (!lines.some((line) => line && line.length)) return bound
-  return { ...bound, lines, ...(lineTimes ? { lineTimes } : {}) }
+  const timeRange = echartPaintTimeRange(widget, bound, lineTimes, lineTimeSeries)
+  if (!lines.some((line) => line && line.length)) {
+    return timeRange ? { ...withHidden, timeRange } : withHidden
+  }
+  return { ...withHidden, lines, ...(lineTimes ? { lineTimes } : {}), lineTimeSeries, ...(timeRange ? { timeRange } : {}) }
+}
+
+function echartPaintTimeRange(
+  widget: Widget2D,
+  bound: EchartBound,
+  lineTimes: number[] | undefined,
+  lineTimeSeries: Array<number[] | null>,
+): { min: number; max: number } | null {
+  if (!bound.items.some((item) => item.tagId)) return null
+  let min = Infinity
+  let max = -Infinity
+  const bags = [...lineTimeSeries, lineTimes ?? null]
+  for (const times of bags) {
+    if (!times?.length) continue
+    for (const t of times) {
+      if (t < min) min = t
+      if (t > max) max = t
+    }
+  }
+  let span = 5000
+  try {
+    const tags = useTagStore()
+    const periods = bound.items.map((item) =>
+      item.tagId ? tags.metas.find((meta) => meta.tagId === item.tagId)?.scanPeriodMs : null,
+    )
+    const known = periods.some((ms) => Number(ms) > 0) ? periods : [50]
+    span = Math.max(1000, trendPresetSpanMs(resolveEchartEnterRange(widget.props.range, known)))
+  } catch {
+    /* 标签仓库未就绪时用 5 秒窗口 */
+  }
+  // 没有采样时不要用墙钟铺一个进页空窗，否则会出现「轴在走、图是空的」。
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return null
+  // 右沿跟最后采样，窗口宽度固定为进页跨度。不要在数据被拉宽时把左沿留在首点。
+  min = max - span
+  if (max <= min) max = min + 1
+  return { min, max }
+}
+
+/** 外观/结构指纹：没变就不要拆掉 Konva 节点重建（运行端翻页按钮被每 tick 拆掉会丢点击）。 */
+export function widgetShapeKey(widget: Widget2D): string {
+  return JSON.stringify({
+    type: widget.type,
+    transform: widget.transform,
+    style: widget.style,
+    props: widget.props,
+    visible: widget.visible !== false,
+    name: widget.name,
+  })
 }
 
 /** 用最新 Widget 数据刷新已有节点外观与尺寸（保持选中） */
-export function syncWidgetNode(group: Konva.Group, widget: Widget2D) {
+export function syncWidgetNode(group: Konva.Group, widget: Widget2D, opts?: { keepVisible?: boolean; runtime?: boolean }) {
   group.position({ x: widget.transform.x, y: widget.transform.y })
   group.rotation(widget.transform.rotation)
   group.scale({ x: widget.transform.scaleX, y: widget.transform.scaleY })
-  group.draggable(!widget.locked)
-  group.visible(widget.visible !== false)
+  // 设计端才按锁定状态开关拖拽；运行端由 createRuntimeStage 按拖拽写值连接设置
+  if (!opts?.runtime) group.draggable(!widget.locked)
+  // keepVisible：运行端最大化时不要把已隐藏的相邻图元再显示出来
+  if (!opts?.keepVisible) group.visible(widget.visible !== false)
 
   const shape = group.findOne('.shape') as Konva.Group | null
   if (shape && widget.type === 'echart') {
     const variant = String(widget.props.variant || 'line-basic')
-    const sizeKey = `${variant}|${Math.round(widget.transform.width)}|${Math.round(widget.transform.height)}`
-    if (shape.getAttr('echartSize') === sizeKey) {
-      const bound = echartPaintBound(widget)
-      const font = echartAxisFont(widget.props)
-      const sig = `${echartSignature(bound)}|ax${font}`
-      if (shape.getAttr('echartSig') !== sig) {
-        const canvas = renderEchart(variant, widget.transform.width, widget.transform.height, false, bound, font)
-        const image = shape.findOne('.chart') as Konva.Image | null
-        if (canvas && image) image.image(canvas)
-        else if (canvas) {
-          shape.add(
-            new Konva.Image({
-              name: 'chart',
-              image: canvas,
-              width: widget.transform.width,
-              height: widget.transform.height,
-              listening: false,
-            }),
-          )
-        }
-        shape.setAttr('echartSig', sig)
-        shape.getLayer()?.batchDraw()
-      }
+    const logical = echartLogicalKey(variant, widget.transform.width, widget.transform.height)
+    if (String(shape.getAttr('echartSize') || '').startsWith(logical)) {
+      paintEchartShape(shape, widget)
       return
     }
   }
-  // 趋势图元：结构没变就原地换图（每 tick 重建整棵节点纯属浪费，也影响点击/游标手感）
+  // 历史趋势：结构没变就原地换图（每 tick 重建整棵节点纯属浪费，也影响点击/游标手感）
   if (
     shape &&
-    (widget.type === 'trend' || widget.type === 'trendHistory') &&
+    widget.type === 'trendHistory' &&
     shape.getAttr('trendKey') === trendShapeKey(widget) &&
     refreshTrendShape(shape, widget)
   ) {
     return
   }
+  // 普通图元（含翻页按钮、已下架图元的占位）：外观没变则不要 destroy/rebuild
+  const nextKey = widgetShapeKey(widget)
+  if (shape && shape.getAttr('shapeKey') === nextKey) return
   shape?.destroy()
-  group.add(buildShape(widget))
+  const next = buildShape(widget)
+  next.setAttr('shapeKey', nextKey)
+  group.add(next)
 }
+
 
 /**
  * 文字外框按当前字号包住整行字。

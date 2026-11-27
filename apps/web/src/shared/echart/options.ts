@@ -35,7 +35,7 @@ function base() {
     textStyle: { color: text },
     tooltip: { trigger: 'axis' as const, backgroundColor: '#0f172a', borderColor: line, textStyle: { color: text } },
     legend: { top: 4, textStyle: { color: muted } },
-    grid: { left: 42, right: 18, top: 36, bottom: 28 },
+    grid: { left: 42, right: 18, top: 36, bottom: 28, containLabel: true },
     color: COLORS,
   }
 }
@@ -206,7 +206,44 @@ function gaugeBase(value: number, color: string, extra: Record<string, unknown>)
   }
 }
 
+/** 去掉过细的固定像素柱宽，按类目槽宽自适应。
+ * plotSize 必须是 ECharts 实例的像素宽/高（含离屏 2x）。
+ * 上限只挡住「一个类目占满绘图区」的极端情况；不要用 10% 这类过小封顶，少数类目在大图上会细成一条线。
+ */
+export function applySharedBarGeometry(option: Record<string, unknown>, plotSize = 0): void {
+  const series = option.series
+  const items = Array.isArray(series) ? series : series ? [series] : []
+  if (!items.some((item) => item && typeof item === 'object' && (item as { type?: string }).type === 'bar')) return
+  option.barCategoryGap = '30%'
+  option.barGap = '30%'
+  // 未传入绘图尺寸时不要写死小像素上限，否则后续布局会把这个值保留下来。
+  const cap = plotSize > 0 ? Math.round(Math.max(plotSize * 0.32, 64)) : 0
+  option.series = items.map((item) => {
+    if (!item || typeof item !== 'object') return item
+    const rec = item as Record<string, unknown>
+    if (rec.type !== 'bar') return rec
+    const next: Record<string, unknown> = { ...rec }
+    delete next.barWidth
+    if (cap > 0) next.barMaxWidth = cap
+    else delete next.barMaxWidth
+    if (plotSize > 0) next.barMinWidth = Math.max(12, Math.round(plotSize * 0.012))
+    else delete next.barMinWidth
+    next.barCategoryGap = '30%'
+    next.barGap = '30%'
+    return next
+  })
+}
+
+function finalizeEchartOption(option: Record<string, unknown>): Record<string, unknown> {
+  applySharedBarGeometry(option)
+  return option
+}
+
 export function buildEchartOption(variant: string): Record<string, unknown> {
+  return finalizeEchartOption(buildEchartOptionRaw(variant))
+}
+
+function buildEchartOptionRaw(variant: string): Record<string, unknown> {
   switch (variant) {
     case 'line-basic':
       return { ...base(), xAxis: cats(), yAxis: vals(), series: [lineSeries(A, { name: '访问' })] }
@@ -290,7 +327,7 @@ export function buildEchartOption(variant: string): Record<string, unknown> {
         ],
       }
     case 'bar-basic':
-      return { ...base(), xAxis: cats(), yAxis: vals(), series: [{ type: 'bar', name: '销量', data: A, barWidth: 18 }] }
+      return { ...base(), xAxis: cats(), yAxis: vals(), series: [{ type: 'bar', name: '销量', data: A }] }
     case 'bar-group':
       return {
         ...base(),
@@ -322,7 +359,6 @@ export function buildEchartOption(variant: string): Record<string, unknown> {
             type: 'bar',
             name: '渐变',
             data: A,
-            barWidth: 18,
             itemStyle: {
               color: {
                 type: 'linear',
@@ -340,7 +376,7 @@ export function buildEchartOption(variant: string): Record<string, unknown> {
         ],
       }
     case 'hbar-basic':
-      return { ...base(), xAxis: vals(), yAxis: cats(), series: [{ type: 'bar', name: '销量', data: A, barWidth: 12 }] }
+      return { ...base(), xAxis: vals(), yAxis: cats(), series: [{ type: 'bar', name: '销量', data: A }] }
     case 'hbar-group':
       return {
         ...base(),
@@ -659,7 +695,7 @@ export function buildEchartOption(variant: string): Record<string, unknown> {
       return {
         backgroundColor: 'transparent',
         tooltip: { position: 'top', backgroundColor: '#0f172a', borderColor: line, textStyle: { color: text } },
-        grid: { left: 48, right: 16, top: 16, bottom: 46 },
+        grid: { left: 48, right: 16, top: 16, bottom: 46, containLabel: true },
         xAxis: { type: 'category', data: hours, ...axis(), splitLine: { show: false } },
         yAxis: { type: 'category', data: DAYS, ...axis(), splitLine: { show: false } },
         visualMap: {
@@ -699,7 +735,8 @@ export function buildEchartOption(variant: string): Record<string, unknown> {
           top: 28,
           left: 28,
           right: 12,
-          cellSize: ['auto', 13],
+          bottom: 56,
+          cellSize: ['auto', 'auto'],
           range: '2026',
           itemStyle: { borderWidth: 1, borderColor: '#0b1220', color: '#0f172a' },
           splitLine: { lineStyle: { color: line } },
@@ -755,7 +792,11 @@ function thumbSeries(series: unknown): unknown {
       }
     }
     if (type === 'graph' || type === 'sankey') return { ...item, label: { show: false } }
-    if (type === 'bar') return { ...item, barWidth: item.barWidth ?? 10 }
+    if (type === 'bar') {
+      const next = { ...item }
+      delete (next as { barWidth?: unknown }).barWidth
+      return { ...next, barMaxWidth: 14, barMinWidth: 4, barCategoryGap: '28%' }
+    }
     return item
   })
 }

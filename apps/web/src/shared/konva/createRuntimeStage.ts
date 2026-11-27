@@ -3,9 +3,11 @@ import type { AnimationLinkRange, EventBinding, EventTrigger, Page2D, Widget2D }
 import { trendCurves } from '@web-scada/core'
 import {
   createWidgetNode,
+  refreshEchartNodes,
   setHiddenCurves,
   syncWidgetNode,
   widgetHasCurveLegend,
+  widgetShapeKey,
 } from '@/shared/konva/widgetNodes'
 import { setTrendZoom } from '@/shared/konva/trendChart'
 import { createTrendLiveOverlay } from '@/shared/konva/trendChartLive'
@@ -18,6 +20,7 @@ import {
   mapDragOffsetToTag,
   widgetHasInteractiveLinks,
 } from '@/shared/runtime/bindingEngine'
+import { releaseChartsOnPageChange } from '@/shared/runtime/chartPageCleanup'
 import { createClickDblclickGate } from '@/shared/runtime/clickDblclickGate'
 import { setActiveTrendToolbar } from '@/shared/runtime/trendToolbarFocus'
 
@@ -77,6 +80,9 @@ export function createRuntimeStage(
   let spacePressed = false
   let currentPage: Page2D = page
   const sourceMap = new Map<string, Widget2D>()
+  /** 运行时绑定后的外观（含实时值）。最大化重绘必须用它，不能只用工程稿。 */
+  const lastVisual = new Map<string, Widget2D>()
+  const lastApplySig = new Map<string, string>()
   const blinkTimers = new Map<string, ReturnType<typeof setInterval>>()
   /** 同图元既有单击又有双击时，延时单击以免双击误触 */
   const clickDblGate = createClickDblclickGate()
@@ -131,8 +137,7 @@ export function createRuntimeStage(
   const sourceWidgetOf = (id: string): Widget2D | undefined =>
     sourceMap.get(id) ?? currentPage.layers.flatMap((layer) => layer.widgets).find((w) => w.id === id)
 
-  const isTrendWidget = (widget: Widget2D): boolean =>
-    widget.type === 'trend' || widget.type === 'trendHistory'
+  const isTrendWidget = (widget: Widget2D): boolean => widget.type === 'trendHistory'
 
   /** 最大化显示的图元 id（null = 正常整页显示） */
   let focusId: string | null = null
@@ -147,10 +152,10 @@ export function createRuntimeStage(
         .filter((curve) => hiddenNames.includes(curve.label || curve.tagId))
         .map((curve) => curve.tagId)
       setHiddenCurves(widget, hiddenTags)
-      // 立刻按新的显隐重画图元（原生叠层与图片路径都要跟着变）
+      // 原生 ECharts 已经完成显隐。这里只写本地覆盖并重画 Konva 位图路径。
+      // 立刻再 syncTrendOverlays() 会排队一次整图 setOption，容易把刚点掉的曲线灌回去。
       const node = widgetLayer.findOne('#' + widgetId) as Konva.Group | null
-      if (node) syncWidgetNode(node, sourceWidgetOf(widgetId) ?? widget)
-      syncTrendOverlays()
+      if (node) syncWidgetNode(node, sourceWidgetOf(widgetId) ?? widget, { runtime: true })
     },
     onZoom: (widgetId, zoom) => {
       // 历史趋势的滑块 / 滚轮 / 框选只在已查出的点里看，不改查询窗口
@@ -198,16 +203,46 @@ export function createRuntimeStage(
     viewChangeListener?.()
     // 视图变了：只改叠层位置/字号，不重灌曲线数据
     syncTrendOverlays(true)
+    refreshEchartNodes(widgetLayer, allWidgetsOf().map((widget) => lastVisual.get(widget.id) ?? sourceWidgetOf(widget.id) ?? widget))
   }
 
   /**
    * 图元最大化 / 还原。
    *
-   * 为什么用"缩放视口 + 隐藏其它图元"而不是新开一个舞台：图元本身、原生 ECharts 叠层、
-   * 工具条/点表这些 HTML 叠层都是按图元的绝对变换定位的，只要动 stage 的 scale/position，
-   * 它们会自己跟上，不必再维护第二套渲染路径（也不会重复订阅 Tag）。
-   * 最大化不改图元 transform，退出后整页视图原样还原。
+   * 最大化时把被聚焦图元临时画成视口大小（不改工程里的 transform），按新尺寸重绘，
+   * 这样能铺满画面、不裁切坐标轴，也不会把饼图拉成椭圆。其它图元保持隐藏。
+   * 退出后恢复整页 fitToView。
    */
+  const FOCUS_MARGIN = 2
+
+  const placeFocusedNode = () => {
+    const target = focusId
+    if (!target) return
+    const node = widgetLayer.findOne('#' + target) as Konva.Group | null
+    const widget = lastVisual.get(target) ?? sourceWidgetOf(target)
+    if (!node || !widget) return
+    const availW = Math.max(40, stage.width() - FOCUS_MARGIN * 2)
+    const availH = Math.max(40, stage.height() - FOCUS_MARGIN * 2)
+    stage.scale({ x: 1, y: 1 })
+    stage.position({ x: 0, y: 0 })
+    node.setAttr('focusPaint', { width: availW, height: availH })
+    const painted: Widget2D = {
+      ...widget,
+      transform: {
+        ...widget.transform,
+        x: FOCUS_MARGIN,
+        y: FOCUS_MARGIN,
+        width: availW,
+        height: availH,
+        scaleX: 1,
+        scaleY: 1,
+        rotation: 0,
+      },
+    }
+    syncWidgetNode(node, painted, { keepVisible: true, runtime: true })
+    node.visible(true)
+  }
+
   const applyFocus = () => {
     const target = focusId
     for (const widget of allWidgetsOf()) {
@@ -215,8 +250,14 @@ export function createRuntimeStage(
       if (!node) continue
       const show = target == null ? widget.visible !== false : widget.id === target
       node.visible(show)
+      if (!show || target == null) node.setAttr('focusPaint', undefined)
     }
     if (target == null) {
+      for (const widget of allWidgetsOf()) {
+        const node = widgetLayer.findOne('#' + widget.id) as Konva.Group | null
+        if (!node || widget.visible === false) continue
+        syncWidgetNode(node, sourceWidgetOf(widget.id) ?? widget, { runtime: true })
+      }
       fitToView()
       return
     }
@@ -226,24 +267,11 @@ export function createRuntimeStage(
       fitToView()
       return
     }
-    const rect = node.getClientRect({ relativeTo: widgetLayer, skipShadow: true, skipStroke: false })
-    const cw = stage.width()
-    const ch = stage.height()
-    const margin = 6
-    const w = Math.max(1, rect.width)
-    const h = Math.max(1, rect.height)
-    const scale = Math.max(
-      0.05,
-      Math.min((cw - margin * 2) / w, (ch - margin * 2) / h),
-    )
-    stage.scale({ x: scale, y: scale })
-    stage.position({
-      x: (cw - w * scale) / 2 - rect.x * scale,
-      y: (ch - h * scale) / 2 - rect.y * scale,
-    })
+    placeFocusedNode()
     stage.batchDraw()
     viewChangeListener?.()
     syncTrendOverlays(true)
+    refreshEchartNodes(widgetLayer, allWidgetsOf().map((widget) => lastVisual.get(widget.id) ?? sourceWidgetOf(widget.id) ?? widget))
   }
 
   const setFocusWidget = (widgetId: string | null) => {
@@ -529,6 +557,8 @@ export function createRuntimeStage(
 
   const renderPage = (next: Page2D) => {
     clearAllBlink()
+    // 先释放上一页历史查询和离屏位图，再画新页，避免目录连翻把内存堆爆
+    releaseChartsOnPageChange(next)
     // 换页 / 重新渲染整页时退出最大化：新页面上那个图元不一定还在
     focusId = null
     currentPage = next
@@ -536,6 +566,8 @@ export function createRuntimeStage(
     pageHeight = next.height
 
     sourceMap.clear()
+    lastVisual.clear()
+    lastApplySig.clear()
     bgLayer.destroyChildren()
     widgetLayer.destroyChildren()
     // 背景 + 挖洞在下层；图元在上层，避免 destination-out 吃掉兄弟图元
@@ -562,7 +594,7 @@ export function createRuntimeStage(
           widgetLayer.add(node)
           continue
         }
-        const node = createWidgetNode(widget)
+        const node = createWidgetNode(widget, { runtime: true })
         bindNodeEvents(node, widget)
         widgetLayer.add(node)
       }
@@ -573,6 +605,7 @@ export function createRuntimeStage(
   }
 
   const applyVisual = (widgetId: string, visual: Widget2D, opts?: { blink?: boolean }) => {
+    lastVisual.set(widgetId, visual)
     const source = sourceMap.get(widgetId)
     const node = widgetLayer.findOne(`#${widgetId}`) as Konva.Group | null
 
@@ -617,7 +650,7 @@ export function createRuntimeStage(
 
     if (!node) {
       if (!source || visual.visible === false) return
-      const created = createWidgetNode(visual)
+      const created = createWidgetNode(visual, { runtime: true })
       bindNodeEvents(created, source)
       widgetLayer.add(created)
       widgetLayer.batchDraw()
@@ -634,17 +667,31 @@ export function createRuntimeStage(
     }
 
     // 最大化时只显示被聚焦的那一个（否则每秒一次的属性刷新会把隐藏的图元弹回来）
-    node.visible(focusId == null || focusId === widgetId)
+    const show = focusId == null || focusId === widgetId
+    const livePaint =
+      visual.type === 'echart' ||
+      visual.type === 'trendHistory' ||
+      visual.type === 'alarm' ||
+      visual.type === 'alarmHistory'
+    const sig = `${widgetShapeKey(visual)}|b:${opts?.blink ? 1 : 0}|s:${show ? 1 : 0}`
+    if (!livePaint && lastApplySig.get(widgetId) === sig && !node.isDragging() && focusId !== widgetId) {
+      return
+    }
+    lastApplySig.set(widgetId, sig)
+    node.visible(show)
     const wasDragging = node.isDragging()
-    if (!wasDragging) {
-      syncWidgetNode(node, visual)
+    if (focusId === widgetId) {
+      placeFocusedNode()
+    } else if (!wasDragging) {
+      syncWidgetNode(node, visual, { keepVisible: true, runtime: true })
     } else {
       // 拖拽中只更新外观，不抢位置
       const x = node.x()
       const y = node.y()
-      syncWidgetNode(node, visual)
+      syncWidgetNode(node, visual, { keepVisible: true, runtime: true })
       node.position({ x, y })
     }
+    node.visible(show)
 
     const enabled = isWidgetRuntimeEnabled(visual)
     const interactive =
@@ -708,7 +755,8 @@ export function createRuntimeStage(
   const onResize = () => {
     stage.width(container.clientWidth || 800)
     stage.height(container.clientHeight || 600)
-    fitToView()
+    if (focusId) applyFocus()
+    else fitToView()
   }
   const findWidgetById = (id: string): Widget2D | undefined =>
     sourceMap.get(id) ?? currentPage.layers.flatMap((l) => l.widgets).find((w) => w.id === id)

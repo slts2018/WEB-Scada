@@ -15,7 +15,9 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.scheduling.TaskScheduler;
 import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskScheduler;
 
 @SpringBootApplication
 @EnableScheduling
@@ -25,6 +27,18 @@ public class ServerApplication {
 
   public static void main(String[] args) {
     SpringApplication.run(ServerApplication.class, args);
+  }
+
+  /** 多线程调度，避免连通性探测 / HTTP 轮询堵住 Modbus 采集与历史写入。 */
+  @Bean
+  TaskScheduler taskScheduler() {
+    ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
+    scheduler.setPoolSize(12);
+    scheduler.setThreadNamePrefix("scada-sched-");
+    scheduler.setRemoveOnCancelPolicy(true);
+    scheduler.setWaitForTasksToCompleteOnShutdown(false);
+    scheduler.initialize();
+    return scheduler;
   }
 
   @Bean

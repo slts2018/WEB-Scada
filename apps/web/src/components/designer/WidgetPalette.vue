@@ -43,9 +43,8 @@ const widgetRails = [
     id: 'chart',
     label: '图表',
     folders: [
-      { id: 'chart-trend', name: '趋势', types: ['trendHistory', 'trend'] as BuiltinWidgetType[] },
+      { id: 'chart-trend', name: '趋势', types: ['trendHistory'] as BuiltinWidgetType[] },
       { id: 'chart-alarm', name: '报警', types: ['alarmHistory', 'alarm'] as BuiltinWidgetType[] },
-      { id: 'chart-stat', name: '统计', types: ['pie', 'bar'] as BuiltinWidgetType[] },
     ],
   },
   {

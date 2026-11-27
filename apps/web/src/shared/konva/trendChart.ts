@@ -160,29 +160,24 @@ export function trendChartLayout(spec: TrendChartSpec): TrendChartLayout {
   // 图内文字跟 Konva 图例一个量级（图例用的是 0.7×字号），标题略大一点
   const tickFont = Math.max(9 * S, Math.round(F * 0.7))
   const titleFont = Math.max(tickFont, Math.round(F * 0.8))
-  const hasHeader = Boolean(spec.title || spec.rangeLabel)
+  // 原生叠层不再画图内标题（页眉/工具栏已有名字），图例改到底部居中。
+  const nativeLegend = Boolean(spec.native && !spec.hideLegend)
+  const hasHeader = !spec.native && Boolean(spec.title || spec.rangeLabel)
   const titleTop = hasHeader ? titleFont + 6 * S : 6 * S
-  // 再让出半个刻度字高：y 轴第一个刻度是"顶格居中"的，不然会压到标题上
-  // 原生模式还要给 ECharts 自带图例留出**实际行数**（它会自动换行）
   const legendRowHeight = Math.round(tickFont * 1.5)
-  // 图例行数：多到两行以上就改用"可滚动图例"（单行 + 左右箭头）——
-  // 否则 8 条曲线的大字号图例会占掉图元小半高，绘图区被压成一条缝（曲线看着就"没了"）。
-  const legendRowsWanted = spec.native && !spec.hideLegend ? estimateLegendRows(spec, tickFont, width - 16 * S) : 0
+  const legendRowsWanted = nativeLegend ? estimateLegendRows(spec, tickFont, width - 16 * S) : 0
   const legendScroll = legendRowsWanted > 2
   const legendRows = legendScroll ? 1 : legendRowsWanted
-  // 顶部还要给 HTML 工具栏（区间/跟随/导出）让位
+  const legendH = nativeLegend ? legendRows * legendRowHeight + Math.round(4 * S) : 0
   const chromeTop = Math.max(0, Math.round(Number(spec.chromeTop) || 0))
-  const top = titleTop + Math.round(tickFont * 0.65) + legendRows * legendRowHeight + chromeTop
+  // 原生图例在底部，顶部只留轴刻度（不再给标题/顶图例留行）
+  const top = titleTop + Math.round(tickFont * 0.65) + chromeTop
   const left = Math.max(30 * S, Math.round(F * 2.4))
-  // 右侧留出半个时间标签的宽度，否则最后一个刻度会被裁掉
   const right = Math.max(12 * S, Math.round(F * 2))
-  // 横轴刻度要够放：不然最左边的 y 轴刻度会和时间标签叠在一起
   const axisH = Math.max(18 * S, Math.round(F * 1.7))
-  // 底部默认只留横轴刻度（绘图区高度全给曲线）；
-  // 历史趋势另外给底部滑块留一条（spec.slider），否则滑块会压掉时间轴
   const sliderHeight = spec.slider && !spec.hideSlider ? Math.max(22 * S, Math.round(F * 1.6)) : 0
   const chromeBottom = Math.max(0, Math.round(Number(spec.chromeBottom) || 0))
-  const bottom = axisH + sliderHeight + chromeBottom
+  const bottom = axisH + legendH + sliderHeight + chromeBottom
 
   return {
     fontSize: F,
@@ -286,17 +281,19 @@ function ensureHost(): HTMLDivElement | null {
  * 时间轴刻度格式（同一条轴上格式必须统一：ECharts 默认整分时收成 HH:mm，
  * 会跟旁边的 HH:mm:ss 对不齐）。
  *
- * - 窗口在同一天内：`时:分:秒`（短跨度看秒才有意义）
+ * - 窗口在同一天内：`时:分:秒`；跨度 ≤8s 时带毫秒，避免同一秒的刻度文字撞车
  * - 窗口跨天 / 跨度 ≥24h：`月-日 时:分` —— 只写 `16:50` 分不清是哪一天的 16:50；
  *   跨天但跨度不到 1 小时（跨零点的短窗口）仍带秒，免得刻度全挤成一个值。
  */
-function formatAxisClock(value: number, withDate = false, withSeconds = true): string {
+function formatAxisClock(value: number, withDate = false, withSeconds = true, spanMs = 0): string {
   const d = new Date(value)
   if (Number.isNaN(d.getTime())) return ''
-  const pad = (n: number) => String(n).padStart(2, '0')
-  const time = withSeconds
-    ? `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
-    : `${pad(d.getHours())}:${pad(d.getMinutes())}`
+  const pad = (n: number, width = 2) => String(n).padStart(width, '0')
+  const time = !withSeconds
+    ? `${pad(d.getHours())}:${pad(d.getMinutes())}`
+    : spanMs > 0 && spanMs <= 8_000
+      ? `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`
+      : `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
   return withDate ? `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${time}` : time
 }
 
@@ -388,42 +385,35 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
     if (cursorAt == null) return ''
     const d = new Date(cursorAt)
     const p2 = (n: number) => String(n).padStart(2, '0')
-    const clock = `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
+    const clock =
+      axisSpan > 0 && axisSpan <= 8_000
+        ? `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}.${String(d.getMilliseconds()).padStart(3, '0')}`
+        : `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
     return axisWithDate ? `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${clock}` : clock
   })()
 
-  const titles: Record<string, unknown>[] = []
-  if (spec.title) {
-    titles.push({
-      text: spec.title,
-      left: 8,
-      top: 4,
-      textStyle: { color: axisColor, fontSize: layout.titleFont, fontWeight: 'normal' },
-    })
-  }
-  if (spec.rangeLabel) {
-    titles.push({
-      text: spec.rangeLabel,
-      // 右上角有"导出图片"按钮时给它让位
-      right: 8,
-      top: 4,
-      textStyle: { color: theme.textColor, fontSize: layout.titleFont, fontWeight: 'normal' },
-    })
-  }
+  // 原生叠层不再画「历史趋势」这类图内标题：页眉和工具栏已有名字，留着会和轴/图例挤在一起。
+  const nativeTitle = !spec.native && spec.title
+    ? [{
+        text: spec.title,
+        left: 8,
+        top: 8,
+        textStyle: { color: axisColor, fontSize: layout.titleFont, fontWeight: 'normal' },
+      }]
+    : undefined
 
   return {
     animation: false,
     backgroundColor: 'transparent',
-    title: titles.length ? titles : undefined,
+    title: nativeTitle,
     // 图片模式：图例由 Konva 另画（离屏位图里的图例点不到）
-    // 原生模式：用 ECharts 自带图例（能点、能框选），放在标题下面一行
+    // 原生模式：用 ECharts 自带图例，底部水平居中，滑块（若有）仍在最底下
     legend: spec.native
       ? {
           show: !spec.hideLegend,
-          top: layout.titleFont + Math.round(tickFont * 0.25),
-          left: 8,
-          right: 8,
-          // 一屏放不下时用可滚动图例（单行 + 左右箭头），排版也按一行算
+          left: 'center',
+          bottom: layout.sliderHeight ? layout.sliderHeight + 4 : 4,
+          orient: 'horizontal',
           type: spec.native && layout.legendScroll ? 'scroll' : 'plain',
           itemGap: Math.round(tickFont * 0.9),
           itemWidth: Math.round(tickFont * 1.1),
@@ -536,13 +526,12 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
     toolbox: spec.native
       ? {
           right: 6,
-          top: 2,
+          top: 6,
           itemSize: Math.round(tickFont * 0.95),
           iconStyle: { borderColor: axisColor, borderWidth: 1.4 },
           emphasis: { iconStyle: { borderColor: '#e2e8f0' } },
           feature: {
-            // 白底：截图直接贴报告/打印，不会在白纸上变成一块黑
-            saveAsImage: { title: '导出图片', name: '', pixelRatio: 2, backgroundColor: theme.background },
+            // 导出改走工具条；图内右上角不再放导出图标。
             // 历史趋势：框选放大（选中一段直接缩放）
             ...(spec.selectZoom
               ? {
@@ -600,7 +589,7 @@ export function buildTrendChartOption(spec: TrendChartSpec): Record<string, unkn
             fontSize: tickFont,
             hideOverlap: true,
             margin: Math.round(tickFont * 0.4),
-            formatter: (value: number) => formatAxisClock(value, axisWithDate, axisWithSeconds),
+            formatter: (value: number) => formatAxisClock(value, axisWithDate, axisWithSeconds, axisSpan),
           },
           splitLine: { show: false },
         }

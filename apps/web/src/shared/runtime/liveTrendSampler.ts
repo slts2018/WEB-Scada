@@ -1,71 +1,67 @@
 /**
- * 实时趋势在页面切走后继续记点，但不重画看不见的图。
- * 设计端和运行端各挂一份；重复调用按采样时间戳去重，不会把同一个点记两次。
+ * 运行端挂载后：为工程里所有 ECharts 折线/面积保持后台订阅，
+ * 并在离开当前页时继续把实时点写入缓冲。
+ * 否则回页时旧尾巴和新进页历史对不齐，会在缺口上画出一条斜线。
  */
-import type { ProjectDocument, Widget2D } from '@web-scada/core'
-import { liveTrendSourceTagIds, sampleLiveTrendWidget } from '@/shared/runtime/bindingEngine'
+import type { Widget2D } from '@web-scada/core'
+import { echartTagIds } from '@/shared/echart/content'
+import { isLiveEchartWidget, sampleLiveEchartWidget } from '@/shared/runtime/bindingEngine'
+import { releaseChartsOnPageChange } from '@/shared/runtime/chartPageCleanup'
 import { useProjectStore } from '@/stores/project'
 import { useTagStore } from '@/stores/tag'
 
-function eachWidget(widgets: Widget2D[] | undefined, visit: (widget: Widget2D) => void) {
-  if (!widgets) return
-  for (const widget of widgets) {
-    visit(widget)
-    if (widget.children?.length) eachWidget(widget.children, visit)
-  }
-}
-
-function eachLiveTrend(doc: ProjectDocument, visit: (widget: Widget2D) => void) {
-  for (const page of doc.pages) {
-    if (page.type !== '2d') continue
-    for (const layer of page.layers) {
-      eachWidget(layer.widgets, (widget) => {
-        if (widget.type === 'trend') visit(widget)
-      })
-    }
-  }
-}
-
 let users = 0
-let stopSampling: (() => void) | null = null
+let stopListen: (() => void) | null = null
+let lastActivePageId: string | null = null
 
-function start() {
+function pageWidgets(page: { layers?: Array<{ widgets?: Widget2D[] }> }): Widget2D[] {
+  return (page.layers ?? []).flatMap((layer) => layer.widgets ?? [])
+}
+
+function collectLiveEchartWidgets(): Array<{ pageId: string; widget: Widget2D }> {
   const project = useProjectStore()
-  const tags = useTagStore()
-  let subscribedKey = ''
-
-  const sample = () => {
-    const widgets: Widget2D[] = []
-    const tagIds: string[] = []
-    eachLiveTrend(project.document, (widget) => {
-      widgets.push(widget)
-      for (const id of liveTrendSourceTagIds(widget)) tagIds.push(id)
-    })
-    const key = [...new Set(tagIds)].sort().join('\0')
-    if (key !== subscribedKey) {
-      subscribedKey = key
-      tags.setBackgroundSubscription(key ? key.split('\0') : [])
+  const out: Array<{ pageId: string; widget: Widget2D }> = []
+  for (const page of project.document.pages) {
+    if (page.type === '3d') continue
+    for (const widget of pageWidgets(page)) {
+      if (widget.visible === false) continue
+      if (!isLiveEchartWidget(widget)) continue
+      out.push({ pageId: page.id, widget })
     }
-    const getTag = (id: string) => tags.getValue(id)
-    for (const widget of widgets) sampleLiveTrendWidget(widget, getTag)
   }
+  return out
+}
 
-  sample()
-  const removeListener = tags.addListener(() => sample())
-  const timer = window.setInterval(sample, 1000)
-  stopSampling = () => {
-    removeListener()
-    window.clearInterval(timer)
-    subscribedKey = ''
-    tags.setBackgroundSubscription([])
-    stopSampling = null
+function tick(): void {
+  const tags = useTagStore()
+  const project = useProjectStore()
+  const items = collectLiveEchartWidgets()
+  const ids = new Set<string>()
+  for (const { widget } of items) {
+    for (const id of echartTagIds(widget.props)) if (id) ids.add(id)
+  }
+  tags.setBackgroundSubscription([...ids])
+  const active = project.activePageId
+  if (active && active !== lastActivePageId) {
+    lastActivePageId = active
+    const page = project.document.pages.find((item) => item.id === active)
+    if (page && page.type !== '3d') releaseChartsOnPageChange(page)
+  }
+  const getTag = (id: string) => tags.getValue(id)
+  for (const { pageId, widget } of items) {
+    if (pageId === active) continue
+    sampleLiveEchartWidget(widget, getTag)
   }
 }
 
-/** 调用方卸载时要执行返回的停止函数。没有实时趋势时几乎不做事。 */
+/** 调用方卸载时要执行返回的停止函数。 */
 export function retainLiveTrendSampling(): () => void {
+  const tags = useTagStore()
   users += 1
-  if (users === 1) start()
+  if (users === 1) {
+    tick()
+    stopListen = tags.addListener(() => tick())
+  }
   let released = false
   return () => {
     if (released) return
@@ -73,6 +69,8 @@ export function retainLiveTrendSampling(): () => void {
     users -= 1
     if (users > 0) return
     users = 0
-    stopSampling?.()
+    stopListen?.()
+    stopListen = null
+    tags.setBackgroundSubscription([])
   }
 }

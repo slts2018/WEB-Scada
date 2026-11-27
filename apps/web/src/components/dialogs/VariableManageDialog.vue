@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onUnmounted, reactive, ref, shallowRef, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import type { AlarmLevel, AlarmLimitCode, DeviceLinkState, DeviceMeta, DeviceProtocol, SimMode, TagAlarmConfig, TagHistoryConfig, TagMeta, TagSimulation, TagValue } from '@web-scada/core'
 import {
@@ -88,7 +88,7 @@ const sim = reactive({
 const io = reactive({
   onText: '',
   offText: '',
-  scanPeriodMs: 1000,
+  scanPeriodMs: 50,
   pushEnabled: false,
   pushPeriodMs: 1000,
   archive: 'legacy' as 'legacy' | 'off' | 'change' | 'interval',
@@ -115,6 +115,7 @@ const protocolOptions: Array<{ value: DeviceProtocol; label: string }> = [
   { value: 'mqtt', label: 'MQTT' },
   { value: 'http', label: 'HTTP' },
   { value: 'mcd4000', label: 'MCD4000（数据中台）' },
+  { value: 'mcd4000_mqtt', label: 'MCD4000（MQTT）' },
   { value: 'other', label: '其他' },
 ]
 
@@ -145,13 +146,58 @@ const groupOptions = computed(() => {
   return [...set].sort((a, b) => a.localeCompare(b, 'zh-CN'))
 })
 
+// 不要用 tags.list：它随每条 WS delta 换新数组，未开预览时服务端会按「订阅全部」
+// 每秒推上百条，el-table 会把主线程卡死、转圈一直不消失。250ms 拍一帧当前值即可。
+const valueSnap = shallowRef<Record<string, TagValue>>({})
+let valueTimer: ReturnType<typeof setInterval> | null = null
+
+function pumpValueSnap() {
+  valueSnap.value = { ...tags.values }
+}
+
+function startValueTick() {
+  pumpValueSnap()
+  if (valueTimer) return
+  valueTimer = setInterval(pumpValueSnap, 250)
+}
+
+function stopValueTick() {
+  if (!valueTimer) return
+  clearInterval(valueTimer)
+  valueTimer = null
+}
+
 const filteredTags = computed(() => {
-  if (groupFilter.value === '__all__') return tags.list
+  const vals = valueSnap.value
+  const rows = tags.metas.map((meta) => ({ meta, value: vals[meta.tagId] }))
+  if (groupFilter.value === '__all__') return rows
   if (groupFilter.value === '__none__') {
-    return tags.list.filter((t) => !t.meta.group?.trim())
+    return rows.filter((t) => !t.meta.group?.trim())
   }
-  return tags.list.filter((t) => t.meta.group === groupFilter.value)
+  return rows.filter((t) => t.meta.group === groupFilter.value)
 })
+
+const TAG_PAGE_SIZES = [20, 50, 100]
+const pageSize = ref(50)
+const currentPage = ref(1)
+
+const pagedTags = computed(() => {
+  const all = filteredTags.value
+  const size = pageSize.value
+  const maxPage = Math.max(1, Math.ceil(all.length / size) || 1)
+  const page = currentPage.value > maxPage ? 1 : Math.max(1, currentPage.value)
+  const start = (page - 1) * size
+  return all.slice(start, start + size)
+})
+
+watch(
+  () => [groupFilter.value, pageSize.value, filteredTags.value.length] as const,
+  () => {
+    const maxPage = Math.max(1, Math.ceil(filteredTags.value.length / pageSize.value) || 1)
+    if (currentPage.value > maxPage) currentPage.value = 1
+  },
+  { flush: 'sync' },
+)
 
 function close() {
   emit('update:modelValue', false)
@@ -184,11 +230,21 @@ async function refresh() {
   loading.value = true
   try {
     await Promise.all([tags.hydrateFromServer(), devices.hydrateFromServer()])
+    tags.setWatchSubscription(tags.metas.map((m) => m.tagId).filter(Boolean))
+    pumpValueSnap()
     tags.connectRealtime()
   } catch {
     ElMessage.warning('无法连接服务端，显示本地 Mock')
   } finally {
-    await devices.refreshStatus()
+    // 状态探测失败或超时不能挡住变量表：表格数据在上面的 hydrate 已经到位。
+    try {
+      await Promise.race([
+        devices.refreshStatus(),
+        new Promise<void>((resolve) => setTimeout(resolve, 2500)),
+      ])
+    } catch {
+      /* ignore */
+    }
     loading.value = false
   }
 }
@@ -211,7 +267,15 @@ function startStatusPoll() {
 watch(
   () => props.modelValue,
   (open) => {
-    if (open) void refresh()
+    if (open) {
+      currentPage.value = 1
+      startValueTick()
+      tags.setWatchSubscription(tags.metas.map((m) => m.tagId).filter(Boolean))
+      void refresh()
+    } else {
+      stopValueTick()
+      tags.clearWatchSubscription()
+    }
   },
 )
 
@@ -227,7 +291,11 @@ watch(
   },
 )
 
-onUnmounted(stopStatusPoll)
+onUnmounted(() => {
+  stopStatusPoll()
+  stopValueTick()
+  tags.clearWatchSubscription()
+})
 
 function deviceStatusLabel(deviceId: string) {
   const state = devices.statusById[deviceId]?.state
@@ -287,16 +355,16 @@ function onSimTypeChange() {
   loadSimForm(null)
 }
 
-function clampMs(value: number, min = 200) {
+function clampMs(value: number, min = 200, fallback = 1000) {
   const n = Number(value)
-  if (!Number.isFinite(n)) return 1000
+  if (!Number.isFinite(n)) return fallback
   return Math.min(86_400_000, Math.max(min, Math.round(n)))
 }
 
 function loadIoForm(meta?: TagMeta | null) {
   io.onText = meta?.onText ?? ''
   io.offText = meta?.offText ?? ''
-  io.scanPeriodMs = meta?.scanPeriodMs ?? 1000
+  io.scanPeriodMs = meta?.scanPeriodMs ?? 50
   io.pushEnabled = meta?.pushEnabled === true
   io.pushPeriodMs = meta?.pushPeriodMs ?? 1000
   const history = meta?.history
@@ -441,7 +509,7 @@ async function saveEditor() {
       simulation: simulationPayload(),
       onText: form.dataType === 'bool' ? io.onText.trim() : '',
       offText: form.dataType === 'bool' ? io.offText.trim() : '',
-      scanPeriodMs: clampMs(io.scanPeriodMs, 50),
+      scanPeriodMs: clampMs(io.scanPeriodMs, 50, 50),
       pushEnabled: io.pushEnabled,
       pushPeriodMs: clampMs(io.pushPeriodMs),
       history: historyPayload(),
@@ -1045,7 +1113,7 @@ async function removeAlarm(alarmId: string) {
           />
         </div>
 
-        <el-table v-loading="loading" :data="filteredTags" height="400" size="small">
+        <el-table v-loading="loading" :data="pagedTags" row-key="meta.tagId" height="400" size="small">
           <el-table-column label="分组" width="90">
             <template #default="{ row }">{{ row.meta.group || '-' }}</template>
           </el-table-column>
@@ -1084,6 +1152,17 @@ async function removeAlarm(alarmId: string) {
             </template>
           </el-table-column>
         </el-table>
+        <div class="tag-pagination">
+          <el-pagination
+            size="small"
+            layout="total, sizes, prev, pager, next"
+            :total="filteredTags.length"
+            v-model:current-page="currentPage"
+            v-model:page-size="pageSize"
+            :page-sizes="TAG_PAGE_SIZES"
+            :pager-count="5"
+          />
+        </div>
       </el-tab-pane>
 
       <el-tab-pane label="设备通道" name="devices">
@@ -1092,7 +1171,7 @@ async function removeAlarm(alarmId: string) {
             {{ devices.mode === 'live' ? '服务端' : '本地 Mock' }}
           </el-tag>
           <span class="hint">
-            状态：在线/离线由后台自动探测（约 15 秒）；Mock 恒在线；MCD4000 走采集轮询
+            状态：在线/离线由后台自动探测（约 15 秒）；Mock 恒在线；MCD4000 / MCD4000（MQTT）走各自采集
           </span>
           <div class="spacer" />
           <el-button
@@ -1306,6 +1385,24 @@ async function removeAlarm(alarmId: string) {
             <HelpTip content="请求体 Fields 数组项，如 p_1X、wave、TISA6116实时值。" />
           </span>
           <el-input v-model="tagAddr.field" placeholder="p_1X" />
+        </label>
+      </template>
+
+      <!-- MCD4000 MQTT：PLC/ARM 用点名；多 devSn 或振动特征值用 传感器|字段 -->
+      <template v-else-if="formDeviceProtocol === 'mcd4000_mqtt'">
+        <label>
+          <span class="cfg-label">
+            Sensor / devSn
+            <HelpTip content="可空。同一网关下有多个 devSn 时填 devSn；振动特征值填传感器名，如 Motor_CE_X。" />
+          </span>
+          <el-input v-model="tagAddr.sensor" placeholder="可空，或 devSn / Motor_CE_X" />
+        </label>
+        <label>
+          <span class="cfg-label">
+            点名 / Field
+            <HelpTip content="PLC 点名如 V100、Q0.1；ARM 变量名如「入口压力」；振动特征值填字段如 Gap、Max。地址为 点名，或 devSn|点名，或 传感器|字段。" />
+          </span>
+          <el-input v-model="tagAddr.field" placeholder="V100 或 Gap" />
         </label>
       </template>
 
@@ -1802,6 +1899,52 @@ async function removeAlarm(alarmId: string) {
         </label>
       </template>
 
+      <!-- MCD4000（MQTT） -->
+      <template v-else-if="deviceForm.protocol === 'mcd4000_mqtt'">
+        <el-alert
+          class="wide proto-alert"
+          type="success"
+          :closable="false"
+          show-icon
+          title="只订阅采集，不写值。主题为 sys/&lt;序列号&gt;/up、upfast、passthrough（无前导斜杠），Client ID 以 telegraf_ 开头。"
+        />
+        <label>
+          <span class="cfg-label">
+            Broker
+            <HelpTip content="MQTT Broker 主机名或 IP。" />
+          </span>
+          <el-input v-model="deviceConn.host" placeholder="127.0.0.1" />
+        </label>
+        <label>
+          <span class="cfg-label">
+            端口
+            <HelpTip content="MQTT 默认 1883。" />
+          </span>
+          <el-input v-model="deviceConn.port" placeholder="1883" />
+        </label>
+        <label class="wide">
+          <span class="cfg-label">
+            网关序列号
+            <HelpTip content="设备序列号 $gatewaySn，用于订阅 sys/序列号/up、upfast、passthrough。" />
+          </span>
+          <el-input v-model="deviceConn.gatewaySn" placeholder="如 GSN-202507200001" />
+        </label>
+        <label>
+          <span class="cfg-label">
+            用户名
+            <HelpTip content="可选。Broker 需要鉴权时填写。" />
+          </span>
+          <el-input v-model="deviceConn.username" placeholder="可不填" />
+        </label>
+        <label>
+          <span class="cfg-label">
+            密码
+            <HelpTip content="可选。与用户名一起保存在设备通道里。" />
+          </span>
+          <el-input v-model="deviceConn.password" type="password" show-password placeholder="可不填" />
+        </label>
+      </template>
+
       <!-- 其他 -->
       <template v-else>
         <label class="wide">
@@ -1843,6 +1986,12 @@ async function removeAlarm(alarmId: string) {
   flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 12px;
+}
+
+.tag-pagination {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
 }
 
 .spacer {

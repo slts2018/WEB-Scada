@@ -35,6 +35,8 @@ export {
 export {
   createWidget2D,
   BUILTIN_WIDGETS,
+  RETIRED_BUILTIN_WIDGET_TYPES,
+  isRetiredBuiltinWidgetType,
   DRAW_TOOL_TYPES,
   isDrawToolType,
   parsePointList,
@@ -59,6 +61,7 @@ export {
 } from './factory/widget'
 export type {
   BuiltinWidgetType,
+  RetiredBuiltinWidgetType,
   DrawToolType,
   WidgetPaletteItem,
   TrendCurve,

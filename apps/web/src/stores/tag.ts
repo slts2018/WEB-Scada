@@ -42,6 +42,8 @@ export const useTagStore = defineStore('tag', () => {
   const pageTagIds = new Set<string>()
   /** 工程里所有实时趋势的变量。切页后仍要收到值，才能在后台继续记点。 */
   const backgroundTagIds = new Set<string>()
+  /** 变量表等监视器用：并入订阅，不覆盖页面/趋势订阅。 */
+  const watchTagIds = new Set<string>()
   const connected = ref(false)
   /** 已经连上过后，后端或 WebSocket 断开：保持最后一值，品质标为 Offline */
   const realtimeOffline = ref(false)
@@ -173,7 +175,7 @@ export const useTagStore = defineStore('tag', () => {
   }
 
   function publishSubscription() {
-    const ids = new Set<string>([...pageTagIds, ...backgroundTagIds])
+    const ids = new Set<string>([...pageTagIds, ...backgroundTagIds, ...watchTagIds])
     subscribed.value = ids
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     if (ids.size) {
@@ -201,6 +203,22 @@ export const useTagStore = defineStore('tag', () => {
     }
     backgroundTagIds.clear()
     for (const id of next) backgroundTagIds.add(id)
+    publishSubscription()
+  }
+
+  function setWatchSubscription(tagIds: string[]) {
+    const next = new Set(tagIds.filter(Boolean))
+    if (next.size === watchTagIds.size && [...next].every((id) => watchTagIds.has(id))) {
+      return
+    }
+    watchTagIds.clear()
+    for (const id of next) watchTagIds.add(id)
+    publishSubscription()
+  }
+
+  function clearWatchSubscription() {
+    if (!watchTagIds.size) return
+    watchTagIds.clear()
     publishSubscription()
   }
 
@@ -233,7 +251,7 @@ export const useTagStore = defineStore('tag', () => {
       for (const meta of metas.value) {
         if (!meta.deviceId || !mockIds.has(meta.deviceId)) continue
         if (subscribed.value.size && !subscribed.value.has(meta.tagId)) continue
-        const scan = Math.max(50, meta.scanPeriodMs ?? 1000)
+        const scan = Math.max(50, meta.scanPeriodMs ?? 50)
         const scanSlot = Math.floor(nowMs / scan)
         if (scanSlots.get(meta.tagId) === scanSlot) continue
         scanSlots.set(meta.tagId, scanSlot)
@@ -431,8 +449,12 @@ export const useTagStore = defineStore('tag', () => {
         mode.value = 'live'
         hadLiveSession = true
         clearRealtimeOffline()
+        // 空订阅必须显式 unsubscribe：服务端 subscribed==null 会推送全部变量。
+        // 设计端未开实时预览时若不发此帧，行走变量会以每秒上百条 delta 淹没前端。
         if (subscribed.value.size) {
           socket.send(JSON.stringify({ type: 'subscribe', tagIds: [...subscribed.value] }))
+        } else {
+          socket.send(JSON.stringify({ type: 'unsubscribe' }))
         }
       }
 
@@ -535,6 +557,8 @@ export const useTagStore = defineStore('tag', () => {
     setPageSubscription,
     clearPageSubscription,
     setBackgroundSubscription,
+    setWatchSubscription,
+    clearWatchSubscription,
     addListener,
     hydrateFromServer,
     createTag,

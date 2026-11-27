@@ -45,7 +45,7 @@ export interface TagMeta {
   onText?: string
   /** 布尔为 false 时的显示文本。空则仍显示 false */
   offText?: string
-  /** 模拟设备采样周期（毫秒）。缺省 1000。其它协议先只保存 */
+  /** 模拟设备采样周期（毫秒）。缺省 50。其它协议先只保存 */
   scanPeriodMs?: number
   /** 打开后按 pushPeriodMs 合并推送，只发窗口内最后一个值。缺省为值一变就推 */
   pushEnabled?: boolean
@@ -114,6 +114,8 @@ export type DeviceProtocol =
   | 'http'
   /** 沈鼓 MCD4000 / 数据中台历史 Query API（HTTP 轮询最新值） */
   | 'mcd4000'
+  /** 沈鼓 MCD4000 MQTT 上报（独立协议，只订阅采点） */
+  | 'mcd4000_mqtt'
   | 'other'
 
 /** 设备 / 通道配置（MySQL；Tag.deviceId 引用） */

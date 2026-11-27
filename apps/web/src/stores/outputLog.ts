@@ -90,7 +90,6 @@ export const useOutputLogStore = defineStore('outputLog', () => {
 })
 
 let syncStarted = false
-let syncTimer: ReturnType<typeof setInterval> | null = null
 
 async function pullSharedLogs() {
   try {
@@ -107,5 +106,5 @@ export function ensureOutputLogSync() {
   if (typeof window === 'undefined') return
   syncStarted = true
   void pullSharedLogs()
-  syncTimer = setInterval(() => void pullSharedLogs(), 2000)
+  setInterval(() => void pullSharedLogs(), 2000)
 }

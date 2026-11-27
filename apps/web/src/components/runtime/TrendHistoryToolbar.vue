@@ -8,7 +8,7 @@
  *
  * 布局（单行，按功能分组；按图元宽度能放几组放几组，放不下的组整组收进「…」）：
  *
- *   时间 开始 结束 过去 搜索 刷新 │ 浏览 ⇤ ⇥ 放大 缩小 表 │ 定位 时刻 间隔 │ 工具 导出 最大化 快捷键 …
+ *   间隔 开始 [自动: 结束 + 数字单位 | 原始点: 长度滑条] 搜索 刷新 │ 浏览 ⇤ ⇥ 放大 缩小 表 │ 工具 导出 最大化 快捷键 …
  *
  * 按钮一律只放图标，文字放在 title 里（鼠标悬停显示），省出地方给图表。
  */
@@ -42,26 +42,31 @@ import {
   trendHistoryCursorOf,
 } from '@/shared/runtime/trendHistoryCursor'
 import { onTrendAlarmBandsChanged, trendAlarmBandsOf, type AlarmBand } from '@/shared/runtime/trendAlarmEvents'
+import TrendRangeControl from '@/components/runtime/TrendRangeControl.vue'
 import {
   TREND_INTERVALS,
-  TREND_PAST_RANGES,
+  durationIdFromSpanMs,
   onTrendHistoryLoaded,
+  parseTrendDuration,
+  rawHistoryMaxSpanMs,
   refreshTrendHistory,
   setTrendHistoryFollow,
   setTrendHistoryInterval,
   setTrendHistoryWindow,
+  shortestScanPeriodMs,
   trendPresetSpanMs,
   shiftTrendHistoryWindow,
   trendHistoryExportRows,
   trendHistoryFollowOf,
   trendHistoryIntervalOf,
   trendHistoryNoticeOf,
+  trendHistoryQueryingOf,
   trendHistoryStatusOf,
   trendHistoryWindowOf,
   zoomTrendHistoryWindow,
   setTrendToolbarMeasuredHeight,
 } from '@/shared/runtime/trendHistoryQuery'
-import { jumpTrendHistoryWidgetToTime } from '@/shared/runtime/trendHistoryLink'
+import { useTagStore } from '@/stores/tag'
 import {
   forgetTrendToolbar,
   setActiveTrendToolbar,
@@ -111,21 +116,20 @@ function reportBarHeight(): void {
 
 const PLACES = ['bar', 'more'] as const
 type Place = (typeof PLACES)[number]
-type GroupKey = 'time' | 'nav' | 'locate' | 'tools'
+type GroupKey = 'time' | 'nav' | 'tools'
 
 const GROUPS: { key: GroupKey; label: string }[] = [
   { key: 'time', label: '时间' },
   { key: 'nav', label: '浏览' },
-  { key: 'locate', label: '定位' },
   { key: 'tools', label: '工具' },
 ]
 
 /** 「…」按钮自己要占的宽度（含间距） */
 const MORE_BTN_W = 34
 /** 与 `.trend-bar { gap }` 一致 */
-const GROUP_GAP = 4
+const GROUP_GAP = 8
 /** `.is-main .tb-group + .tb-group` 的 margin-left（竖线分隔，不进 width） */
-const GROUP_MARGIN = 3
+const GROUP_MARGIN = 6
 
 const showMore = ref(false)
 /** 从第几组起收进「…」；Infinity = 全部放在条上 */
@@ -176,8 +180,8 @@ function relayoutFromCache(): boolean {
   if (!cachedGroupWs || cachedGroupWs.length !== GROUPS.length) return false
   const bar = mainBar()
   if (!bar) return false
-  // clientWidth 已扣掉边框；再扣左右 padding 4+4
-  const inner = Math.max(0, bar.clientWidth - 8)
+  // clientWidth 已扣掉边框；再扣左右 padding 8+8
+  const inner = Math.max(0, bar.clientWidth - 16)
   applyHidden(pickHiddenFrom(inner, cachedGroupWs))
   return true
 }
@@ -196,7 +200,7 @@ async function remasure(): Promise<void> {
   if (seq !== layoutSeq) return
   const groups = Array.from(bar.querySelectorAll<HTMLElement>(':scope > [data-tg]'))
   cachedGroupWs = groups.map((el) => el.getBoundingClientRect().width)
-  const inner = Math.max(0, bar.clientWidth - 8)
+  const inner = Math.max(0, bar.clientWidth - 16)
   applyHidden(pickHiddenFrom(inner, cachedGroupWs))
   await nextTick()
   bar.classList.remove('is-measuring')
@@ -222,7 +226,8 @@ function onDocPointerDown(e: PointerEvent): void {
   showMore.value = false
 }
 const emit = defineEmits<{ change: []; toggleFullscreen: [] }>()
-const canEdit = () => props.allowEdit !== false
+const querying = ref(false)
+const canEdit = () => props.allowEdit !== false && !querying.value
 
 const interval = ref('auto')
 /** 与当前窗口跨度吻合的预设；对不上（手改起止、缩放、平移）就空着 */
@@ -244,12 +249,78 @@ const toAt = ref<Date | null>(null)
  * 一点下去就把窗口拼成一个莫名其妙的区间（比如开始停在昨天、结束是今天）。
  */
 const editingField = ref<'from' | 'to' | null>(null)
-/**
- * 「时刻」：手动选/输**一个时间点**（秒精度），游标跳过去。
- * 它跟着游标走：图内点一下 / ◀▶ 微调也会同步显示，但改成别的时刻就等于"我要看这一刻"。
- */
-const jumpAt = ref<Date | null>(null)
 const showHelp = ref(false)
+
+/** 原始点可视时长滑条：只改查询条件里这段有多长（短→长），不跳到某一时刻。结束时间保持不动。点「搜索」后才请求。 */
+const RAW_SPAN_MIN_MS = 5 * 1000
+const tagStore = useTagStore()
+/** 图上最短扫描周期 × 1200 点。未知周期按 50ms 估，避免先放出过长窗口再截断。 */
+const rawSpanMaxMs = computed(() => {
+  const ids = (props.curves?.length ? props.curves.map((curve) => curve.tagId) : props.tagIds) ?? []
+  const periods = ids.map((id) => tagStore.metas.find((meta) => meta.tagId === id)?.scanPeriodMs)
+  const known = periods.filter((ms) => Number(ms) > 0)
+  const densest = known.length ? shortestScanPeriodMs(known) : 50
+  return Math.max(RAW_SPAN_MIN_MS, rawHistoryMaxSpanMs(densest))
+})
+const rawSpanMaxSec = computed(() => Math.max(5, Math.round(rawSpanMaxMs.value / 1000)))
+const rawSpanMs = ref(60 * 1000)
+/** 间隔 / 开始 / 结束 / 长度 / 数字单位已改、尚未点搜索。为 true 时不同步覆盖草稿（避免滑条弹回上限）。 */
+const draftDirty = ref(false)
+
+function clampRawSpan(ms: number): number {
+  if (!Number.isFinite(ms) || ms <= 0) return RAW_SPAN_MIN_MS
+  return Math.max(RAW_SPAN_MIN_MS, Math.min(rawSpanMaxMs.value, Math.round(ms)))
+}
+
+function formatRawSpan(ms: number): string {
+  const sec = Math.max(1, Math.round(ms / 1000))
+  if (sec < 60) return `${sec} 秒`
+  if (sec % 60 === 0) return `${sec / 60} 分钟`
+  return `${Math.floor(sec / 60)} 分 ${sec % 60} 秒`
+}
+
+function draftEndMs(): number {
+  const t = toAt.value?.getTime()
+  if (Number.isFinite(t)) return t as number
+  return trendHistoryWindowOf(props.widgetId)?.to ?? Date.now()
+}
+
+/** 拖动过程中立刻改长度数字和旁边的时长文字 / 气泡，不改开始/结束日期框（每帧改 DatePicker 会卡顿），也不发查询。 */
+function onRawSpanInput(v: number | number[]): void {
+  const span = clampRawSpan(Number(Array.isArray(v) ? v[0] : v) * 1000)
+  if (rawSpanMs.value !== span) rawSpanMs.value = span
+  draftDirty.value = true
+}
+
+/** 滑条当前草稿长度，拖动时跟手，给旁边标签用。 */
+const rawSpanLabel = computed(() => formatRawSpan(rawSpanMs.value))
+const rawSpanSec = computed(() => Math.round(rawSpanMs.value / 1000))
+
+function formatRawSpanTooltip(v: number): string {
+  return formatRawSpan(Number(v) * 1000)
+}
+
+watch(rawSpanMaxMs, (maxMs) => {
+  if (rawSpanMs.value > maxMs) rawSpanMs.value = maxMs
+})
+
+/** 松手后再回填开始时间（结束不动）。不发查询。 */
+function setDraftRawSpan(ms: number): void {
+  const span = clampRawSpan(Number(ms))
+  rawSpanMs.value = span
+  const to = draftEndMs()
+  fromAt.value = new Date(to - span)
+  toAt.value = new Date(to)
+  draftDirty.value = true
+}
+
+function syncRawSpan(): void {
+  if (draftDirty.value) return
+  const win = trendHistoryWindowOf(props.widgetId)
+  if (!win) return
+  const next = clampRawSpan(win.to - win.from)
+  if (rawSpanMs.value !== next) rawSpanMs.value = next
+}
 
 /* ---------- 曲线显示格式：读变量上的单位 / 小数位 ---------- */
 
@@ -301,6 +372,7 @@ const cursorAt = ref<number | null>(null)
  * 正在编辑的那个框除外（别打断手输），编辑一结束（失焦）就回到真实值。
  */
 function syncRangeFields(): void {
+  if (draftDirty.value) return
   const win = trendHistoryWindowOf(props.widgetId)
   if (!win) return
   if (editingField.value !== 'from' && fromAt.value?.getTime() !== win.from) {
@@ -317,43 +389,20 @@ function beginEditField(which: 'from' | 'to'): void {
 
 function endEditField(): void {
   editingField.value = null
-  // 手输/选了但没成交（或成交后窗口又变了）时，把框拉回真实窗口
-  syncRangeFields()
+  // 已改但还没点搜索：不要把开始/结束拉回已查询窗口（否则像滑条一样被弹回去）
+  if (!draftDirty.value) syncRangeFields()
 }
 
 /**
  * 游标状态同步。游标读数不在工具条上重复显示：
- * 值看点表里那一行，时间看图上竖线和「时刻」框。
+ * 值看点表里那一行，时间看图上竖线。
  */
 function syncCursor(): void {
-  const at = trendHistoryCursorOf(props.widgetId)
-  cursorAt.value = at
-  // 「时刻」控件跟着游标（游标没变时不回写，避免打断正在手输的用户）
-  if (at == null) {
-    if (jumpAt.value) jumpAt.value = null
-  } else if (jumpAt.value?.getTime() !== at) {
-    jumpAt.value = new Date(at)
-  }
+  cursorAt.value = trendHistoryCursorOf(props.widgetId)
 }
 
 function stepCursor(dir: -1 | 1): void {
   stepTrendHistoryCursor(props.widgetId, dir, props.tagIds)
-  after()
-}
-
-/** 手动跳到某个时刻（可手输）：见 jumpTrendHistoryWidgetToTime 的注释 */
-function jumpToTime(value: Date | string | number | null): void {
-  const at =
-    value instanceof Date
-      ? value.getTime()
-      : typeof value === 'number'
-        ? value
-        : typeof value === 'string'
-          ? Date.parse(value.replace(/-/g, '/'))
-          : Number.NaN
-  if (!Number.isFinite(at) || at <= 0) return
-  jumpTrendHistoryWidgetToTime(props.widgetId, at)
-  markActive()
   after()
 }
 
@@ -362,29 +411,38 @@ function clearCursor(): void {
   after()
 }
 
-/** 窗口长度正好是某个预设时，下拉框显示该项；否则留空，避免标着「最近1小时」实际却不是 */
+/** 窗口长度能整除某个单位时，回填数字+单位；对不齐（手改起止、缩放）仍尽量按秒显示 */
 function matchPastRange(from: number, to: number): string {
   const span = to - from
   if (!Number.isFinite(span) || span <= 0) return ''
-  for (const item of TREND_PAST_RANGES) {
-    if (Math.abs(span - trendPresetSpanMs(item.id)) < 2000) return item.id
-  }
-  return ''
+  return durationIdFromSpanMs(span)
 }
 
 function syncPastRange(): void {
+  if (draftDirty.value) return
   const win = trendHistoryWindowOf(props.widgetId)
   const next = win ? matchPastRange(win.from, win.to) : ''
   if (pastRange.value !== next) pastRange.value = next
 }
 
+function syncPastRangeFromDraft(): void {
+  const f = fromAt.value?.getTime()
+  const t = toAt.value?.getTime()
+  const next = Number.isFinite(f) && Number.isFinite(t) ? matchPastRange(f as number, t as number) : ''
+  if (pastRange.value !== next) pastRange.value = next
+}
+
 function sync(): void {
-  interval.value = trendHistoryIntervalOf(props.widgetId)
   follow.value = trendHistoryFollowOf(props.widgetId)
   notice.value = trendHistoryNoticeOf(props.widgetId)
   aggWindow.value = trendHistoryStatusOf(props.widgetId)?.aggWindow ?? null
-  syncRangeFields()
-  syncPastRange()
+  querying.value = trendHistoryQueryingOf(props.widgetId)
+  if (!draftDirty.value) {
+    interval.value = trendHistoryIntervalOf(props.widgetId)
+    syncRangeFields()
+    syncPastRange()
+    syncRawSpan()
+  }
   syncCursor()
   syncAlarms()
 }
@@ -500,31 +558,61 @@ function after(): void {
   emit('change')
 }
 
-/**
- * 按"开始 ~ 结束"查询。
- * search=true（点「搜索」或回车）= 这一对起止时间重查一遍；否则是改完自动应用。
- * 起止时间是用户明确指定的绝对区间 → 先关跟随，刷新时也保持这一段（不跳回最新）。
- */
-/** 按「过去一段时间」查询：结束时间取现在，开始时间往前推这段，并关掉跟随 */
+/** 数字+单位只改草稿：结束取现在，开始往前推这段。点「搜索」后才请求。 */
 function applyPast(id: string): void {
-  if (!TREND_PAST_RANGES.some((item) => item.id === id)) return
+  if (!parseTrendDuration(id)) return
   const to = Date.now()
   const from = to - trendPresetSpanMs(id)
-  setTrendHistoryFollow(props.widgetId, false)
-  setTrendHistoryWindow(props.widgetId, from, to)
-  refreshTrendHistory(props.widgetId)
-  after()
+  if (from >= to) return
+  fromAt.value = new Date(from)
+  toAt.value = new Date(to)
+  pastRange.value = id
+  rawSpanMs.value = clampRawSpan(to - from)
+  draftDirty.value = true
 }
 
-function applyRange(search = false): void {
-  const f = fromAt.value?.getTime()
-  const t = toAt.value?.getTime()
-  if (!Number.isFinite(f) || !Number.isFinite(t) || (t as number) <= (f as number)) {
-    return
+/** 开始时间草稿。原始点模式保持长度，结束 = 开始 + 长度。不发查询。 */
+function onDraftFromChange(): void {
+  draftDirty.value = true
+  const from = fromAt.value?.getTime()
+  if (!Number.isFinite(from)) return
+  if (interval.value === 'raw') {
+    const span = clampRawSpan(rawSpanMs.value)
+    toAt.value = new Date((from as number) + span)
+  } else {
+    syncPastRangeFromDraft()
   }
+}
+
+/** 结束时间草稿（仅自动模式可见）。不发查询。 */
+function onDraftToChange(): void {
+  draftDirty.value = true
+  syncPastRangeFromDraft()
+}
+
+/**
+ * 点「搜索」：把间隔 / 开始 / 结束或长度草稿一次性交给查询。
+ * 原始点：结束保持草稿右端（默认是当前窗口右端），开始 = 结束 - 长度。
+ */
+function searchDraft(): void {
+  let to = toAt.value?.getTime()
+  let from = fromAt.value?.getTime()
+  if (interval.value === 'raw') {
+    const span = clampRawSpan(rawSpanMs.value)
+    rawSpanMs.value = span
+    to = Number.isFinite(to) ? (to as number) : draftEndMs()
+    from = (to as number) - span
+    fromAt.value = new Date(from)
+    toAt.value = new Date(to as number)
+  }
+  if (!Number.isFinite(from) || !Number.isFinite(to) || (to as number) <= (from as number)) return
+  const nextInterval = interval.value
+  setTrendHistoryInterval(props.widgetId, nextInterval)
   setTrendHistoryFollow(props.widgetId, false)
-  setTrendHistoryWindow(props.widgetId, f as number, t as number)
-  if (search) refreshTrendHistory(props.widgetId)
+  setTrendHistoryWindow(props.widgetId, from as number, to as number)
+  refreshTrendHistory(props.widgetId)
+  interval.value = nextInterval
+  draftDirty.value = false
   after()
 }
 
@@ -538,9 +626,28 @@ function zoom(factor: number): void {
   after()
 }
 
+function isRawInterval(): boolean {
+  return interval.value === 'raw'
+}
+
+/**
+ * 只改草稿间隔，不发查询。点「搜索」后才按条上当前间隔请求。
+ * draftDirty=true，避免 emitLoaded → sync() 把下拉框弹回 store 里尚未提交的旧间隔（查完原始点再选「自动」时尤其如此）。
+ * 切到原始点：跨度超过滑条上限时按上限收、结束不动，不悄悄截断已查窗口。
+ * 切到自动 / 固定聚合：数字+单位与当前起止对齐，立刻换成开始/结束+数字单位布局。
+ */
 function applyInterval(): void {
-  setTrendHistoryInterval(props.widgetId, interval.value)
-  after()
+  draftDirty.value = true
+  if (interval.value === 'raw') {
+    const to = draftEndMs()
+    const from = fromAt.value?.getTime()
+    const span = clampRawSpan(Number.isFinite(from) ? (to - (from as number)) : rawSpanMs.value)
+    rawSpanMs.value = span
+    toAt.value = new Date(to)
+    fromAt.value = new Date(to - span)
+    return
+  }
+  syncPastRangeFromDraft()
 }
 
 function refresh(): void {
@@ -574,9 +681,10 @@ function exportCsv(): void {
 }
 
 const SHORTCUTS: Array<{ key: string; text: string }> = [
-  { key: '开始/结束', text: '起止时间各自一个输入框（秒精度）→ 改完自动查，或点「搜索」重查一遍' },
-  { key: '过去', text: '按现在往前查一段（5–30 分钟、1–3 小时，或 1 / 3 / 5 / 7 / 15 / 30 天）' },
-  { key: '时刻', text: '看某一个瞬间 → 游标跳过去（不在起止区间里会自动把窗口挪过去）' },
+  { key: '间隔', text: '自动 / 原始点 / 固定聚合只改查询条件并切换条上控件，点「搜索」后才请求；下拉框保持所选草稿，不会弹回上一笔' },
+  { key: '开始/结束', text: '起止时间各自一个输入框（秒精度）。只改查询条件，点「搜索」后才请求' },
+  { key: '过去', text: '按现在往前准备一段：填数字并选秒 / 分钟 / 小时 / 天，点「搜索」后才请求' },
+  { key: '长度', text: '间隔为「原始点」时出现：只改这段能看多长（短→长），最长 = 本图最短扫描周期 × 1200 点（50ms 约 1 分钟）；结束时间保持当前窗口右端；拖动时旁边时长立刻更新，点「搜索」后才请求，滑块保持所停位置' },
   { key: '← / →', text: '游标按采样点前后移动' },
   { key: '+ / -', text: '以游标为中心放大 / 缩小时间窗' },
   { key: 'Esc', text: '清除游标（最大化时退出最大化）' },
@@ -587,7 +695,7 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
 </script>
 
 <template>
-  <div ref="rootEl" class="trend-toolbar" @pointerenter="markActive">
+  <div ref="rootEl" class="trend-toolbar" :class="{ 'is-querying': querying }" :aria-busy="querying ? 'true' : undefined" @pointerenter="markActive">
     <!-- 同一套控件渲染两份：条上放得下的显示在条上，放不下的显示在「…」弹出面板里 -->
     <template v-for="place in PLACES" :key="place">
       <div
@@ -600,9 +708,23 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
         @dblclick.stop
         @wheel.stop
       >
-        <!-- 时间：起止 + 搜索 / 刷新 -->
+        <!-- 时间：间隔在最左；自动 = 开始/结束 + 数字单位；原始点 = 开始 + 长度滑条 -->
         <span v-show="groupInPlace(0, place)" class="tb-group" data-tg>
           <span v-if="place === 'more'" class="group-label">{{ GROUPS[0].label }}</span>
+          <span class="tb-item">
+            <span class="time-label">间隔</span>
+            <el-select
+              v-model="interval"
+              size="small"
+              class="w-interval"
+              :teleported="false"
+              :disabled="!canEdit()"
+              title="自动按跨度聚合；原始点按真实记录取，并用长度滑条决定能看多长。改间隔只换查询条件和条上控件，点搜索后才请求"
+              @change="applyInterval"
+            >
+              <el-option v-for="item in TREND_INTERVALS" :key="item.id" :label="item.label" :value="item.id" />
+            </el-select>
+          </span>
           <span class="tb-item">
             <span class="time-label">开始</span>
             <el-date-picker
@@ -617,10 +739,10 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
               :disabled="!canEdit()"
               @focus="beginEditField('from')"
               @blur="endEditField"
-              @change="applyRange()"
+              @change="onDraftFromChange"
             />
           </span>
-          <span class="tb-item">
+          <span v-if="!isRawInterval()" class="tb-item">
             <span class="time-label">结束</span>
             <el-date-picker
               v-model="toAt"
@@ -634,31 +756,48 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
               :disabled="!canEdit()"
               @focus="beginEditField('to')"
               @blur="endEditField"
-              @change="applyRange()"
+              @change="onDraftToChange"
             />
           </span>
-          <el-select
-            v-model="pastRange"
-            size="small"
+          <TrendRangeControl
+            v-if="!isRawInterval()"
             class="w-past"
-            placeholder="过去"
-            :teleported="false"
+            compact
+            :model-value="pastRange || '-1h'"
             :disabled="!canEdit()"
-            title="查询过去一段时间（结束时间为现在）"
-            @change="applyPast"
-          >
-            <el-option v-for="item in TREND_PAST_RANGES" :key="item.id" :label="item.label" :value="item.id" />
-          </el-select>
+            @update:model-value="applyPast"
+          />
+          <span v-if="isRawInterval()" class="tb-item">
+            <span class="time-label">长度</span>
+            <el-slider
+              class="w-raw-span"
+              size="small"
+              :min="5"
+              :max="rawSpanMaxSec"
+              :step="5"
+              :show-tooltip="true"
+              :format-tooltip="formatRawSpanTooltip"
+              :model-value="rawSpanSec"
+              :disabled="!canEdit()"
+              title="只改查询条件里这段能看多长（短→长），最长为最短扫描周期 × 1200 点。结束时间保持当前窗口右端。点搜索后才查询，滑块不会被弹回上限。拖动时时长立刻更新"
+              @input="onRawSpanInput"
+              @update:model-value="onRawSpanInput"
+              @change="(v: number | number[]) => setDraftRawSpan(Number(Array.isArray(v) ? v[0] : v) * 1000)"
+            />
+            <span class="raw-span-value" :title="'草稿长度 ' + rawSpanLabel">{{ rawSpanLabel }}</span>
+          </span>
           <el-button
             size="small"
             :icon="Search"
             :disabled="!canEdit()"
-            title="搜索：按这对起止时间查询"
-            @click="applyRange(true)"
+            :loading="querying"
+            title="搜索：按当前条件查询"
+            @click="searchDraft"
           />
           <el-button
             size="small"
             :icon="Refresh"
+            :disabled="!canEdit()"
             :title="follow ? '刷新：重新查询当前窗口' : '刷新：重新查询（回到最新）'"
             @click="refresh"
           />
@@ -694,42 +833,9 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
           />
         </span>
 
-        <!-- 定位：跳到某一刻 / 聚合间隔 -->
+        <!-- 工具：导出 / 报警 / 最大化 / 快捷键 -->
         <span v-show="groupInPlace(2, place)" class="tb-group" data-tg>
           <span v-if="place === 'more'" class="group-label">{{ GROUPS[2].label }}</span>
-          <span class="tb-item">
-            <span class="time-label">时刻</span>
-            <el-date-picker
-              v-model="jumpAt"
-              type="datetime"
-              size="small"
-              class="w-datetime"
-              format="MM-DD HH:mm:ss"
-              placeholder="跳到某一刻"
-              :clearable="false"
-              :teleported="false"
-              :disabled="!canEdit()"
-              @change="jumpToTime"
-            />
-          </span>
-          <span class="tb-item">
-            <span class="time-label">间隔</span>
-            <el-select
-              v-model="interval"
-              size="small"
-              class="w-interval"
-              :teleported="false"
-              :disabled="!canEdit()"
-              @change="applyInterval"
-            >
-              <el-option v-for="item in TREND_INTERVALS" :key="item.id" :label="item.label" :value="item.id" />
-            </el-select>
-          </span>
-        </span>
-
-        <!-- 工具：导出 / 报警 / 最大化 / 快捷键 -->
-        <span v-show="groupInPlace(3, place)" class="tb-group" data-tg>
-          <span v-if="place === 'more'" class="group-label">{{ GROUPS[3].label }}</span>
           <el-button size="small" :icon="Download" title="导出 CSV" @click="exportCsv" />
           <el-button
             v-if="alarmBands.length"
@@ -766,6 +872,7 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
             title="更多"
             @click="showMore = !showMore"
           />
+          <span v-if="querying" class="hint is-querying">查询中</span>
           <span v-if="notice" class="notice" :class="notice.kind">{{ notice.text }}</span>
           <span v-if="aggWindow && interval === 'auto'" class="hint">按 {{ aggWindow }} 平均</span>
         </template>
@@ -792,6 +899,7 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   position: relative;
   width: 100%;
   height: auto;
+  background: #0b1220;
 }
 
 .trend-bar {
@@ -799,15 +907,15 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   flex-direction: row;
   flex-wrap: nowrap;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   width: 100%;
   height: auto;
   box-sizing: border-box;
-  padding: 2px 4px;
+  padding: 4px 8px;
   overflow: visible;
   pointer-events: auto;
-  background: transparent;
-  border-bottom: none;
+  background: #0b1220;
+  border-bottom: 1px solid #1e293b;
 }
 /* 重测各组宽度时临时挡住溢出，避免「先全展开再收」被看见 */
 .trend-bar.is-measuring {
@@ -823,8 +931,8 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   max-width: 100%;
   flex-direction: column;
   align-items: stretch;
-  gap: 4px;
-  padding: 4px 6px;
+  gap: 8px;
+  padding: 8px 10px;
   background: rgba(11, 18, 32, 0.97);
   border: 1px solid #1e3a5f;
   border-top: none;
@@ -833,13 +941,13 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
 .tb-group {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
   flex: 0 0 auto;
 }
 /* 条上组与组之间的竖线 */
 .is-main .tb-group + .tb-group {
-  margin-left: 3px;
-  padding-left: 7px;
+  margin-left: 6px;
+  padding-left: 10px;
   border-left: 1px solid #24344f;
 }
 .more-panel .tb-group {
@@ -854,7 +962,7 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
 .tb-item {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   flex: 0 0 auto;
 }
 .more-btn {
@@ -862,24 +970,51 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
 }
 .trend-bar :deep(.el-input__wrapper),
 .trend-bar :deep(.el-range-editor),
-.trend-bar :deep(.el-select__wrapper) {
-  --el-input-bg-color: transparent;
+.trend-bar :deep(.el-select__wrapper),
+.trend-bar :deep(.el-input-number .el-input__wrapper) {
+  --el-input-bg-color: #1e293b;
   --el-input-text-color: #e2e8f0;
-  --el-input-border-color: #334155;
-  --el-fill-color-blank: transparent;
-  background-color: transparent;
+  --el-input-border-color: #4b5d78;
+  --el-input-hover-border-color: #64748b;
+  --el-input-focus-border-color: #7aa2d4;
+  --el-fill-color-blank: #1e293b;
+  background-color: #1e293b !important;
+  box-shadow: 0 0 0 1px #4b5d78 inset;
   height: 22px;
+  min-height: 22px;
   font-size: 12px;
 }
-.trend-bar.is-main :deep(.el-button:not(.el-button--primary):not(.el-button--danger)) {
-  --el-button-bg-color: transparent;
-  --el-button-hover-bg-color: rgba(148, 163, 184, 0.16);
-  --el-button-border-color: #334155;
-  background-color: transparent;
+.trend-bar :deep(.el-select__wrapper) {
+  padding-top: 0;
+  padding-bottom: 0;
 }
+.trend-bar :deep(.el-select__placeholder),
+.trend-bar :deep(.el-select__selected-item),
+.trend-bar :deep(.el-select__input) {
+  color: #e2e8f0;
+}
+.trend-bar :deep(.el-input__inner),
 .trend-bar :deep(.el-range-input) {
   color: #e2e8f0;
-  font-size: 11px;
+  font-size: 12px;
+}
+.trend-bar.is-main :deep(.el-button:not(.el-button--primary):not(.el-button--danger)),
+.trend-bar.more-panel :deep(.el-button:not(.el-button--primary):not(.el-button--danger)) {
+  --el-button-bg-color: #1e293b;
+  --el-button-hover-bg-color: #334155;
+  --el-button-active-bg-color: #0f172a;
+  --el-button-border-color: #4b5d78;
+  --el-button-hover-border-color: #64748b;
+  --el-button-text-color: #e8eef7;
+  --el-button-hover-text-color: #ffffff;
+  --el-button-icon-color: #e8eef7;
+  background-color: #1e293b;
+  border-color: #4b5d78;
+  color: #e8eef7;
+}
+.trend-bar :deep(.el-button:not(.el-button--primary):not(.el-button--danger) .el-icon),
+.trend-bar :deep(.el-button:not(.el-button--primary):not(.el-button--danger) svg) {
+  color: #e8eef7;
 }
 .trend-bar :deep(.el-button) {
   flex: 0 0 auto;
@@ -905,12 +1040,25 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   font-size: 11px;
   white-space: nowrap;
 }
+.trend-bar :deep(.w-raw-span) {
+  width: 132px;
+  flex: 0 0 auto;
+  margin: 0 4px;
+}
+.raw-span-value {
+  flex: 0 0 auto;
+  min-width: 4.8em;
+  color: #e2e8f0;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .trend-bar :deep(.w-interval) {
   width: 72px;
   flex: 0 0 auto;
 }
 .trend-bar :deep(.w-past) {
-  width: 112px;
+  width: auto;
   flex: 0 0 auto;
 }
 /* 快捷键提示面板：贴在图元左上角，不抢图内的鼠标 */
@@ -961,6 +1109,11 @@ const SHORTCUTS: Array<{ key: string; text: string }> = [
   font-size: 11px;
   white-space: nowrap;
   text-overflow: ellipsis;
+}
+.hint.is-querying {
+  flex: 0 0 auto;
+  color: #fbbf24;
+  font-weight: 600;
 }
 .notice {
   flex: 0 1 auto;

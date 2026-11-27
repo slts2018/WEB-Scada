@@ -55,11 +55,28 @@ public class TagSessionRegistry {
     }
   }
 
+  /**
+   * Tomcat WebSocket forbids concurrent writes on one session ({@code TEXT_PARTIAL_WRITING}).
+   * tick(), Modbus poll and handshake snapshots can all send on the same connection, so
+   * serialize per session and swallow unexpected send errors so a failed tick cannot
+   * abort the scheduler.
+   */
   public void send(WebSocketSession session, Object payload) {
+    if (session == null || !session.isOpen()) return;
+    final String json;
     try {
-      session.sendMessage(new TextMessage(mapper.writeValueAsString(payload)));
-    } catch (IOException e) {
-      log.debug("ws send failed: {}", e.toString());
+      json = mapper.writeValueAsString(payload);
+    } catch (Exception e) {
+      log.debug("ws serialize failed: {}", e.toString());
+      return;
+    }
+    synchronized (session) {
+      if (!session.isOpen()) return;
+      try {
+        session.sendMessage(new TextMessage(json));
+      } catch (Exception e) {
+        log.debug("ws send failed session={}: {}", session.getId(), e.toString());
+      }
     }
   }
 
