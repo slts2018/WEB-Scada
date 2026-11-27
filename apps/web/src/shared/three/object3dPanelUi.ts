@@ -1,6 +1,6 @@
 /**
  * 3D 跟镜头 HTML 面板 DOM（挂到 CSS2DObject.element）
- * 结构：host（CSS2D 定位）→ world-scale（按相机距离缩放）→ panel（内容）
+ * 结构：host（CSS2D 定位）→ world-scale（默认按世界尺寸与模型同步缩放；可选固定屏幕大小）→ panel（内容）
  * 内容区为 Konva Stage（完整 2D 绑定/事件）；scene3d 控件忽略。
  */
 import type {
@@ -42,7 +42,7 @@ export function ensureObject3dPanelStyles() {
   pointer-events: none;
 }
 .scada-3d-panel__world-scale {
-  /* 距离缩放用 zoom（见 createScene3D.updatePanelWorldScales），勿再套 transform:scale */
+  /* 缩放用 zoom（见 createScene3D.updatePanelWorldScales），勿再套 transform:scale */
 }
 .scada-3d-panel {
   box-sizing: border-box;

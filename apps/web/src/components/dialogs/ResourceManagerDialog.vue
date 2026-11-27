@@ -5,6 +5,7 @@ import { useProjectStore } from '@/stores/project'
 import { countRefsByResource, findOrphanResourceIds } from '@/shared/project/resourceRefs'
 import ModelResourceThumb from '@/components/designer/ModelResourceThumb.vue'
 import { invalidateModelThumbnail } from '@/shared/three/modelThumbnail'
+import { invalidateParsedModelCache } from '@/shared/three/modelLoader'
 
 defineProps<{
   modelValue: boolean
@@ -29,18 +30,23 @@ function previewUrl(path: string) {
   return project.resolveResourceUrl(path)
 }
 
+function dropModelCaches(id: string) {
+  const url = project.getResourceUrl(id)
+  invalidateModelThumbnail(id)
+  if (url) invalidateParsedModelCache(url)
+}
+
 function onRemove(id: string) {
+  dropModelCaches(id)
   const res = project.removeResource(id)
   if (!res.ok) {
     ElMessage.warning(`仍有 ${res.refs} 处引用。将强制删除并清空引用。`)
     const forced = project.removeResource(id, { force: true })
     if (forced.ok) {
-      invalidateModelThumbnail(id)
       ElMessage.success('已强制删除并清除引用')
     }
     return
   }
-  invalidateModelThumbnail(id)
   ElMessage.success('已删除资源')
 }
 
@@ -62,8 +68,12 @@ async function onReplaceFile(ev: Event) {
   pendingReplaceId.value = null
   if (!file || !id) return
   try {
+    const prevUrl = project.getResourceUrl(id)
     await project.replaceResourceFile(id, file)
     invalidateModelThumbnail(id)
+    if (prevUrl) invalidateParsedModelCache(prevUrl)
+    const nextUrl = project.getResourceUrl(id)
+    if (nextUrl && nextUrl !== prevUrl) invalidateParsedModelCache(nextUrl)
     ElMessage.success('资源已替换')
   } catch (err) {
     if (err instanceof Error && err.message === 'duplicate_model') {

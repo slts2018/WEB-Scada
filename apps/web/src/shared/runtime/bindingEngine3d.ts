@@ -206,7 +206,7 @@ function objectVisualKey(objectId: string, kind: string, type: string, tagId: st
   return `${objectId}|${kind}|${type}|${tagId}`
 }
 
-function rememberObjectVisual(object: Object3DNode, key: string, patch: CachedObject3DVisual, flags?: { colorTinted?: boolean; interactive?: boolean }) {
+function rememberObjectVisual(_object: Object3DNode, key: string, patch: CachedObject3DVisual, flags?: { colorTinted?: boolean; interactive?: boolean }) {
   lastGoodObjectVisual.set(key, {
     ...patch,
     colorTinted: flags?.colorTinted,
@@ -359,6 +359,8 @@ export function resolveObject3DVisual(
   const flags = { blink: false, interactive: true, colorTinted: false }
   /** 管道流动：变量 → 速度系数（缺省 1，用于设计端预览） */
   const resolvedFlow = resolveObject3DFlow(object, getTag)
+  // 挂到克隆对象：applyVisual / flowFromRawNode 才能用映射后的系数（含负系数换向）
+  ;(object as Object3DNode & { flow?: ResolvedFlow | null }).flow = resolvedFlow
   let quality: ResolvedObject3D['quality'] = 'Good'
 
   for (const link of object.animationLinks ?? []) {
@@ -570,6 +572,11 @@ export function collectPage3DTagIds(
     for (const b of obj.bindings ?? []) ids.add(b.tagId)
     for (const a of obj.animations ?? []) ids.add(a.tagId)
     for (const link of obj.animationLinks ?? []) ids.add(link.tagId)
+    // 液位挂在罐体 children 的 liquid 上，不走 bindings/animationLinks。
+    // walkObject3dTree 已递归子节点。流动主数据在 animationLinks；若对象上另有 flow.tagId 一并纳入。
+    if (obj.liquid?.tagId) ids.add(obj.liquid.tagId)
+    const flowTagId = (obj as Object3DNode & { flow?: { tagId?: string } | null }).flow?.tagId
+    if (flowTagId) ids.add(flowTagId)
     for (const e of obj.events ?? []) {
       for (const action of e.actions) {
         if (action.type === 'writeTag') ids.add(action.tagId)

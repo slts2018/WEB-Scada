@@ -24,7 +24,7 @@ import {
 } from 'three'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
 import type { Object3DNode } from '@web-scada/core'
-import { loadModelObject } from '@/shared/three/modelLoader'
+import { disposeLoadedModelGraph, loadModelObject } from '@/shared/three/modelLoader'
 import {
   applyObject3DMaterial,
   clearObject3DMaterialMaps,
@@ -42,14 +42,7 @@ export interface ModelEditorPreview {
 
 function disposeTree(root: Object3D) {
   clearObject3DMaterialMaps(root)
-  root.traverse((o) => {
-    const mesh = o as Mesh
-    if (!mesh.isMesh) return
-    mesh.geometry?.dispose()
-    const mat = mesh.material
-    if (Array.isArray(mat)) mat.forEach((m) => m.dispose())
-    else mat?.dispose()
-  })
+  disposeLoadedModelGraph(root)
 }
 
 function createPrimitive(node: Object3DNode): Object3D {

@@ -25,8 +25,8 @@ export function snapPanelRect(
     ? {
         x: snap(rect.x, grid),
         y: snap(rect.y, grid),
-        width: Math.max(1, snap(rect.width, grid) || grid),
-        height: Math.max(1, snap(rect.height, grid) || grid),
+        width: rect.width,
+        height: rect.height,
       }
     : rect
   return clampPanelItemRect(next, panelW, panelH, { width: 1, height: 1 })

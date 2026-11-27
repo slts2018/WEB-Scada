@@ -43,6 +43,11 @@ export interface CreateKonvaStageOptions {
 }
 
 const GRID = 20
+/** 设计端 2D 画布（含面板编辑）视图缩放下限：15% */
+export const MIN_STAGE_ZOOM = 0.15
+/** 设计端 2D 画布（含面板编辑）视图缩放上限：2000%。避免无穷放大拖垮画布。 */
+export const MAX_STAGE_ZOOM = 20
+
 
 function drawGrid(layer: Konva.Layer, width: number, height: number) {
   layer.destroyChildren()
@@ -215,7 +220,8 @@ export function createKonvaStage(
   const fitToView = () => {
     const cw = stage.width()
     const ch = stage.height()
-    const scale = Math.min(cw / pageWidth, ch / pageHeight) * 0.9
+    const raw = Math.min(cw / pageWidth, ch / pageHeight) * 0.9
+    const scale = Math.min(MAX_STAGE_ZOOM, Number.isFinite(raw) && raw > 0 ? raw : MIN_STAGE_ZOOM)
     stage.scale({ x: scale, y: scale })
     stage.position({
       x: (cw - pageWidth * scale) / 2,
@@ -226,7 +232,7 @@ export function createKonvaStage(
   }
 
   const setZoom = (scale: number, center?: { x: number; y: number }) => {
-    const clamped = Math.min(4, Math.max(0.15, scale))
+    const clamped = Math.min(MAX_STAGE_ZOOM, Math.max(MIN_STAGE_ZOOM, scale))
     const oldScale = stage.scaleX()
     const pointer = center ?? {
       x: stage.width() / 2,

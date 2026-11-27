@@ -358,7 +358,7 @@ const panelSummary = computed(() => {
         <template #title>
           <span class="collapse-title">
             3 · 跟镜头面板
-            <HelpTip content="始终朝向相机。双击场景中的面板也可打开编辑弹窗。" />
+            <HelpTip content="始终朝向相机。默认按世界尺寸钉在场景中，滚轮拉近拉远时与模型同步缩放。双击场景中的面板也可打开编辑弹窗。" />
           </span>
         </template>
         <p v-if="panelSummary" class="multi-hint">{{ panelSummary }}</p>
@@ -367,6 +367,19 @@ const panelSummary = computed(() => {
             编辑面板内容
           </el-button>
         </div>
+        <el-checkbox
+          :model-value="Boolean(obj.panel?.fixedScreenSize)"
+          :disabled="Boolean(obj.locked) || !obj.panel"
+          @update:model-value="
+            (v: boolean | string | number) => {
+              const panel = obj?.panel
+              if (!panel) return
+              patchPanel({ ...panel, fixedScreenSize: Boolean(v) })
+            }
+          "
+        >
+          固定屏幕大小（不随模型缩放）
+        </el-checkbox>
       </el-collapse-item>
 
       <el-collapse-item

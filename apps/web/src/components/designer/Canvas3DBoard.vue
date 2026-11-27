@@ -45,23 +45,70 @@ const tags = useTagStore()
 const sceneLoading = ref(false)
 const sceneLoadIndex = ref(0)
 const sceneLoadTotal = ref(0)
+const sceneLoadUniqueDone = ref(0)
+const sceneLoadUniqueTotal = ref(0)
 const sceneLoadName = ref('')
 const sceneLoadKind = ref('')
+const sceneLoadFile = ref('')
+const sceneLoadSettled = ref(false)
 let sceneLoadDepth = 0
 let sceneLoadUsesEventIndex = true
+let sceneLoadGen = 0
+const sceneLoadUniqueSeen = new Set<string>()
 
 const sceneLoadPercent = computed(() => {
+  if (sceneLoadSettled.value) return 100
+  const uniqueTotal = sceneLoadUniqueTotal.value
+  const uniqueDone = sceneLoadUniqueDone.value
+  // 有模型复用时，按「需要解析的模型种数」计百分比，避免 13/3398 显示 0%
+  if (uniqueTotal > 0) {
+    return Math.min(100, Math.round((uniqueDone / uniqueTotal) * 100))
+  }
   if (sceneLoadTotal.value <= 0) return 0
   return Math.min(100, Math.round((sceneLoadIndex.value / sceneLoadTotal.value) * 100))
 })
 
 const sceneLoadDetail = computed(() => {
+  if (sceneLoadSettled.value && sceneLoadTotal.value > 0) {
+    return `${sceneLoadTotal.value} 个对象已就位`
+  }
+  const uniqueTotal = sceneLoadUniqueTotal.value
+  const uniqueDone = sceneLoadUniqueDone.value
+  const file = sceneLoadFile.value
+  if (uniqueTotal > 0) {
+    const suffix = file ? `（${file}）` : ''
+    if (uniqueDone < uniqueTotal) return `已加载 ${uniqueDone}/${uniqueTotal} 种模型${suffix}`
+    if (sceneLoadTotal.value > 0 && sceneLoadIndex.value < sceneLoadTotal.value) {
+      return `已加载 ${uniqueTotal}/${uniqueTotal} 种模型，正在放置对象…`
+    }
+    return uniqueTotal > 0 ? `已加载 ${uniqueTotal}/${uniqueTotal} 种模型` : '正在准备场景…'
+  }
   if (!sceneLoadTotal.value) return '正在准备场景…'
-  const at = Math.min(sceneLoadTotal.value, sceneLoadIndex.value + (sceneLoading.value ? 1 : 0))
+  const at = Math.min(sceneLoadTotal.value, Math.max(sceneLoadIndex.value, 0))
   const name = sceneLoadName.value || '…'
   const kind = sceneLoadKind.value ? `（${sceneLoadKind.value}）` : ''
   return `${at}/${sceneLoadTotal.value} ${name}${kind}`
 })
+
+let appliedFlowToast: { close: () => void } | null = null
+function toastAppliedFlow(message: string) {
+  appliedFlowToast?.close()
+  appliedFlowToast = ElMessage.success({ message, duration: 2000, grouping: true })
+}
+
+/** 点选无流动的模型时，复制本次会话最近一次「确定」成功的流动配置；不弹对话框。 */
+function maybePaintLastFlow(targetId: string | null | undefined) {
+  if (!targetId) return
+  if (project.handMode3d) return
+  if (project.flowConfigOpen) return
+  const cfg = project.lastAppliedFlow
+  if (!cfg) return
+  const node = findObject3dDeep(props.page.objects, targetId)
+  if (!node?.modelResourceId) return
+  if ((node.animationLinks ?? []).some((l) => l.type === 'flow')) return
+  project.setObject3dFlow([targetId], { ...cfg })
+  toastAppliedFlow('已应用流动配置')
+}
 
 function countSceneObjects(nodes: Page3D['objects']) {
   let total = 0
@@ -71,46 +118,89 @@ function countSceneObjects(nodes: Page3D['objects']) {
   return total
 }
 
+function countUniqueModels(nodes: Page3D['objects']) {
+  const ids = new Set<string>()
+  walkObject3dTree(nodes, (obj) => {
+    const id = obj.modelResourceId?.trim()
+    if (id) ids.add(id)
+  })
+  return ids.size
+}
+
 function onSceneObjectLoad(event: SceneObjectLoadEvent) {
   sceneLoadName.value = event.name
   sceneLoadKind.value = event.kind
+  if (typeof event.uniqueTotal === 'number' && event.uniqueTotal > sceneLoadUniqueTotal.value) {
+    sceneLoadUniqueTotal.value = event.uniqueTotal
+  }
+  const evNode = findObject3dDeep(props.page.objects, event.id)
+  const evModelId = evNode?.modelResourceId?.trim()
+  if (evModelId) {
+    sceneLoadUniqueSeen.add(evModelId)
+    sceneLoadUniqueDone.value = sceneLoadUniqueSeen.size
+  } else if (typeof event.uniqueParsed === 'number') {
+    sceneLoadUniqueDone.value = Math.max(sceneLoadUniqueDone.value, event.uniqueParsed)
+  }
   if (sceneLoadUsesEventIndex) sceneLoadTotal.value = event.total
   if (event.phase === 'start') {
     if (sceneLoadUsesEventIndex) sceneLoadIndex.value = Math.max(0, event.index - 1)
+    const file = evModelId
+      ? project.document.resources.find((item) => item.id === evModelId)?.name
+      : ''
+    if (file) sceneLoadFile.value = file
     return
   }
   const index = sceneLoadUsesEventIndex ? event.index : sceneLoadIndex.value + 1
   const total = sceneLoadUsesEventIndex ? event.total : sceneLoadTotal.value
   sceneLoadIndex.value = index
-  const node = findObject3dDeep(props.page.objects, event.id)
-  const file = node?.modelResourceId
-    ? project.document.resources.find((item) => item.id === node.modelResourceId)?.name
+  const file = evModelId
+    ? project.document.resources.find((item) => item.id === evModelId)?.name
     : ''
+  if (file) sceneLoadFile.value = file
   const extra = file ? `${event.kind} · ${file}` : event.kind
   const line = `${index}/${total} ${event.name}（${extra}）`
   // 成功加载不再逐条写输出栏，避免切页刷屏；失败仍记录
   if (!event.ok) log.error(`加载失败 ${line}`, '三维')
 }
 
-function beginSceneLoad(total: number, title?: string, usesEventIndex = true) {
+function beginSceneLoad(
+  total: number,
+  title?: string,
+  usesEventIndex = true,
+  uniqueTotal = 0,
+) {
+  sceneLoadGen += 1
   sceneLoadDepth += 1
   sceneLoadUsesEventIndex = usesEventIndex
   sceneLoadIndex.value = 0
   sceneLoadTotal.value = total
+  sceneLoadUniqueSeen.clear()
+  sceneLoadUniqueDone.value = 0
+  sceneLoadUniqueTotal.value = uniqueTotal
   sceneLoadName.value = ''
   sceneLoadKind.value = ''
+  sceneLoadFile.value = ''
+  sceneLoadSettled.value = false
   sceneLoading.value = total > 0
-  // 进度蒙层已提示加载过程，不再向输出栏写「开始加载」以免切页刷屏
   void title
 }
 
-function endSceneLoad(total: number, title?: string) {
+async function endSceneLoad(total: number, title?: string) {
+  const gen = sceneLoadGen
   sceneLoadDepth = Math.max(0, sceneLoadDepth - 1)
-  if (sceneLoadDepth === 0) {
-    if (total > 0) sceneLoadIndex.value = total
-    sceneLoading.value = false
+  if (sceneLoadDepth !== 0) {
+    void title
+    return
   }
-  // 常规加载完成不写输出栏；失败已在 onSceneObjectLoad 记录
+  if (total > 0) sceneLoadIndex.value = total
+  if (sceneLoadUniqueTotal.value > 0) sceneLoadUniqueDone.value = sceneLoadUniqueTotal.value
+  sceneLoadSettled.value = true
+  sceneLoading.value = true
+  await nextTick()
+  await new Promise<void>((resolve) => window.setTimeout(resolve, 280))
+  if (gen !== sceneLoadGen || sceneLoadDepth !== 0) return
+  sceneLoading.value = false
+  sceneLoadSettled.value = false
   void title
 }
 const host = ref<HTMLDivElement | null>(null)
@@ -121,6 +211,16 @@ const ctxMenu = ref({ visible: false, placed: false, x: 0, y: 0, maxHeight: 0 })
 const batchSizeOpen = ref(false)
 let rightDown: { x: number; y: number } | null = null
 let bundle: Scene3DBundle | null = null
+/** 场景实例代次：卸载或重建后递增，丢弃进行中的 setPage/reload，避免对已销毁的 bundle 调 setGizmoMode */
+let sceneEpoch = 0
+let boardMounted = false
+let boardIniting = false
+let windowHooksOn = false
+
+function isBoardSceneLive(epoch: number): boolean {
+  return boardMounted && bundle != null && epoch === sceneEpoch
+}
+
 let removeTagListener: (() => void) | null = null
 let boxStart: { x: number; y: number; additive: boolean } | null = null
 let statusTimer: ReturnType<typeof setInterval> | null = null
@@ -247,6 +347,8 @@ function onBoardPointerUp(e: PointerEvent) {
     const dx = e.clientX - start.x
     const dy = e.clientY - start.y
     if (dx * dx + dy * dy >= 25) return
+    // 手掌模式：右键只旋转视角，不选中、不弹菜单
+    if (project.handMode3d) return
     openCtxMenu(e)
     return
   }
@@ -457,20 +559,26 @@ function onMarqueeUp(e: PointerEvent) {
 
 async function reload() {
   if (!bundle) return
+  const epoch = sceneEpoch
   const total = countSceneObjects(props.page.objects)
+  const uniqueTotal = countUniqueModels(props.page.objects)
   const pageName = props.page.name || '未命名'
   beginSceneLoad(
     total,
     total > 0 ? `开始加载三维页面「${pageName}」，共 ${total} 个对象` : undefined,
+    true,
+    uniqueTotal,
   )
   try {
     await bundle.setPage(props.page, (id) => project.getResourceUrl(id), onSceneObjectLoad)
   } finally {
-    endSceneLoad(
+    await endSceneLoad(
       total,
       total > 0 ? `三维页面「${pageName}」加载完成，共 ${total} 个对象` : undefined,
     )
   }
+  // setPage 期间组件可能被卸载/重建（例如大批量选中触发重挂），此时 bundle 已是 null
+  if (!isBoardSceneLive(epoch) || bundle == null) return
   syncSelectionGizmo()
   bundle.setGizmoMode(gizmoMode.value)
   if (project.previewLive) applyPreview()
@@ -490,6 +598,7 @@ let sceneSyncing = false
 let sceneSyncQueued = false
 async function syncSceneFromPage() {
   if (!bundle) return
+  const epoch = sceneEpoch
   if (sceneSyncing) {
     sceneSyncQueued = true
     return
@@ -498,6 +607,7 @@ async function syncSceneFromPage() {
   try {
     do {
       sceneSyncQueued = false
+      if (!isBoardSceneLive(epoch) || bundle == null) return
       const resolveUrl = (id: string) => project.getResourceUrl(id)
       const desired = new Set<string>()
       walkObject3dTree(props.page.objects, (obj) => {
@@ -516,27 +626,31 @@ async function syncSceneFromPage() {
         }
       })
       const mountTotal = toMount.length
+      const mountUnique = countUniqueModels(toMount.map((item) => item.node))
       if (mountTotal > 0) {
         beginSceneLoad(
           mountTotal,
           mountTotal > 1 ? `开始加载 ${mountTotal} 个三维对象` : undefined,
           false,
+          mountUnique,
         )
       }
       try {
         for (const item of toMount) {
+          if (!isBoardSceneLive(epoch) || bundle == null) return
           if (bundle.getObject3D(item.node.id)) continue
           await bundle.mountObject(item.node, resolveUrl, item.parentId, onSceneObjectLoad)
         }
       } finally {
         if (mountTotal > 0) {
-          endSceneLoad(
+          await endSceneLoad(
             mountTotal,
             mountTotal > 1 ? `三维对象加载完成，共 ${mountTotal} 个` : undefined,
           )
         }
       }
 
+      if (!isBoardSceneLive(epoch) || bundle == null) return
       bundle.pruneDuplicateRoots(desired)
 
       walkObject3dTree(props.page.objects, (obj, parent) => {
@@ -566,7 +680,10 @@ async function syncSceneFromPage() {
 
       syncSelectionGizmo()
       bundle.setGizmoMode(gizmoMode.value)
-      if (project.previewLive) applyPreview()
+      if (project.previewLive) {
+        syncPreviewSubscription()
+        applyPreview()
+      }
 
       if (project.frameAfter3dTreeReload) {
         project.frameAfter3dTreeReload = false
@@ -685,9 +802,22 @@ function applyPreview() {
   syncPreviewBlinkLoop()
 }
 
+let lastPreviewSubKey = ''
+
+/** 预览已打开时，流动/液位改了 tag 也要更新订阅；否则新变量没有值，箭头会停在 0 */
+function syncPreviewSubscription() {
+  if (!project.previewLive) return
+  const ids = collectPage3DTagIds(props.page)
+  const key = [...ids].sort().join(',')
+  if (key === lastPreviewSubKey) return
+  lastPreviewSubKey = key
+  tags.setPageSubscription(ids)
+}
+
 function startPreview() {
   bundle?.setFlowPlayback(true)
-  tags.setPageSubscription(collectPage3DTagIds(props.page))
+  lastPreviewSubKey = ''
+  syncPreviewSubscription()
   tags.connectRealtime()
   removeTagListener?.()
   removeTagListener = tags.addListener(() => applyPreview())
@@ -698,8 +828,20 @@ function stopPreview() {
   removeTagListener?.()
   removeTagListener = null
   clearPreviewBlink()
+  lastPreviewSubKey = ''
+  tags.clearPageSubscription()
   bundle?.setFlowPlayback(false)
-  void reload()
+  // 只停订阅/实时刷新并恢复设计态外观，不要 bundle.setPage 整页重载模型
+  if (!bundle) return
+  walkObject3dTree(props.page.objects, (obj) => {
+    bundle!.applyVisual(obj.id, obj)
+    if (obj.panel) {
+      bundle!.setPanelValues(
+        obj.id,
+        panelValuesFromTags(obj, (id) => tags.getValue(id)?.value),
+      )
+    }
+  })
 }
 
 function captureDefaultCamera() {
@@ -923,9 +1065,28 @@ function onKeyDown(e: KeyboardEvent) {
 
 let skipSelectedVisualUntil = 0
 
-onMounted(async () => {
-  if (!host.value) return
+function installBoardWindowHooks() {
+  if (windowHooksOn) return
+  windowHooksOn = true
+  installPointerModifierTracker()
+  window.addEventListener('keydown', onKeyDown, true)
+  window.addEventListener('pointerdown', onWindowPointerDown)
+  if (!statusTimer) statusTimer = setInterval(() => refreshGizmoStatus(), 400)
+}
+
+async function initScene3D(retried = false) {
+  if (!boardMounted || !host.value || boardIniting) return
+  boardIniting = true
+  const epoch = ++sceneEpoch
   try {
+    if (bundle) {
+      try {
+        bundle.dispose()
+      } catch {
+        /* ignore */
+      }
+      bundle = null
+    }
     bundle = createScene3D(
       host.value,
       {
@@ -936,6 +1097,9 @@ onMounted(async () => {
             if (meta?.ids) {
               project.setObject3dSelection(meta.ids, id ?? undefined)
               syncSelectionGizmo()
+              if (!additive && meta.ids.length === 1) {
+                maybePaintLastFlow(meta.leafId ?? id)
+              }
               return
             }
             if (additive) {
@@ -1000,23 +1164,37 @@ onMounted(async () => {
       { enableGizmo: true, enableLabels: false },
     )
     await reload()
+    if (!isBoardSceneLive(epoch) || bundle == null) return
     if (project.handMode3d) bundle.setHandMode(true)
     labelsOn.value = bundle.getLabelsVisible()
-    installPointerModifierTracker()
+    installBoardWindowHooks()
     if (project.previewLive) startPreview()
-    window.addEventListener('keydown', onKeyDown, true)
-    window.addEventListener('pointerdown', onWindowPointerDown)
-    statusTimer = setInterval(() => refreshGizmoStatus(), 400)
   } catch (err) {
+    if (!boardMounted || epoch !== sceneEpoch) return
     console.error('[Canvas3DBoard] init failed', err)
-    ElMessage.error('3D 场景初始化失败，请刷新页面重试')
     try {
       bundle?.dispose()
     } catch {
       /* ignore */
     }
     bundle = null
+    if (!retried && boardMounted && host.value) {
+      await nextTick()
+      if (boardMounted && host.value && !bundle) {
+        boardIniting = false
+        await initScene3D(true)
+        return
+      }
+    }
+    ElMessage.error('3D 场景初始化失败，请刷新页面重试')
+  } finally {
+    boardIniting = false
   }
+}
+
+onMounted(() => {
+  boardMounted = true
+  void initScene3D(false)
 })
 
 watch(
@@ -1147,7 +1325,11 @@ watch(
 )
 
 onUnmounted(() => {
+  boardMounted = false
+  sceneEpoch += 1
+  boardIniting = false
   if (statusTimer) { clearInterval(statusTimer); statusTimer = null }
+  windowHooksOn = false
   clearPreviewBlink()
   window.removeEventListener('keydown', onKeyDown, true)
   window.removeEventListener('pointerdown', onWindowPointerDown)

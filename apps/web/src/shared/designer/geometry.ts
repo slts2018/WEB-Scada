@@ -16,8 +16,21 @@ export function snapTransform(
     ...transform,
     x: snap(transform.x, grid),
     y: snap(transform.y, grid),
-    width: Math.max(grid, snap(transform.width, grid)),
-    height: transform.height === 0 ? 0 : Math.max(0, snap(transform.height, grid)),
+    width: Math.max(1, snap(transform.width, grid) || 1),
+    // 线段可保持高度 0；其它图元不要把 1~9px 的高度吸成 0
+    height: transform.height === 0 ? 0 : Math.max(1, snap(transform.height, grid) || 1),
+  }
+}
+
+/** 只吸附位置，不改宽高。多选平移应保持相对间距，由调用方统一位移后再吸附。 */
+export function snapPositionOnly(
+  transform: Widget2D['transform'],
+  grid = GRID,
+): Widget2D['transform'] {
+  return {
+    ...transform,
+    x: snap(transform.x, grid),
+    y: snap(transform.y, grid),
   }
 }
 

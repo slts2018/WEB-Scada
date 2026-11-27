@@ -95,6 +95,15 @@ export interface Object3DPanel {
    * - fill：拉伸铺满
    */
   objectFit?: 'none' | 'contain' | 'cover' | 'fill'
+  /**
+   * 为 true 时面板保持固定屏幕像素大小（不随模型拉近拉远）。
+   * 缺省或 false：按世界尺寸钉在场景中，滚轮推轨时与模型同步缩放，仍朝向镜头。
+   */
+  fixedScreenSize?: boolean
+  /**
+   * @deprecated 已废弃。请用 fixedScreenSize。旧稿中的 true/false 不再改变默认世界尺寸行为。
+   */
+  scaleWithDistance?: boolean
   /** 面板背景图（工程资源 id，kind=image|svg）；缺省为纯色底 */
   backgroundResourceId?: string
   /**
@@ -188,6 +197,11 @@ export interface Object3DLiquidLevel {
   shape: 'cylinder' | 'box'
   /** 相对罐体内壁的内缩比例 0~0.25 */
   inset: number
+  /**
+   * 添加液位前罐壁的不透明度（0~1）。删除液位时还原该值。
+   * 未自定义罐壁透明度时记为 1。旧数据缺此字段时，删除按 1 还原。
+   */
+  shellOpacityBefore?: number
 }
 
 /** 3D 场景对象 */

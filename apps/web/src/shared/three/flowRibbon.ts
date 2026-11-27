@@ -89,6 +89,8 @@ function createMaterial(sharedTime: { value: number }): ShaderMaterial {
       void main() {
         if ( uEnabled < 0.5 ) discard;
         float u = fract( vUv.x * uRepeat - uTime * uPhaseSpeed );
+        // uPhaseSpeed 已含 speed*factor 的符号：为负时把箭头尖翻到实际运动方向
+        if ( uPhaseSpeed < 0.0 ) u = fract( 1.0 - u );
         float t = u / max( 1e-4, uHeadRatio );
         if ( t > 1.0 ) discard;
         float v = abs( vUv.y - 0.5 ) * 2.0;

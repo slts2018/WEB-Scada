@@ -34,6 +34,9 @@ const objects3d = computed(() => {
 
 const is3d = computed(() => project.activePage?.type === '3d')
 
+/** O(1) 判断选中，避免 1000+ 行对 selectedObject3dIds.includes 做线性扫描 */
+const selected3dSet = computed(() => new Set(project.selectedObject3dIds))
+
 type Flat3dRow = { obj: Object3DNode; depth: number }
 
 const flat3dRows = computed((): Flat3dRow[] => {
@@ -244,7 +247,7 @@ function isHidden3d(o: Object3DNode) {
           v-for="{ obj: o, depth } in flat3dRows"
           :key="o.id"
           :class="{
-            active: project.selectedObject3dIds.includes(o.id),
+            active: selected3dSet.has(o.id),
             readonly,
             hidden: isHidden3d(o),
             locked: o.locked,

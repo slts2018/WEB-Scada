@@ -100,12 +100,13 @@ function apply() {
     project.setObject3dShellOpacity(obj.value.liquid!.tankId, shellOpacity.value)
     return
   }
-  const node = project.addLiquidLevel(obj.value.id, opts())
+  const tankId = obj.value.id
+  const node = project.addLiquidLevel(tankId, opts())
   if (!node) {
     ElMessage.warning('无法添加液位层（请先选择变量）')
     return
   }
-  project.setObject3dShellOpacity(obj.value.id, shellOpacity.value)
+  project.setObject3dShellOpacity(tankId, shellOpacity.value)
 }
 
 async function removeLiquid() {

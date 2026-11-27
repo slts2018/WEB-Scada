@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import {
   createWidget2D,
   isDrawToolType,
+  isObject3dPanelPage,
   normalizePolyPoints,
   trendCurves,
   type BuiltinWidgetType,
@@ -13,7 +14,6 @@ import Konva from 'konva'
 import { createKonvaStage, type KonvaStageBundle } from '@/shared/konva/createKonvaStage'
 import {
   createWidgetNode,
-  growTextFrame,
   readTransformFromNode,
   syncWidgetNode,
 } from '@/shared/konva/widgetNodes'
@@ -22,7 +22,15 @@ import { materialSrc, readMaterialDrop } from '@/shared/library/materials'
 import { useProjectStore } from '@/stores/project'
 import { useTagStore } from '@/stores/tag'
 import { collectPageTagIds, resolveWidgetVisual } from '@/shared/runtime/bindingEngine'
-import { rectsIntersect, snapTransform, snapWithGuides } from '@/shared/designer/geometry'
+import {
+  GRID,
+  rectsIntersect,
+  snap,
+  snapPositionOnly,
+  snapTransform,
+  snapWithGuides,
+} from '@/shared/designer/geometry'
+import { PANEL_EDITOR_GRID } from '@/shared/designer/panelEditorToolbar'
 import {
   installPointerModifierTracker,
   isAdditivePointer,
@@ -72,6 +80,13 @@ let boxStart: { x: number; y: number } | null = null
 let boxAdditive = false
 let dragHistoryPushed = false
 let dragOrigin: Record<string, { x: number; y: number }> = {}
+/**
+ * 正在拖动或变换图元：新位置尚未写入文档。
+ * 此时若按 layers 的旧数据重建节点，元素会闪回原位。
+ */
+let layoutInteracting = false
+/** 松手提交时区分平移 / 缩放旋转：平移不得改宽高，也不得把多选各自吸到同一格 */
+let lastLayoutKind: 'drag' | 'transform' | null = null
 /** 多选后再点其中一个：移动超过阈值则整组拖动，否则松手收成单选 */
 let pendingSolo: { id: string; x: number; y: number } | null = null
 /** 绘制中的页面坐标点列 */
@@ -329,14 +344,13 @@ function clearWidgetNodes() {
   bundle.widgetLayer.getChildren((node) => node.name() === 'widget').forEach((n) => n.destroy())
 }
 
+function activeSnapGrid() {
+  return isObject3dPanelPage(props.page) ? PANEL_EDITOR_GRID : GRID
+}
+
 function renderAllWidgets() {
-  if (!bundle) return
-  for (const layer of props.page.layers) {
-    for (const widget of layer.widgets) {
-      const next = growTextFrame(widget)
-      if (next) project.updateWidget(widget.id, { transform: next }, { recordHistory: false })
-    }
-  }
+  if (!bundle || layoutInteracting) return
+  // 不再在重绘时 growTextFrame 写回宽高：全选平移也会触发重建，标题高度会被改掉
   syncingFromModel = true
   clearWidgetNodes()
   for (const layer of props.page.layers) {
@@ -491,6 +505,8 @@ function applyDesignerPreview() {
       const resolved = resolveWidgetVisual(widget, (id) => tags.getValue(id))
       const node = bundle.widgetLayer.findOne(`#${widget.id}`) as Konva.Group | null
       if (!node) continue
+      // 拖布局时不要用设计稿/动画位置覆盖尚未提交的拖动位移
+      if (layoutInteracting || node.isDragging()) continue
       if (resolved.widget.visible === false) {
         node.visible(false)
         continue
@@ -623,8 +639,9 @@ function addDrawPoint(pt: { x: number; y: number }) {
     return
   }
   lastDrawClickAt = now
-  const x = project.snapEnabled ? Math.round(pt.x / 20) * 20 : pt.x
-  const y = project.snapEnabled ? Math.round(pt.y / 20) * 20 : pt.y
+  const grid = activeSnapGrid()
+  const x = project.snapEnabled ? snap(pt.x, grid) : pt.x
+  const y = project.snapEnabled ? snap(pt.y, grid) : pt.y
   drawPoints.push(x, y)
   updateDrawPreview({ x, y })
 }
@@ -657,6 +674,9 @@ function syncVertexHandles(widget: Widget2D | null) {
     })
     handle.on('mousedown', (e) => {
       e.cancelBubble = true
+    })
+    handle.on('dragstart', () => {
+      layoutInteracting = true
     })
     handle.on('dragmove', () => {
       const abs: number[] = []
@@ -708,6 +728,7 @@ function syncVertexHandles(widget: Widget2D | null) {
         },
         props: { points: norm.points },
       })
+      layoutInteracting = false
     })
     vertexLayer.add(handle)
   }
@@ -787,6 +808,8 @@ function bindWidgetEvents(group: Konva.Group) {
     }
     dragHistoryPushed = false
     dragOrigin = {}
+    layoutInteracting = true
+    lastLayoutKind = 'drag'
     for (const sid of project.selectedWidgetIds) {
       const w = project.getActiveWidgets().find((item) => item.id === sid)
       if (w) dragOrigin[sid] = { x: w.transform.x, y: w.transform.y }
@@ -819,6 +842,7 @@ function bindWidgetEvents(group: Konva.Group) {
 
     const snapped = snapWithGuides(moving, others, {
       snapGrid: project.snapEnabled,
+      grid: activeSnapGrid(),
     })
     group.position({ x: snapped.x, y: snapped.y })
     bundle.showGuides(snapped.guides)
@@ -844,14 +868,18 @@ function bindWidgetEvents(group: Konva.Group) {
   })
 
   group.on('dragend', () => {
-    if (syncingFromModel) return
-    bundle?.clearGuides()
-    commitSelectionTransforms()
+    if (!syncingFromModel) {
+      bundle?.clearGuides()
+      commitSelectionTransforms()
+    }
+    layoutInteracting = false
   })
 
   group.on('transformstart', () => {
     if (syncingFromModel) return
     dragHistoryPushed = false
+    layoutInteracting = true
+    lastLayoutKind = 'transform'
   })
 
   group.on('transform', () => {
@@ -861,9 +889,11 @@ function bindWidgetEvents(group: Konva.Group) {
   })
 
   group.on('transformend', () => {
-    if (syncingFromModel) return
-    commitSelectionTransforms()
-    syncHistoryBars()
+    if (!syncingFromModel) {
+      commitSelectionTransforms()
+      syncHistoryBars()
+    }
+    layoutInteracting = false
   })
 }
 
@@ -877,13 +907,24 @@ function commitSelectionTransforms() {
         .filter(Boolean)
 
   const patches: Record<string, Widget2D['transform']> = {}
+  const grid = activeSnapGrid()
+  const moveOnly = lastLayoutKind === 'drag'
   for (const node of targets) {
     if (!node) continue
     const id = String(node.getAttr('widgetId'))
-    let transform = readTransformFromNode(node)
-    if (project.snapEnabled) transform = snapTransform(transform)
     const widget = project.getActiveWidgets().find((w) => w.id === id)
     if (!widget) continue
+    let transform: Widget2D['transform']
+    if (moveOnly) {
+      // 平移：只改 x/y，保留原宽高。多选已在 dragmove 里按主项统一位移，松手不再各自吸格。
+      transform = { ...widget.transform, x: node.x(), y: node.y() }
+      if (project.snapEnabled && targets.length === 1) {
+        transform = snapPositionOnly(transform, grid)
+      }
+    } else {
+      transform = readTransformFromNode(node)
+      if (project.snapEnabled) transform = snapTransform(transform, grid)
+    }
     syncWidgetNode(node, { ...widget, transform })
     patches[id] = transform
   }
@@ -1097,10 +1138,11 @@ function onDrop(e: DragEvent) {
   const variant = e.dataTransfer?.getData(ECHART_DND)
   if (variant) {
     const preset = findEchartPreset(variant)
+    if (!preset) return
     project.addWidget(
       'echart',
       { x: pt.x - 210, y: pt.y - 140 },
-      { name: preset?.label ?? '图表', props: { variant } },
+      { name: preset.label, props: { variant } },
     )
     return
   }
@@ -1280,6 +1322,7 @@ watch(
       props.backgroundImageUrl ?? '',
     ] as const,
   () => {
+    if (layoutInteracting) return
     syncBackgroundImage()
     renderAllWidgets()
     paintRulers()
@@ -1288,7 +1331,11 @@ watch(
 
 watch(
   () => props.page.layers,
-  () => renderAllWidgets(),
+  () => {
+    // 拖动过程只改 Konva 坐标，文档仍是旧位置；此时重建会把图元弹回原处
+    if (layoutInteracting) return
+    renderAllWidgets()
+  },
   { deep: true },
 )
 
@@ -1420,6 +1467,9 @@ defineExpose({ fitView, zoomBy, zoomExact, toggleHand, handMode })
             <el-dropdown-item :command="100">100%</el-dropdown-item>
             <el-dropdown-item :command="150">150%</el-dropdown-item>
             <el-dropdown-item :command="200">200%</el-dropdown-item>
+            <el-dropdown-item :command="400">400%</el-dropdown-item>
+            <el-dropdown-item :command="1000">1000%</el-dropdown-item>
+            <el-dropdown-item :command="2000">2000%</el-dropdown-item>
           </el-dropdown-menu>
         </template>
       </el-dropdown>

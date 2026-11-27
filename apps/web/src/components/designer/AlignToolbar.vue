@@ -138,16 +138,17 @@ async function saveSymbol() {
     <el-button-group>
       <el-button
         size="small"
-        title="水平分布"
+        title="横向等距（两端不动，中间均分；至少 3 个）"
         :disabled="!canDistribute()"
         :icon="DArrowRight"
         @click="align('distributeH')"
       />
       <el-button
         size="small"
-        title="垂直分布"
+        title="纵向等距（两端不动，中间均分；至少 3 个）"
         :disabled="!canDistribute()"
-        :icon="SortUp"
+        :icon="DArrowRight"
+        class="icon-rotate-90"
         @click="align('distributeV')"
       />
     </el-button-group>

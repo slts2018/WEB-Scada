@@ -4,15 +4,9 @@ import {
   TREND_MAX_CURVES,
   trendCurveColor,
   trendCurves,
-  CHART_SLICE_MAX,
-  BAR_WIDTH_DEFAULT,
-  BAR_WIDTH_MIN,
-  BAR_WIDTH_MAX,
-  barWidthOf,
-  chartSlices,
-  type ChartSlice,
   type Page3D,
   type TrendCurve,
+  isRetiredBuiltinWidgetType,
 } from '@web-scada/core'
 import {
   ALARM_FIELDS,
@@ -23,12 +17,13 @@ import {
   type AlarmHistoryFieldId,
 } from '@/shared/runtime/alarmText'
 import HelpTip from '@/components/designer/HelpTip.vue'
-import { TREND_INTERVALS, TREND_RANGES, releaseTrendHistory } from '@/shared/runtime/trendHistoryQuery'
+import TrendRangeControl from '@/components/runtime/TrendRangeControl.vue'
+import { TREND_INTERVALS, releaseTrendHistory, resolveEchartEnterRange } from '@/shared/runtime/trendHistoryQuery'
 import { clearCurveSamples } from '@/shared/runtime/trendSeries'
 import { exportTrendWidgetImage, measureTextFrame } from '@/shared/konva/widgetNodes'
 import { useProjectStore } from '@/stores/project'
 import { useTagStore } from '@/stores/tag'
-import { findEchartPreset } from '@/shared/echart/catalog'
+import { echartPresetLabel } from '@/shared/echart/catalog'
 import {
   blankEchartItem,
   defaultEchartItems,
@@ -68,13 +63,12 @@ watch(
 const contentSummary = computed(() => {
   const current = widget.value
   if (!current) return ''
-  if (current.type === 'trend' || current.type === 'trendHistory') {
+  if (isRetiredBuiltinWidgetType(current.type)) {
+    return '此内置图元类型已从产品中移除，请改用 ECharts 图表'
+  }
+  if (current.type === 'trendHistory') {
     const n = trendCurves(current.props).filter((c) => c.tagId).length
     return n ? `已配置 ${n} 条曲线` : '未添加曲线变量'
-  }
-  if (current.type === 'pie' || current.type === 'bar') {
-    const n = chartSlices(current.props).length
-    return n ? `已配置 ${n} 项` : '未添加数据'
   }
   if (current.type === 'echart') {
     const items = echartItems(current.props)
@@ -236,64 +230,11 @@ function removeTrendCurve(tagId: string) {
   writeTrendCurves(trendCurveList.value.filter((curve) => curve.tagId !== tagId))
 }
 
-const sliceList = computed(() => chartSlices(widget.value?.props))
-
-function writeSlices(next: ChartSlice[]) {
-  if (!widget.value) return
-  project.updateWidget(widget.value.id, {
-    props: {
-      ...widget.value.props,
-      slices: next.slice(0, CHART_SLICE_MAX).map((slice) => ({
-        label: slice.label,
-        value: Number.isFinite(slice.value) ? slice.value : 0,
-        ...(slice.color ? { color: slice.color } : {}),
-        ...(slice.tagId ? { tagId: slice.tagId } : {}),
-      })),
-    },
-  })
-}
-
-function addSlice() {
-  const list = sliceList.value
-  if (list.length >= CHART_SLICE_MAX) {
-    ElMessage.warning(`最多 ${CHART_SLICE_MAX} 项`)
-    return
-  }
-  writeSlices([...list, { label: '', value: 0, color: trendCurveColor(list.length) }])
-}
-
-function patchSlice(index: number, patch: Partial<ChartSlice>) {
-  writeSlices(sliceList.value.map((slice, i) => (i === index ? { ...slice, ...patch } : slice)))
-}
-
-/** 默认示例名（一、项1）。选了变量后用变量名换掉，手改过的图例名保留。 */
-function isPlaceholderSliceLabel(label: string): boolean {
-  return !label.trim() || /^(项\d+|[一二三四五六七八])$/.test(label.trim())
-}
-
-function setSliceTag(index: number, tagId: string) {
-  const slice = sliceList.value[index]
-  if (!slice) return
-  if (!tagId) {
-    patchSlice(index, { tagId: undefined })
-    return
-  }
-  const prev = slice.tagId ? tags.list.find((item) => item.meta.tagId === slice.tagId) : undefined
-  const next = tags.list.find((item) => item.meta.tagId === tagId)
-  const n = Number(next?.value?.value)
-  const keepLabel = !isPlaceholderSliceLabel(slice.label) && slice.label !== prev?.meta.name
-  patchSlice(index, {
-    tagId,
-    label: keepLabel ? slice.label : (next?.meta.name ?? slice.label),
-    value: Number.isFinite(n) ? n : 0,
-  })
-}
-
-function removeSlice(index: number) {
-  writeSlices(sliceList.value.filter((_, i) => i !== index))
-}
-
 const echartVariant = computed(() => String(widget.value?.props.variant || 'line-basic'))
+const echartUsesTimeRange = computed(() => {
+  const variant = echartVariant.value
+  return variant.startsWith('line') || variant.startsWith('area')
+})
 const echartKind = computed(() => echartContentKind(echartVariant.value))
 const echartHasAxis = computed(() =>
   echartKind.value === 'category' || echartKind.value === 'multi' || echartKind.value === 'scatter' || echartKind.value === 'heatmap',
@@ -304,6 +245,14 @@ const echartRows = computed(() => {
   if (echartKind.value === 'category' || echartKind.value === 'multi') return [blankEchartItem(echartKind.value, 0)]
   return defaultEchartItems(echartVariant.value)
 })
+
+/** 未写 props.range 时，按绑定量最短扫描周期显示进页窗口，不回退到 15 分钟 */
+const echartEffectiveRange = computed(() =>
+  resolveEchartEnterRange(
+    widget.value?.props.range,
+    echartRows.value.map((row) => tags.metas.find((meta) => meta.tagId === row.tagId)?.scanPeriodMs),
+  ),
+)
 
 function cleanEchartItem(item: EchartItem): EchartItem {
   const next: EchartItem = { label: item.label, value: Number.isFinite(item.value) ? item.value : 0 }
@@ -529,6 +478,24 @@ async function replaceImage(e: Event) {
         <el-button size="small" @click="project.setSelectedFlags('locked', false)">解锁</el-button>
         <el-button size="small" @click="project.setSelectedFlags('visible', true)">显示</el-button>
         <el-button size="small" @click="project.setSelectedFlags('visible', false)">隐藏</el-button>
+      </div>
+      <div class="batch-row">
+        <el-button
+          size="small"
+          :disabled="multiCount < 3"
+          title="两端不动，中间按间距均分；至少选 3 个"
+          @click="project.alignSelected('distributeH')"
+        >
+          横向等距
+        </el-button>
+        <el-button
+          size="small"
+          :disabled="multiCount < 3"
+          title="两端不动，中间按间距均分；至少选 3 个"
+          @click="project.alignSelected('distributeV')"
+        >
+          纵向等距
+        </el-button>
       </div>
       <div class="batch-row">
         <el-button size="small" @click="project.duplicateWidgets(project.selectedWidgetIds)">
@@ -841,8 +808,15 @@ async function replaceImage(e: Event) {
             </el-form-item>
           </template>
 
-          <template v-if="widget.type === 'chart' || widget.type === 'trend' || widget.type === 'trendHistory'">
-            <section v-if="widget.type === 'trend' || widget.type === 'trendHistory'" class="config-block">
+          <template v-if="isRetiredBuiltinWidgetType(widget.type)">
+            <section class="config-block">
+              <div class="section-title">此图元类型已移除</div>
+              <p class="retired-note">内置实时趋势、饼图和柱状图已从产品中移除，不能再作为独立图元使用。请改用图元库里的 ECharts 图表。历史趋势仍可使用。</p>
+            </section>
+          </template>
+
+          <template v-if="widget.type === 'chart' || widget.type === 'trendHistory'">
+            <section v-if="widget.type === 'trendHistory'" class="config-block">
               <div class="section-title">
                 曲线变量（最多 {{ TREND_MAX_CURVES }} 条）
                 <HelpTip content="最多 8 条。每条选变量、颜色和图例名。没加变量时显示示例数据；添加后由动画连接 / 属性绑定提供实时值。历史曲线绑上变量后按时间范围读历史。每条曲线按自身数据自动缩放；可点图例、滚轮缩放、悬停读数。" />
@@ -916,7 +890,7 @@ async function replaceImage(e: Event) {
                 "
               />
             </div>
-            <el-form-item v-if="widget.type === 'trend' || widget.type === 'trendHistory'" label-width="108px">
+            <el-form-item v-if="widget.type === 'trendHistory'" label-width="108px">
               <template #label>
                 图表字号
                 <HelpTip content="留空按图元短边自动算，大约 14～22px。填写后刻度和图例用这个字号。" />
@@ -931,7 +905,7 @@ async function replaceImage(e: Event) {
               />
             </el-form-item>
 
-            <el-form-item v-if="widget.type === 'trend' || widget.type === 'trendHistory'" label-width="108px">
+            <el-form-item v-if="widget.type === 'trendHistory'" label-width="108px">
               <template #label>
                 堆叠
                 <HelpTip content="把几条曲线的值加在一起画。液位、压力这种各看各的量不要勾。" />
@@ -959,15 +933,12 @@ async function replaceImage(e: Event) {
             <el-form-item v-if="widget.type === 'trendHistory'" label-width="108px">
               <template #label>
                 时间范围
-                <HelpTip content="打开后默认查的时间段。运行端工具栏改过的只在当次有效，不写回工程。" />
+                <HelpTip content="打开后默认查的时间段。可填数字并选秒 / 分钟 / 小时 / 天。运行端工具栏改过的只在当次有效，不写回工程。" />
               </template>
-              <el-select
-                class="w-select"
+              <TrendRangeControl
                 :model-value="String(widget.props.range ?? '-1h')"
                 @update:model-value="(v: string) => updateProp('range', v)"
-              >
-                <el-option v-for="item in TREND_RANGES" :key="item.id" :label="item.label" :value="item.id" />
-              </el-select>
+              />
             </el-form-item>
             <el-form-item v-if="widget.type === 'trendHistory'" label-width="108px">
               <template #label>
@@ -1044,7 +1015,7 @@ async function replaceImage(e: Event) {
               </div>
             </el-form-item>
 
-            <el-form-item v-if="widget.type === 'trend' || widget.type === 'trendHistory'" label-width="108px">
+            <el-form-item v-if="widget.type === 'trendHistory'" label-width="108px">
               <template #label>
                 点数
                 <HelpTip
@@ -1070,7 +1041,7 @@ async function replaceImage(e: Event) {
           <template v-if="widget.type === 'echart'">
             <section class="config-block">
               <div class="section-title">
-                {{ findEchartPreset(echartVariant)?.label ?? '图表' }}
+                {{ echartPresetLabel(echartVariant) ?? '图表' }}
                 <HelpTip :content="echartContentHint(echartKind, echartVariant)" />
               </div>
               <el-form-item v-if="echartKind !== 'gauge'" label="标题">
@@ -1078,6 +1049,16 @@ async function replaceImage(e: Event) {
                   class="w-title"
                   :model-value="String(widget.props.title ?? '')"
                   @update:model-value="(v: string) => writeEchartTitle(v)"
+                />
+              </el-form-item>
+              <el-form-item v-if="echartUsesTimeRange" label-width="108px">
+                <template #label>
+                  时间范围
+                  <HelpTip content="未单独指定时，按图上变量里最短的扫描周期估一段能放下约 60～120 个点的窗口（例如 50 毫秒约 3～6 秒，1 秒约 1～2 分钟）。填了数字和单位就按你填的查。画面上同时受保留点数限制。" />
+                </template>
+                <TrendRangeControl
+                  :model-value="echartEffectiveRange"
+                  @update:model-value="(v: string) => updateProp('range', v)"
                 />
               </el-form-item>
               <el-form-item v-if="echartHasAxis" label="轴字号">
@@ -1213,80 +1194,6 @@ async function replaceImage(e: Event) {
                   <el-button :disabled="echartRows.length >= echartItemMax(echartKind)" @click="addEchartItem">加一项</el-button>
                 </div>
               </div>
-            </section>
-          </template>
-
-          <template v-if="widget.type === 'pie' || widget.type === 'bar'">
-            <section class="config-block">
-              <div class="section-title">
-                {{ widget.type === 'pie' ? '扇区' : '柱子' }}（最多 {{ CHART_SLICE_MAX }} 项）
-                <HelpTip content="每项选一个变量。图例名默认用变量名，可以改。运行和实时预览用变量当前值，小数位跟变量走。负数不占扇区，柱高也按 0 画。" />
-              </div>
-              <div class="curve-list">
-                <div v-for="(slice, i) in sliceList" :key="i" class="curve-block">
-                  <div class="curve-row">
-                    <el-select
-                      class="w-tag"
-                      filterable
-                      clearable
-                      placeholder="选择变量"
-                      :model-value="slice.tagId || ''"
-                      @update:model-value="(v: string) => setSliceTag(i, v)"
-                    >
-                      <el-option
-                        v-for="item in tags.list"
-                        :key="item.meta.tagId"
-                        :label="formatTagOptionLabel(item.meta)"
-                        :value="item.meta.tagId"
-                      />
-                    </el-select>
-                    <el-color-picker
-                      :model-value="slice.color || trendCurveColor(i)"
-                      @update:model-value="(v: string | null) => patchSlice(i, { color: v || trendCurveColor(i) })"
-                    />
-                    <el-input
-                      class="w-legend"
-                      placeholder="图例名"
-                      :model-value="slice.label"
-                      @update:model-value="(v: string) => patchSlice(i, { label: v })"
-                    />
-                    <el-button text type="danger" @click="removeSlice(i)">删除</el-button>
-                  </div>
-                </div>
-                <div class="curve-actions">
-                  <el-button :disabled="sliceList.length >= CHART_SLICE_MAX" @click="addSlice">加一项</el-button>
-                </div>
-              </div>
-            </section>
-            <section class="config-block">
-              <div class="section-title">图表</div>
-              <el-form-item label="标题">
-                <el-input
-                  class="w-title"
-                  :model-value="String(widget.props.title ?? '')"
-                  @update:model-value="(v: string) => updateProp('title', v)"
-                />
-              </el-form-item>
-              <el-form-item v-if="widget.type === 'bar'" label-width="108px">
-                <template #label>
-                  柱宽
-                  <HelpTip content="每根柱的宽度，单位像素。图元太窄时会自动收窄，避免柱子叠在一起。" />
-                </template>
-                <el-input-number
-                  class="w-num"
-                  controls-position="right"
-                  :min="BAR_WIDTH_MIN"
-                  :max="BAR_WIDTH_MAX"
-                  :model-value="barWidthOf(widget.props)"
-                  @update:model-value="
-                    (v: number | undefined) =>
-                      updateProp(
-                        'barWidth',
-                        Math.max(BAR_WIDTH_MIN, Math.min(BAR_WIDTH_MAX, Math.round(Number(v) || BAR_WIDTH_DEFAULT))),
-                      )
-                  "
-                />
-              </el-form-item>
             </section>
           </template>
 

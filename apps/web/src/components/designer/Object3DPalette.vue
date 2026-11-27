@@ -7,6 +7,7 @@ import { useProjectStore } from '@/stores/project'
 import ModelResourceThumb from '@/components/designer/ModelResourceThumb.vue'
 import { countRefsByResource } from '@/shared/project/resourceRefs'
 import { invalidateModelThumbnail } from '@/shared/three/modelThumbnail'
+import { invalidateParsedModelCache } from '@/shared/three/modelLoader'
 
 const project = useProjectStore()
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -94,12 +95,14 @@ async function removeModel(res: { id: string; name: string }, ev: Event) {
     return
   }
 
+  const url = project.getResourceUrl(res.id)
   const result = project.deleteModelResource(res.id)
   if (!result.ok) {
     ElMessage.error('删除失败')
     return
   }
   invalidateModelThumbnail(res.id)
+  if (url) invalidateParsedModelCache(url)
   ElMessage.success(
     result.removedObjects > 0
       ? `已删除模型，并移除场景中 ${result.removedObjects} 个对象`

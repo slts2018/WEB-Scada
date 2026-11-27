@@ -2,7 +2,7 @@
  * Three.js 3D 场景：设计/运行共用底座。
  *
  * 设计端交互原则（尽量原生）：
- * - OrbitControls：左键旋转，中键平移，滚轮缩放；右键不绑定
+ * - OrbitControls：左键旋转，中键平移，滚轮缩放；右键默认不绑定（设计端手掌模式下右键旋转视角、不选中）
  * - TransformControls：官方 connect + attach + 拖拽（不 disconnect、不自研轴拖）
  * - 点选：Raycaster；Shift/Ctrl+空白：框选（SelectionBox）
  * - 标注：官方 CSS2DRenderer
@@ -60,7 +60,7 @@ import { isAdditivePointer, installPointerModifierTracker } from '@/shared/desig
 import { closestEulerDegrees, roundDeg } from '@/shared/three/eulerDegrees'
 import { fitCameraToBox, unionObjectBoxes } from '@/shared/three/modelFit'
 import { classifyRuntimeTap } from '@/shared/three/runtimeTapGate'
-import { loadModelObject } from '@/shared/three/modelLoader'
+import { disposeLoadedModelGraph, loadModelObject } from '@/shared/three/modelLoader'
 import { applyScenePresentation } from '@/shared/three/scenePresentation'
 import {
   buildObject3dPanelElement,
@@ -120,7 +120,7 @@ export interface RuntimeInteractInfo {
 export interface Scene3DHandlers {
   onSelect?: (
     objectId: string | null,
-    meta?: { additive?: boolean; ids?: string[] },
+    meta?: { additive?: boolean; ids?: string[]; leafId?: string },
   ) => void
   onEmptyPointerDown?: (e: PointerEvent) => void
   onObjectClick?: (objectId: string) => void
@@ -223,7 +223,7 @@ export interface Scene3DBundle {
     opts?: { applyModelColor?: boolean },
   ) => void
   setGizmoMode: (mode: TransformGizmoMode) => void
-  /** 手掌：卸下手柄。点选、框选、转视角仍可用 */
+  /** 手掌：卸下手柄。左键点选/框选仍可用；右键只旋转视角、不选中 */
   setHandMode: (on: boolean) => void
   getGizmoMode: () => TransformGizmoMode
   getObjectIds: () => string[]
@@ -318,14 +318,7 @@ function cacheOriginalMaterials(root: Object3D) {
 
 function disposeObject3DResources(root: Object3D) {
   clearObject3DMaterialMaps(root)
-  root.traverse((o) => {
-    const mesh = o as Mesh
-    if (!mesh.isMesh) return
-    mesh.geometry?.dispose()
-    const mat = mesh.material
-    if (Array.isArray(mat)) mat.forEach((m) => m.dispose())
-    else mat?.dispose()
-  })
+  disposeLoadedModelGraph(root)
 }
 
 function restoreOriginalMaterials(root: Object3D) {
@@ -553,11 +546,17 @@ export interface SceneObjectLoadEvent {
   name: string
   kind: string
   ok: boolean
+  /** 本页需要用到的模型种数（去重后的 modelResourceId） */
+  uniqueTotal?: number
+  /** 本轮加载中已遇到的模型种数 */
+  uniqueParsed?: number
 }
 
 interface SceneLoadCursor {
   total: number
   next: number
+  uniqueTotal: number
+  uniqueSeen: Set<string>
   report?: (event: SceneObjectLoadEvent) => void
 }
 
@@ -582,6 +581,19 @@ function countObject3dNodes(nodes: Object3DNode[]): number {
   }
   walk(nodes)
   return total
+}
+
+function countUniqueModelResourceIds(nodes: Object3DNode[]): number {
+  const ids = new Set<string>()
+  const walk = (list: Object3DNode[]) => {
+    for (const node of list) {
+      const id = node.modelResourceId?.trim()
+      if (id) ids.add(id)
+      if (node.children?.length) walk(node.children)
+    }
+  }
+  walk(nodes)
+  return ids.size
 }
 
 /**
@@ -853,6 +865,7 @@ export function createScene3D(
     }
   }
 
+  let handMode = false
   const controls = new OrbitControls(camera, renderer.domElement)
   // 组态操作要跟手：松手即停，不要惯性滑动
   controls.enableDamping = false
@@ -862,7 +875,7 @@ export function createScene3D(
    * - 左键：旋转（运行端在松手且位移小时再判单击，不抢 Orbit）
    * - 中键：平移
    * - 滚轮：远近
-   * - 右键：不绑定
+   * - 右键：默认不绑定（设计端菜单）；手掌模式下改为旋转视角，不选中模型
    */
   type OrbitInternal = OrbitControls & {
     _onPointerDown: (ev: PointerEvent) => void
@@ -872,22 +885,27 @@ export function createScene3D(
   const orbit = controls as OrbitInternal
   orbit.disconnect()
   const orbitNativePointerDown = orbit._onPointerDown.bind(orbit)
+  const orbitRightIsRotate = () => enableGizmo && handMode
+  const applyOrbitMouseButtons = () => {
+    controls.mouseButtons = {
+      LEFT: MOUSE.ROTATE,
+      MIDDLE: MOUSE.PAN,
+      RIGHT: orbitRightIsRotate() ? MOUSE.ROTATE : (-1 as unknown as null),
+    }
+  }
   orbit._onPointerDown = (ev: PointerEvent) => {
-    if (ev.button === 2) {
+    if (ev.button === 2 && !orbitRightIsRotate()) {
       ev.preventDefault()
       return
     }
     orbitNativePointerDown(ev)
   }
   orbit.connect()
-  controls.mouseButtons = {
-    LEFT: MOUSE.ROTATE,
-    MIDDLE: MOUSE.PAN,
-    RIGHT: -1 as unknown as null,
-  }
+  applyOrbitMouseButtons()
 
   const onBlockRightButton = (e: Event) => {
     if ((e as PointerEvent).button !== 2) return
+    if (orbitRightIsRotate()) return
     e.preventDefault()
     e.stopImmediatePropagation()
   }
@@ -895,7 +913,7 @@ export function createScene3D(
     el.addEventListener('pointerdown', onBlockRightButton, true)
     el.addEventListener('mousedown', onBlockRightButton, true)
   }
-  console.info('[scada-3d] orbit: 左键旋转 | 中键平移 | 滚轮远近 | 右键无')
+  console.info('[scada-3d] orbit: 左键旋转 | 中键平移 | 滚轮远近 | 右键菜单（手掌模式右键旋转）')
 
   // 必须在 Orbit change 监听之前声明：presentation/限位若触发 update 会同步派发 change
   let dirty = false
@@ -999,9 +1017,24 @@ export function createScene3D(
   let selectedId: string | null = null
   let selectedIds: string[] = []
   let gizmoMode: TransformGizmoMode = 'translate'
-  let handMode = false
   let raf = 0
   let disposed = false
+  /** 离开页面或重新 setPage 时中止未完成的模型请求，并丢弃旧一轮挂载 */
+  let loadAbort = new AbortController()
+  let loadGeneration = 0
+
+  const beginModelLoadCycle = () => {
+    try {
+      loadAbort.abort()
+    } catch {
+      /* ignore */
+    }
+    loadAbort = new AbortController()
+    return ++loadGeneration
+  }
+
+  const isLoadCancelled = (gen?: number, signal?: AbortSignal) =>
+    disposed || signal?.aborted === true || (gen != null && gen !== loadGeneration)
   let suppressTimer: ReturnType<typeof setTimeout> | null = null
   let gizmoDragging = false
   let gizmoWanted = false
@@ -1039,23 +1072,33 @@ export function createScene3D(
     scale: obj.scale.clone(),
   })
 
+  /**
+   * 超过这个数量就不逐个画选中黄框、也不给每根管子叠自发光。
+   * 管网批量常见 100+（本页管道约 376、法兰可达 1000+），全量高亮会卡死后续操作。
+   */
+  const SELECTION_BOX_LIMIT = 24
+
   const selectionWorldCenter = (ids: string[]) => {
     const box = new Box3()
     let any = false
+    // 大批量多选：用世界坐标重心即可，避免对每根管子 setFromObject 遍历网格
+    const useBounds = ids.length <= SELECTION_BOX_LIMIT
     for (const id of ids) {
       const obj = objectMap.get(id)
       if (!obj) continue
-      obj.updateMatrixWorld(true)
-      const b = new Box3().setFromObject(obj)
-      if (!b.isEmpty()) {
-        box.union(b)
-        any = true
-      } else {
-        const p = new Vector3()
-        obj.getWorldPosition(p)
-        box.expandByPoint(p)
-        any = true
+      if (useBounds) {
+        obj.updateMatrixWorld(true)
+        const b = new Box3().setFromObject(obj)
+        if (!b.isEmpty()) {
+          box.union(b)
+          any = true
+          continue
+        }
       }
+      const p = new Vector3()
+      obj.getWorldPosition(p)
+      box.expandByPoint(p)
+      any = true
     }
     if (!any || box.isEmpty()) return new Vector3()
     return box.getCenter(new Vector3())
@@ -1222,6 +1265,8 @@ export function createScene3D(
   /** fitView 期间关掉阻尼，结束后再恢复 */
   let restoreDampingAfterSuppress = false
   let selectionHelpers: BoxHelper[] = []
+  /** 当前已叠了选中自发光的对象（增量更新，避免每次扫描整页） */
+  let highlightedIds = new Set<string>()
 
   const clearSelectionHelpers = () => {
     for (const h of selectionHelpers) {
@@ -1236,10 +1281,7 @@ export function createScene3D(
     for (const h of selectionHelpers) h.update()
   }
 
-  /** 超过这个数量就不逐个画选中框（管网批量常见 100+） */
-const SELECTION_BOX_LIMIT = 24
-
-const syncSelectionHelpers = (ids: string[]) => {
+  const syncSelectionHelpers = (ids: string[]) => {
     clearSelectionHelpers()
     // 运行端无选中框：仅设计端（selectionHighlight）显示黄框
     if (!selectionHighlight || !ids.length) {
@@ -1273,7 +1315,7 @@ const syncSelectionHelpers = (ids: string[]) => {
   const pickObjectAtClient = (
     clientX: number,
     clientY: number,
-  ): { id: string; distance: number } | null => {
+  ): { id: string; leafId: string; distance: number } | null => {
     if (!setRayFromEvent(clientX, clientY)) {
       lastPickId = null
       return null
@@ -1289,7 +1331,7 @@ const syncSelectionHelpers = (ids: string[]) => {
       const id = outermostGroupId(rawId)
       if (nodeMap.get(id)?.visible === false) continue
       lastPickId = id
-      return { id, distance: hit.distance }
+      return { id, leafId: rawId, distance: hit.distance }
     }
     lastPickId = null
     return null
@@ -1375,7 +1417,6 @@ const syncSelectionHelpers = (ids: string[]) => {
   const PANEL_FOCUS_MIN_M = 4
   const _panelCamPos = new Vector3()
   const _panelWorldPos = new Vector3()
-  const _panelNdc = new Vector3()
 
   /** 设计稿像素尺寸。不用 offsetWidth：CSS zoom 会把它一起放大，下一帧就会算错。 */
   const panelLayoutSize = (wrap: HTMLElement, objectId?: string) => {
@@ -1398,21 +1439,16 @@ const syncSelectionHelpers = (ids: string[]) => {
   }
 
   /**
-   * 底边对齐锚点。近大远小，但放不进视口就缩小，避免标题和按钮跑到画面外。
+   * 仅当面板按当前倍数会超过整个视口时才封顶（避免镜头贴到锚点时撑满屏幕）。
+   * 不按锚点到边缘的剩余空间缩放，以免远处面板被「留在画面里」而显得很大。
    */
-  const clampPanelZoom = (s: number, layout: { width: number; height: number }) => {
+  const clampPanelZoomToViewport = (s: number, layout: { width: number; height: number }) => {
     const viewW = container.clientWidth
     const viewH = container.clientHeight
     if (viewW < 2 || viewH < 2) return s
-    _panelNdc.copy(_panelWorldPos).project(camera)
-    if (_panelNdc.z < -1 || _panelNdc.z > 1) return s
-    const sx = (_panelNdc.x * 0.5 + 0.5) * viewW
-    const sy = (-_panelNdc.y * 0.5 + 0.5) * viewH
     const margin = 8
-    const roomUp = sy - margin
-    const roomX = Math.min(sx, viewW - sx) * 2 - margin * 2
-    const maxH = roomUp >= 32 ? roomUp : Math.max(viewH - margin * 2, 32)
-    const maxW = roomX >= 32 ? roomX : Math.max(viewW - margin * 2, 32)
+    const maxH = Math.max(viewH - margin * 2, 32)
+    const maxW = Math.max(viewW - margin * 2, 32)
     let next = s
     if (next * layout.height > maxH) next = maxH / layout.height
     if (next * layout.width > maxW) next = Math.min(next, maxW / layout.width)
@@ -1420,9 +1456,12 @@ const syncSelectionHelpers = (ids: string[]) => {
   }
 
   /**
-   * CSS2D 按距离缩放，近大远小（参考视距时为设计稿像素大小）。
+   * 默认按世界尺寸钉在场景中：CSS2D 本身是屏幕像素大小，故按参考视距/相机距离缩放，
+   * 滚轮拉近拉远时与模型同步变大变小，仍朝向镜头。
+   * 仅当 panel.fixedScreenSize 为 true 时保持屏幕像素大小不变。
    * 必须用 zoom，不能用 transform:scale：后者先按设计稿栅格化再拉伸，近处字体会糊。
    * 量化后再写 style.zoom / Konva setWorldScale，避免 Orbit 每一帧都触发布局。
+   * 极近时若超过整个视口才封顶，不用「贴边就缩小」把远处面板撑大。
    */
   const PANEL_ZOOM_STEP = 0.005
   const quantizePanelZoom = (s: number) => {
@@ -1446,8 +1485,9 @@ const syncSelectionHelpers = (ids: string[]) => {
       const dist = Math.max(0.35, _panelWorldPos.distanceTo(_panelCamPos))
       const layout = panelLayoutSize(wrap, objectId)
       if (!layout) needRelayout = true
-      let s = PANEL_WORLD_REF_DIST / dist
-      if (layout) s = clampPanelZoom(s, layout)
+      const fixedScreenSize = nodeMap.get(objectId)?.panel?.fixedScreenSize === true
+      let s = fixedScreenSize ? 1 : PANEL_WORLD_REF_DIST / dist
+      if (layout) s = clampPanelZoomToViewport(s, layout)
       const q = quantizePanelZoom(s)
       if (lastPanelZoom.get(objectId) === q) {
         panelScaleSkips += 1
@@ -1590,6 +1630,7 @@ const syncSelectionHelpers = (ids: string[]) => {
     attachedObjectId = null
     attachError = null
     clearSelectionHelpers()
+    highlightedIds = new Set()
     clearLabels()
     clearPanels()
     lodList.length = 0
@@ -1598,16 +1639,7 @@ const syncSelectionHelpers = (ids: string[]) => {
     while (root.children.length) {
       const child = root.children[0]
       root.remove(child)
-      clearObject3DMaterialMaps(child)
-      child.traverse((obj) => {
-        const mesh = obj as Mesh
-        if (mesh.isMesh) {
-          mesh.geometry?.dispose()
-          const mat = mesh.material
-          if (Array.isArray(mat)) mat.forEach((m) => m.dispose())
-          else mat?.dispose()
-        }
-      })
+      disposeObject3DResources(child)
     }
     objectMap.clear()
     nodeMap.clear()
@@ -1626,8 +1658,7 @@ const syncSelectionHelpers = (ids: string[]) => {
     return top
   }
 
-  const highlight = (ids: string[]) => {
-    if (!selectionHighlight) return
+  const expandHighlightIds = (ids: string[]) => {
     const set = new Set(ids)
     for (const id of ids) {
       objectMap.get(id)?.traverse((child) => {
@@ -1635,25 +1666,49 @@ const syncSelectionHelpers = (ids: string[]) => {
         if (cid) set.add(cid)
       })
     }
-    for (const [oid, obj] of objectMap) {
-      const node = nodeMap.get(oid)
-      // 面板 / 不可见组合锚点不发光；成员由上面的展开集合点亮
-      if (node?.panel && !node.modelResourceId) continue
-      if (isInvisibleGroupAnchor(node)) continue
-      const on = set.has(oid)
-      const base = node?.style?.emissive
-      const color = on ? new Color(0x886622) : base ? new Color(base) : new Color(0x000000)
-      forEachOwnMesh(obj, (mesh) => {
-        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
-        for (const m of mats) {
-          const std = m as MeshStandardMaterial
-          if (std.isMeshStandardMaterial) {
-            std.emissive = color.clone()
-            std.emissiveIntensity = on ? 0.85 : 1
-          }
+    return set
+  }
+
+  const setObjectHighlight = (oid: string, on: boolean) => {
+    const obj = objectMap.get(oid)
+    if (!obj) return
+    const node = nodeMap.get(oid)
+    // 面板 / 不可见组合锚点不发光；成员由展开集合点亮
+    if (node?.panel && !node.modelResourceId) return
+    if (isInvisibleGroupAnchor(node)) return
+    const base = node?.style?.emissive
+    const color = on ? new Color(0x886622) : base ? new Color(base) : new Color(0x000000)
+    forEachOwnMesh(obj, (mesh) => {
+      const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material]
+      for (const m of mats) {
+        const std = m as MeshStandardMaterial
+        if (std.isMeshStandardMaterial) {
+          std.emissive = color.clone()
+          std.emissiveIntensity = on ? 0.85 : 1
         }
-      })
+      }
+    })
+  }
+
+  const highlight = (ids: string[]) => {
+    if (!selectionHighlight) {
+      if (highlightedIds.size) {
+        for (const id of highlightedIds) setObjectHighlight(id, false)
+        highlightedIds = new Set()
+        invalidate()
+      }
+      return
     }
+    // 大批量多选只点亮主选对象（与黄框上限一致），避免扫整页材质、后续 applyVisual 再全量重跑
+    const drawIds = ids.length > SELECTION_BOX_LIMIT ? ids.slice(0, 1) : ids
+    const next = expandHighlightIds(drawIds)
+    for (const id of highlightedIds) {
+      if (!next.has(id)) setObjectHighlight(id, false)
+    }
+    for (const id of next) {
+      if (!highlightedIds.has(id)) setObjectHighlight(id, true)
+    }
+    highlightedIds = next
     invalidate()
   }
 
@@ -1754,12 +1809,15 @@ const syncSelectionHelpers = (ids: string[]) => {
     resolveModelUrl: (resourceId: string) => string | undefined,
     parent: Object3D = root,
     cursor?: SceneLoadCursor,
+    signal?: AbortSignal,
   ) => {
-    if (objectMap.has(node.id)) return
+    if (isLoadCancelled(undefined, signal) || objectMap.has(node.id)) return
     const loadIndex = cursor ? ++cursor.next : 0
     let loadOk = true
     let reportDone = Boolean(cursor?.report)
     const reportLoad = (phase: 'start' | 'done') => {
+      const modelId = node.modelResourceId?.trim()
+      if (modelId && cursor) cursor.uniqueSeen.add(modelId)
       cursor?.report?.({
         phase,
         index: loadIndex,
@@ -1768,6 +1826,8 @@ const syncSelectionHelpers = (ids: string[]) => {
         name: node.name?.trim() || '未命名',
         kind: objectLoadKind(node),
         ok: loadOk,
+        uniqueTotal: cursor?.uniqueTotal,
+        uniqueParsed: cursor?.uniqueSeen.size,
       })
     }
     reportLoad('start')
@@ -1778,9 +1838,9 @@ const syncSelectionHelpers = (ids: string[]) => {
       const url = resolveModelUrl(node.modelResourceId)
       if (url) {
         try {
-          const detail = await loadModelObject(url)
-          // await 期间另一路可能已挂上同 id：丢弃本份，避免「粘贴残影」
-          if (objectMap.has(node.id)) {
+          const detail = await loadModelObject(url, { signal })
+          // await 期间可能已离开页面 / 重新 setPage / 另一路已挂上同 id
+          if (isLoadCancelled(undefined, signal) || objectMap.has(node.id)) {
             disposeObject3DResources(detail)
             reportDone = false
             return
@@ -1792,7 +1852,11 @@ const syncSelectionHelpers = (ids: string[]) => {
           wrap.userData.focusRoot = detail
           wrap.add(detail)
           obj = wrap
-        } catch {
+        } catch (err) {
+          if (isLoadCancelled(undefined, signal) || (typeof err === 'object' && err !== null && (err as { name?: string }).name === 'AbortError')) {
+            reportDone = false
+            return
+          }
           loadOk = false
           obj = createPrimitiveMesh({ ...node, primitive: 'box' })
         }
@@ -1803,7 +1867,7 @@ const syncSelectionHelpers = (ids: string[]) => {
     } else {
       obj = createPrimitiveMesh(node)
     }
-    if (objectMap.has(node.id)) {
+    if (isLoadCancelled(undefined, signal) || objectMap.has(node.id)) {
       disposeObject3DResources(obj)
       reportDone = false
       return
@@ -1848,7 +1912,8 @@ const syncSelectionHelpers = (ids: string[]) => {
       reportLoad('done')
     }
     for (const child of node.children ?? []) {
-      await mountNode(child, resolveModelUrl, obj, cursor)
+      if (isLoadCancelled(undefined, signal)) return
+      await mountNode(child, resolveModelUrl, obj, cursor, signal)
     }
     } catch (err) {
       loadOk = false
@@ -1869,7 +1934,7 @@ const syncSelectionHelpers = (ids: string[]) => {
     if (gizmoWanted) attachGizmo(selectedId)
     else attachGizmo(null)
     syncPanelGizmoPass()
-    // 每个选中对象都画黄框（多选时不能只框主对象）
+    // 少量多选逐个画黄框；超过上限只框主选（数量看状态栏）
     syncSelectionHelpers(selectedIds)
     invalidate()
   }
@@ -1879,6 +1944,11 @@ const syncSelectionHelpers = (ids: string[]) => {
     resolveModelUrl: (resourceId: string) => string | undefined,
     onProgress?: (event: SceneObjectLoadEvent) => void,
   ) => {
+    if (disposed) return
+    const gen = beginModelLoadCycle()
+    const signal = loadAbort.signal
+    const resumeFlow = flowPlayback
+    flowPlayback = false
     resolveResourceUrlFn = resolveModelUrl
     clearObjects()
     selectedId = null
@@ -1890,12 +1960,25 @@ const syncSelectionHelpers = (ids: string[]) => {
     const cursor: SceneLoadCursor = {
       total: countObject3dNodes(page.objects),
       next: 0,
+      uniqueTotal: countUniqueModelResourceIds(page.objects),
+      uniqueSeen: new Set<string>(),
       report: onProgress,
     }
+    const restoreFlowFlag = () => {
+      if (!disposed) flowPlayback = resumeFlow
+    }
     for (const node of page.objects) {
+      if (isLoadCancelled(gen, signal)) {
+        restoreFlowFlag()
+        return
+      }
       try {
-        await mountNode(node, resolveModelUrl, root, cursor)
+        await mountNode(node, resolveModelUrl, root, cursor, signal)
       } catch (err) {
+        if (isLoadCancelled(gen, signal)) {
+          restoreFlowFlag()
+          return
+        }
         console.error('[createScene3D] mountNode failed', node.id, err)
         // 单对象失败不拖垮整页：落一个占位盒子
         try {
@@ -1911,9 +1994,14 @@ const syncSelectionHelpers = (ids: string[]) => {
         }
       }
     }
+    if (isLoadCancelled(gen, signal)) {
+      restoreFlowFlag()
+      return
+    }
     highlight([])
     rebuildLabels()
     lodDirty = true
+    if (resumeFlow) setFlowPlayback(true)
     invalidate()
     // 布局/资源晚到时再刷一帧，避免首屏一直黑到用户交互才画
     requestAnimationFrame(() => {
@@ -1944,10 +2032,12 @@ const syncSelectionHelpers = (ids: string[]) => {
       const cursor: SceneLoadCursor = {
         total: countObject3dNodes([node]),
         next: 0,
+        uniqueTotal: countUniqueModelResourceIds([node]),
+        uniqueSeen: new Set<string>(),
         report: onProgress,
       }
       try {
-        await mountNode(node, resolveModelUrl, parent ?? root, cursor)
+        await mountNode(node, resolveModelUrl, parent ?? root, cursor, loadAbort.signal)
       } catch (err) {
         console.error('[createScene3D] mountObject failed', node.id, err)
         return
@@ -2153,17 +2243,15 @@ const syncSelectionHelpers = (ids: string[]) => {
       obj.userData[LIQUID_MAT_KEY] = true
     }
 
-    if (!selectionHighlight || !selectedIds.includes(visual.id)) {
+    if (!selectionHighlight || !highlightedIds.has(visual.id)) {
       setMeshEmissive(obj, visual.style?.emissive ?? null)
     } else {
-      highlight(selectedIds)
+      setObjectHighlight(visual.id, true)
     }
   }
 
-  /** 从原始节点（设计端未走解析/尚未刷 Tag）读流动参数：按满速预览 */
-  const flowFromRawNode = (visual: Object3DNode): ResolvedFlow | null => {
-    const resolved = (visual as Object3DNode & { flow?: ResolvedFlow | null }).flow
-    if (resolved !== undefined) return resolved
+  /** 只读 animationLinks，按满速给出设计态流动（忽略已解析的 .flow） */
+  const flowFromLinks = (visual: Object3DNode): ResolvedFlow | null => {
     const link = (visual.animationLinks ?? []).find(
       (l): l is AnimationLinkFlow => l.type === 'flow' && l.enabled,
     )
@@ -2193,24 +2281,33 @@ const syncSelectionHelpers = (ids: string[]) => {
     }
   }
 
+  /** 实时预览/运行：优先用已解析的 .flow（含变量系数）；否则退回满速设计态 */
+  const flowFromRawNode = (visual: Object3DNode): ResolvedFlow | null => {
+    const resolved = (visual as Object3DNode & { flow?: ResolvedFlow | null }).flow
+    if (resolved !== undefined) return resolved
+    return flowFromLinks(visual)
+  }
+
   /**
    * 管道流动：条纹沿「流向轴」按米间隔滚动。
    * - 缺 UV 也能用：世界坐标 × 世界流向轴做伪 UV（同轴多段管相位连续）
    * - 速度 = 基准速度 × 变量映射出的系数；系数 0 → 停流并隐藏条纹
    */
   const applyFlowVisual = (obj: Object3D, visual: Object3DNode) => {
-    const flow = flowPlayback ? flowFromRawNode(visual) : null
+    // 预览关闭时仍画出配置好的箭头（满速设计态，不进持续 RAF）；打开预览才跟变量走
+    const flow = flowPlayback ? flowFromRawNode(visual) : flowFromLinks(visual)
     if (!flow) {
-      const stale = flowObjects.get(visual.id)
-      if (stale) {
-        stale.uniforms.uFlowEnabled.value = 0
-        flowObjects.delete(visual.id)
-      }
+      const stale =
+        flowObjects.get(visual.id) ??
+        (obj.userData.scadaFlowHandle as { uniforms: { uFlowEnabled: { value: number } } } | undefined)
+      if (stale) stale.uniforms.uFlowEnabled.value = 0
+      flowObjects.delete(visual.id)
       hideFlowRibbon(obj)
       return
     }
     const handle = ensureFlowOnObject(obj)
-    flowObjects.set(visual.id, handle)
+    if (flowPlayback) flowObjects.set(visual.id, handle)
+    else flowObjects.delete(visual.id)
     const size = resolveSourceSize(visual)
     const localAxis = resolveFlowAxisLocal(flow.axis, size)
     obj.updateWorldMatrix(true, false)
@@ -2375,7 +2472,7 @@ const syncSelectionHelpers = (ids: string[]) => {
       setMeshColor(obj, visual.style.color, opacity ?? 1)
     }
 
-    if (!selectionHighlight || !selectedIds.includes(objectId)) {
+    if (!selectionHighlight || !highlightedIds.has(objectId)) {
       if (visual.material?.override) {
         // 已在上方处理 emissive；选中高亮关闭时保持材质自发光
       } else if (visual.style?.emissive) {
@@ -2384,7 +2481,8 @@ const syncSelectionHelpers = (ids: string[]) => {
         setMeshEmissive(obj, null)
       }
     } else {
-      highlight(selectedIds)
+      // 只重刷当前对象，绝不要再 highlight(selectedIds) 扫整页
+      setObjectHighlight(objectId, true)
     }
     // 名称变更时刷新对应标注
     if (labelsVisible && !visual.panel) {
@@ -2407,12 +2505,11 @@ const syncSelectionHelpers = (ids: string[]) => {
     if (flowPlayback === on) return
     flowPlayback = on
     if (!on) {
-      for (const [id, handle] of flowObjects) {
-        handle.uniforms.uFlowEnabled.value = 0
-        const obj = objectMap.get(id)
-        if (obj) hideFlowRibbon(obj)
-      }
       flowObjects.clear()
+      for (const [id, obj] of objectMap) {
+        const node = nodeMap.get(id)
+        if (node) applyFlowVisual(obj, node)
+      }
       invalidate()
       return
     }
@@ -2425,6 +2522,7 @@ const syncSelectionHelpers = (ids: string[]) => {
 
   const setHandMode = (on: boolean) => {
     handMode = on
+    applyOrbitMouseButtons()
     if (on) {
       gizmoWanted = false
       attachGizmo(null)
@@ -2780,6 +2878,7 @@ const syncSelectionHelpers = (ids: string[]) => {
       getModifierState?: (k: string) => boolean
     },
     pickedId: string,
+    leafId?: string,
   ) => {
     const additive = isAdditivePointer(e)
     const already = selectedIds.includes(pickedId)
@@ -2789,7 +2888,11 @@ const syncSelectionHelpers = (ids: string[]) => {
         ? selectedIds.filter((id) => id !== pickedId)
         : [pickedId, ...selectedIds]
     selectObjects(ids, { gizmo: true })
-    handlers.onSelect?.(ids[0] ?? null, { additive, ids })
+    handlers.onSelect?.(ids[0] ?? null, {
+      additive,
+      ids,
+      leafId: leafId ?? pickedId,
+    })
     suppressEmptyClear = true
     emptyClickAt = null
     designerPickHandled = true
@@ -2834,7 +2937,7 @@ const syncSelectionHelpers = (ids: string[]) => {
       controls.enableRotate = false
       controls.enablePan = false
       orbitSuppressGesture = true
-      applyDesignerPick(e, picked.id)
+      applyDesignerPick(e, picked.id, picked.leafId)
       e.stopImmediatePropagation()
       e.preventDefault()
       return
@@ -2915,7 +3018,7 @@ const syncSelectionHelpers = (ids: string[]) => {
     ) {
       return
     }
-    applyDesignerPick(e, picked.id)
+    applyDesignerPick(e, picked.id, picked.leafId)
   }
 
   /**
@@ -3367,6 +3470,12 @@ const syncSelectionHelpers = (ids: string[]) => {
     }),
     dispose: () => {
       disposed = true
+      loadGeneration += 1
+      try {
+        loadAbort.abort()
+      } catch {
+        /* ignore */
+      }
       cancelAnimationFrame(raf)
       raf = 0
       if (suppressTimer) {

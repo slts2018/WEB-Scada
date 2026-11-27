@@ -57,7 +57,7 @@ export const FLOW_DEFAULT_DUTY = 0.42
 const HANDLE_KEY = 'scadaFlowHandle'
 const MAT_KEY = 'scadaFlowInjected'
 /** 改这里可强制所有材质重编译（注入逻辑变更时用） */
-const SHADER_VERSION = 'scada-flow-v2'
+const SHADER_VERSION = 'scada-flow-v3'
 
 function createUniforms(): FlowUniforms {
   return {
@@ -164,6 +164,8 @@ export function ensureFlowOnObject(obj: Object3D): FlowHandle {
     float flowAxial = dot( flowRel, uFlowAxis );
     float flowT = flowAxial * uFlowFreq - uFlowTime * uFlowSpeed * uFlowFreq;
     float flowU = fract( flowT );
+    // 形状坐标：uFlowSpeed 已是 speed*factor，为负时把箭头尖翻到实际运动方向；滚动相位仍用 flowU
+    float flowShapeU = uFlowSpeed < 0.0 ? fract( 1.0 - flowU ) : flowU;
     // 绕轴量：极径 + 绕管角度（-1..1，0 = 顶上，±0.5 = 两侧）——各样式共用
     float flowLat = length( flowRel - uFlowAxis * flowAxial );
     float flowAng = atan( dot( flowRel, uFlowB2 ), dot( flowRel, uFlowB1 ) ) / 3.14159265;
@@ -180,10 +182,10 @@ export function ensureFlowOnObject(obj: Object3D): FlowHandle {
       float skinDelta = abs( flowAng - uFlowFaceAng );
       float skinD = min( skinDelta, 2.0 - skinDelta );
       float skinHalf = -1.0;
-      if ( flowU >= skinBack && flowU <= skinTip ) {
-        skinHalf = flowU <= skinShaftEnd
+      if ( flowShapeU >= skinBack && flowShapeU <= skinTip ) {
+        skinHalf = flowShapeU <= skinShaftEnd
           ? skinLobe * 0.34
-          : skinLobe * ( 1.0 - ( flowU - skinShaftEnd ) / max( 1e-4, skinTip - skinShaftEnd ) );
+          : skinLobe * ( 1.0 - ( flowShapeU - skinShaftEnd ) / max( 1e-4, skinTip - skinShaftEnd ) );
       }
       if ( skinHalf > 0.0 ) {
         float skinCore = 1.0 - smoothstep( skinHalf * 0.86, skinHalf, skinD );
@@ -200,22 +202,22 @@ export function ensureFlowOnObject(obj: Object3D): FlowHandle {
       float flowTip = min( 0.98, 0.55 + flowLen * 0.6 );
       float flowGap = flowLen * 0.45;
       float flowThick = clamp( uFlowThick, 0.06, 0.5 );
-      flowBand = scadaFlowChevron( flowU, flowAng, flowLen, uFlowWidth, flowThick, flowTip, flowGap, uFlowGlow );
+      flowBand = scadaFlowChevron( flowShapeU, flowAng, flowLen, uFlowWidth, flowThick, flowTip, flowGap, uFlowGlow );
       flowBand *= smoothstep( 0.0, 0.06 / max( uFlowFreq, 1e-6 ), flowLat );
     } else if ( uFlowStyle < 2.5 ) {
-      // 锥形箭头：尖端朝 +轴向，整圈包裹
+      // 锥形箭头：尖端朝实际运动方向（speed*factor 为负时翻到 -轴向），整圈包裹
       // 极细处淡出，避免管端封盖中心出现楔形花纹。
       float flowLen = max( 0.05, min( 0.9, uFlowDuty ) );
       float flowTip = min( 0.98, 0.35 + flowLen );
       float flowBack = flowTip - flowLen;
-      float flowSpread = ( flowTip - flowU ) / max( 1e-4, flowTip - flowBack );
-      flowBand = step( flowBack, flowU ) * step( flowU, flowTip )
+      float flowSpread = ( flowTip - flowShapeU ) / max( 1e-4, flowTip - flowBack );
+      flowBand = step( flowBack, flowShapeU ) * step( flowShapeU, flowTip )
         * ( 1.0 - step( flowSpread * uFlowWidth, abs( flowAng ) ) );
       flowBand *= smoothstep( 0.0, 0.08 / max( uFlowFreq, 1e-6 ), flowLat );
     } else {
       float flowHalf = max( 0.001, uFlowDuty * 0.5 );
-      flowBand = smoothstep( 0.5 - flowHalf, 0.5 - flowHalf * 0.25, flowU )
-        * ( 1.0 - smoothstep( 0.5 + flowHalf * 0.25, 0.5 + flowHalf, flowU ) );
+      flowBand = smoothstep( 0.5 - flowHalf, 0.5 - flowHalf * 0.25, flowShapeU )
+        * ( 1.0 - smoothstep( 0.5 + flowHalf * 0.25, 0.5 + flowHalf, flowShapeU ) );
     }
     flowBand *= uFlowIntensity;
     float flowAmt = clamp( flowBand, 0.0, 1.0 );

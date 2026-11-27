@@ -81,6 +81,17 @@ function clamp(n: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, n))
 }
 
+/** 添加液位前的罐壁不透明度；未自定义则记 1，删除液位时按此还原。 */
+export function snapshotTankShellOpacity(
+  tank: Pick<Object3DNode, 'material' | 'style'>,
+): number {
+  const op = tank.material?.opacity
+  if (op != null && Number.isFinite(Number(op))) return clamp(Number(op), 0, 1)
+  const styleOp = tank.style?.opacity
+  if (styleOp != null && Number.isFinite(Number(styleOp))) return clamp(Number(styleOp), 0, 1)
+  return 1
+}
+
 /** 设计端默认配置（面板「添加液位层」用） */
 export function defaultLiquidLevelOptions(tagId = ''): LiquidLevelOptions {
   return {
@@ -178,6 +189,13 @@ export function syncLiquidLevelNode(
     outMin: 0,
     outMax: geo.fullScale[1],
   }
+  const existingBefore = node.liquid?.shellOpacityBefore
+  const shellOpacityBefore =
+    existingBefore != null && Number.isFinite(Number(existingBefore))
+      ? clamp(Number(existingBefore), 0, 1)
+      : node.liquid
+        ? undefined
+        : snapshotTankShellOpacity(tank)
   const liquid: Object3DLiquidLevel = {
     tankId: tank.id,
     mode,
@@ -188,6 +206,7 @@ export function syncLiquidLevelNode(
     opacity,
     shape: geo.shape,
     inset,
+    ...(shellOpacityBefore != null ? { shellOpacityBefore } : {}),
   }
   /** 形状模式：复制罐体几何（含模型），液面由世界水平裁剪面切出来 → 任意罐形自动贴合 */
   const shapeMode = mode === 'shape' && Boolean(tank.modelResourceId || tank.primitive)

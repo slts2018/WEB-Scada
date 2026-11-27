@@ -9,11 +9,10 @@ import type { Widget2D } from '@web-scada/core'
 import { createKonvaStage, type KonvaStageBundle } from '@/shared/konva/createKonvaStage'
 import {
   createWidgetNode,
-  growTextFrame,
   readTransformFromNode,
   syncWidgetNode,
 } from '@/shared/konva/widgetNodes'
-import { snapTransform, snapWithGuides } from '@/shared/designer/geometry'
+import { snapPositionOnly, snapTransform, snapWithGuides } from '@/shared/designer/geometry'
 import {
   installPointerModifierTracker,
   isAdditivePointer,
@@ -41,6 +40,8 @@ let bundle: KonvaStageBundle | null = null
 let syncingFromModel = false
 let dragHistoryPushed = false
 let dragOrigin: Record<string, { x: number; y: number }> = {}
+let layoutInteracting = false
+let lastLayoutKind: 'drag' | 'transform' | null = null
 let boxRect: Konva.Rect | null = null
 let boxStart: { x: number; y: number } | null = null
 let bgImageNode: Konva.Image | null = null
@@ -90,9 +91,11 @@ function syncBackgroundImage() {
   img.src = url
 }
 
-function snapPanelTransform(t: Widget2D['transform']): Widget2D['transform'] {
+function snapPanelTransform(t: Widget2D['transform'], positionOnly = false): Widget2D['transform'] {
   if (!props.snapEnabled) return t
-  return snapTransform(t, PANEL_EDITOR_GRID)
+  return positionOnly
+    ? snapPositionOnly(t, PANEL_EDITOR_GRID)
+    : snapTransform(t, PANEL_EDITOR_GRID)
 }
 
 function clearWidgetNodes() {
@@ -131,13 +134,22 @@ function commitSelectionTransforms() {
         .filter(Boolean)
 
   const patches: Record<string, Widget2D['transform']> = {}
+  const moveOnly = lastLayoutKind === 'drag'
   for (const node of targets) {
     if (!node) continue
     const id = String(node.getAttr('widgetId'))
-    let transform = readTransformFromNode(node)
-    if (props.snapEnabled) transform = snapPanelTransform(transform)
     const widget = project.getActiveWidgets().find((w) => w.id === id)
     if (!widget) continue
+    let transform: Widget2D['transform']
+    if (moveOnly) {
+      transform = { ...widget.transform, x: node.x(), y: node.y() }
+      if (props.snapEnabled && targets.length === 1) {
+        transform = snapPanelTransform(transform, true)
+      }
+    } else {
+      transform = readTransformFromNode(node)
+      if (props.snapEnabled) transform = snapPanelTransform(transform)
+    }
     syncWidgetNode(node, { ...widget, transform })
     patches[id] = transform
   }
@@ -174,6 +186,8 @@ function bindWidgetEvents(group: Konva.Group) {
     if (syncingFromModel) return
     dragHistoryPushed = false
     dragOrigin = {}
+    layoutInteracting = true
+    lastLayoutKind = 'drag'
     for (const sid of project.selectedWidgetIds) {
       const w = project.getActiveWidgets().find((item) => item.id === sid)
       if (w) dragOrigin[sid] = { x: w.transform.x, y: w.transform.y }
@@ -231,14 +245,18 @@ function bindWidgetEvents(group: Konva.Group) {
   })
 
   group.on('dragend', () => {
-    if (syncingFromModel) return
-    bundle?.clearGuides()
-    commitSelectionTransforms()
+    if (!syncingFromModel) {
+      bundle?.clearGuides()
+      commitSelectionTransforms()
+    }
+    layoutInteracting = false
   })
 
   group.on('transformstart', () => {
     if (syncingFromModel) return
     dragHistoryPushed = false
+    layoutInteracting = true
+    lastLayoutKind = 'transform'
   })
 
   group.on('transform', () => {
@@ -247,17 +265,15 @@ function bindWidgetEvents(group: Konva.Group) {
   })
 
   group.on('transformend', () => {
-    if (syncingFromModel) return
-    commitSelectionTransforms()
+    if (!syncingFromModel) {
+      commitSelectionTransforms()
+    }
+    layoutInteracting = false
   })
 }
 
 function renderAllWidgets() {
-  if (!bundle) return
-  for (const widget of project.getActiveWidgets()) {
-    const next = growTextFrame(widget)
-    if (next) project.updateWidget(widget.id, { transform: next }, { recordHistory: false })
-  }
+  if (!bundle || layoutInteracting) return
   syncingFromModel = true
   clearWidgetNodes()
   for (const widget of project.getActiveWidgets()) {
@@ -378,10 +394,11 @@ function onDrop(e: DragEvent) {
   const variant = e.dataTransfer?.getData(ECHART_DND)
   if (variant) {
     const preset = findEchartPreset(variant)
+    if (!preset) return
     project.addWidget(
       'echart',
       { x: pt.x - 210, y: pt.y - 140 },
-      { name: preset?.label ?? '图表', props: { variant } },
+      { name: preset.label, props: { variant } },
     )
     return
   }
@@ -443,7 +460,10 @@ watch(
 
 watch(
   () => project.getActiveWidgets(),
-  () => renderAllWidgets(),
+  () => {
+    if (layoutInteracting) return
+    renderAllWidgets()
+  },
   { deep: true },
 )
 

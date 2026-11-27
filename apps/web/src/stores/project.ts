@@ -17,6 +17,7 @@ import {
   createPageTemplate,
   createSymbolDefinition,
   createWidget2D,
+  isRetiredBuiltinWidgetType,
   isObject3dPanelPage,
   listNavigationPages,
   normalizeObject3DPanel,
@@ -105,6 +106,25 @@ export const useProjectStore = defineStore('project', () => {
   const liquidConfigOpen = ref(false)
   /** 打开 3D「管道流动」配置对话框 */
   const flowConfigOpen = ref(false)
+  /** 本次会话最近一次「确定」成功写入的完整流动配置（不写入工程文档，删除流动不清空） */
+  const lastAppliedFlow = ref<{
+    tagId: string
+    inMin: number
+    inMax: number
+    outMin?: number
+    outMax?: number
+    speed: number
+    stripe?: number
+    color?: string
+    duty?: number
+    axis?: 'auto' | 'x' | 'y' | 'z'
+    style?: 'skin' | 'ribbon' | 'chevron' | 'arrow' | 'stripe'
+    width?: number
+    thick?: number
+    size?: number
+    alpha?: number
+    glow?: number
+  } | null>(null)
   /** 打开 3D「跟镜头面板」2D 内容弹窗编辑器 */
   const object3dPanelEditorOpen = ref(false)
   /** 面板编辑中的 3D 对象 id */
@@ -543,6 +563,7 @@ export const useProjectStore = defineStore('project', () => {
   ): Widget2D | null {
     const page = activePage2d.value
     if (!page) return null
+    if (isRetiredBuiltinWidgetType(type)) return null
     if (type === 'scene3d' && (page.usage === 'object3d-panel' || isPanelEditMode())) return null
     if (usesLegacyPanelWidgets()) {
       const obj = getPanelEditObject()
@@ -1001,6 +1022,12 @@ export const useProjectStore = defineStore('project', () => {
 
   function closeFlowConfig() {
     flowConfigOpen.value = false
+  }
+
+  function rememberAppliedFlow(
+    opts: NonNullable<(typeof lastAppliedFlow)['value']>,
+  ) {
+    lastAppliedFlow.value = clonePlain(opts)
   }
 
   /**
@@ -1744,11 +1771,28 @@ export const useProjectStore = defineStore('project', () => {
     removeObject3ds([id])
   }
 
+  function restoreShellOpacityAfterLiquidRemoved(liquid: NonNullable<Object3DNode['liquid']>) {
+    const raw = liquid.shellOpacityBefore
+    const opacity =
+      raw != null && Number.isFinite(Number(raw)) ? Math.min(1, Math.max(0, Number(raw))) : 1
+    setObject3dShellOpacity(liquid.tankId, opacity, { recordHistory: false })
+  }
+
   function removeObject3ds(ids: string[]) {
     const page = activePage3d.value
     if (!page || !ids.length) return
     pushHistory()
     const idSet = new Set(ids)
+    const restores: Object3DNode['liquid'][] = []
+    const collectLiquidRestores = (list: Object3DNode[]) => {
+      for (const o of list) {
+        if (idSet.has(o.id) && o.liquid && !idSet.has(o.liquid.tankId)) {
+          restores.push(o.liquid)
+        }
+        if (o.children?.length) collectLiquidRestores(o.children)
+      }
+    }
+    collectLiquidRestores(page.objects)
     const strip = (list: Object3DNode[]): Object3DNode[] =>
       list
         .filter((o) => !idSet.has(o.id))
@@ -1758,6 +1802,9 @@ export const useProjectStore = defineStore('project', () => {
         }))
     page.objects = strip(page.objects)
     selectedObject3dIds.value = selectedObject3dIds.value.filter((id) => !idSet.has(id))
+    for (const liquid of restores) {
+      if (liquid) restoreShellOpacityAfterLiquidRemoved(liquid)
+    }
     bumpScene3d()
     touch()
   }
@@ -1945,11 +1992,11 @@ export const useProjectStore = defineStore('project', () => {
     })
     if (!ids.length) return 0
     selectedObject3dIds.value = ids
-    bumpScene3d()
+    // 只改选中，不 bump 场景：避免与进行中的 setPage/reload 并发，触发画布重挂后对已销毁 controller 调 setGizmoMode
     return ids.length
   }
 
-  /** 删除液位层 */
+  /** 删除液位层，并还原添加前的罐壁不透明度（由 removeObject3ds 统一处理）。 */
   function removeLiquidLevel(liquidId: string) {
     const node = findObject3dById(liquidId)
     if (!node?.liquid) return
@@ -1960,7 +2007,11 @@ export const useProjectStore = defineStore('project', () => {
    * 罐壁不透明度 0.05~1：做液位时通常调到 0.35 左右才看得见罐内液体。
    * 只补 opacity 等字段，保留用户已有的材质改动与贴图。
    */
-  function setObject3dShellOpacity(tankId: string, opacity: number) {
+  function setObject3dShellOpacity(
+    tankId: string,
+    opacity: number,
+    opts?: { recordHistory?: boolean },
+  ) {
     const tank = findObject3dById(tankId)
     if (!tank) return
     const prev = tank.material
@@ -1973,7 +2024,8 @@ export const useProjectStore = defineStore('project', () => {
       metalness: prev?.metalness ?? 0.1,
       roughness: prev?.roughness ?? 0.6,
     }
-    updateObject3d(tankId, { material: next })
+    updateObject3d(tankId, { material: next }, { recordHistory: opts?.recordHistory })
+    bumpScene3d()
   }
 
   /** 删除所有 3D 页中引用指定模型资源的对象 */
@@ -2867,6 +2919,7 @@ log('script ready · ' + (context.trigger || 'try'))
     animationConnectionTab,
     liquidConfigOpen,
     flowConfigOpen,
+    lastAppliedFlow,
     object3dPanelEditorOpen,
     object3dModelEditorOpen,
     drawTool,
@@ -2922,6 +2975,7 @@ log('script ready · ' + (context.trigger || 'try'))
     closeLiquidConfig,
     openFlowConfig,
     closeFlowConfig,
+    rememberAppliedFlow,
     openObject3dPanelEditor,
     closeObject3dPanelEditor,
     saveObject3dPanelEditor,

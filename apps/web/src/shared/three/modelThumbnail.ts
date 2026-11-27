@@ -10,11 +10,9 @@ import {
   Scene,
   Vector3,
   WebGLRenderer,
-  type Material,
-  type Mesh,
   type Object3D,
 } from 'three'
-import { loadModelObject } from '@/shared/three/modelLoader'
+import { disposeLoadedModelGraph, loadModelObject } from '@/shared/three/modelLoader'
 
 const cache = new Map<string, string>()
 const inflight = new Map<string, Promise<string | null>>()
@@ -49,21 +47,8 @@ function getRenderer(size: number): WebGLRenderer {
 }
 
 function disposeObjectTree(root: Object3D) {
-  root.traverse((obj) => {
-    const mesh = obj as Mesh
-    if (mesh.isMesh) {
-      mesh.geometry?.dispose()
-      const mats = (
-        Array.isArray(mesh.material) ? mesh.material : [mesh.material]
-      ) as Material[]
-      for (const m of mats) {
-        if (!m) continue
-        const anyMat = m as Material & { map?: { dispose?: () => void } }
-        anyMat.map?.dispose?.()
-        m.dispose()
-      }
-    }
-  })
+  // 不得释放缓存模板共享的几何/贴图，否则场景里同模型实例会一起坏掉
+  disposeLoadedModelGraph(root)
 }
 
 function cacheKey(resourceId: string, url: string, size: number, bust?: string) {
